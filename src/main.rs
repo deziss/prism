@@ -1,0 +1,79 @@
+//! PRISM — Personal Reasoning & Intelligence System for Models
+//! Entry point for the `prism` binary.
+
+use anyhow::Result;
+use clap::Parser;
+use prism::{analytics, cli, mcp, proxy};
+
+#[derive(Parser, Debug)]
+#[command(name = "prism", about = "PRISM — Enterprise Token Optimizer", version, infer_long_args = true)]
+enum Args {
+    Init {
+        #[arg(long, default_value_t = false)]
+        global: bool,
+    },
+    Gain {
+        #[arg(long, default_value_t = false)]
+        history: bool,
+    },
+    Discover,
+    Proxy {
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+    Serve {
+        #[arg(short, long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long)]
+        upstream: Option<String>,
+    },
+    Mcp {
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+    },
+    Memory {
+        #[command(subcommand)]
+        cmd: cli::MemoryCmd,
+    },
+    Graph {
+        #[command(subcommand)]
+        cmd: cli::GraphCmd,
+    },
+    Toon {
+        #[command(subcommand)]
+        cmd: cli::ToonCmd,
+    },
+    Count {
+        #[arg(short, long)]
+        string: Option<String>,
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = String::from("gpt-4"))]
+        model: String,
+    },
+    #[allow(non_camel_case_types)]
+    Cmd {
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    prism::init_prism_dirs()?;
+
+    let args = Args::parse();
+    match args {
+        Args::Init { global } => cli::init(global).await,
+        Args::Gain { history } => analytics::show_gains(history).await,
+        Args::Discover => analytics::discover().await,
+        Args::Proxy { cmd } => cli::proxy(cmd).await,
+        Args::Serve { port, upstream } => proxy::start_server(port, upstream).await,
+        Args::Mcp { port } => mcp::start_mcp_server(port).await,
+        Args::Memory { cmd } => cli::memory(cmd).await,
+        Args::Graph { cmd } => cli::graph(cmd).await,
+        Args::Toon { cmd } => cli::toon(cmd).await,
+        Args::Count { string, file, model } => cli::count(string, file, model).await,
+        Args::Cmd { args } => cli::run_command(args).await,
+    }
+}
