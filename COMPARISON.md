@@ -1,22 +1,30 @@
 # PRISM vs Competitors — Token Optimization Landscape
 
-**Date: 2026-06-03**
+**Updated: 2026-06-15**
 **Workdir: /home/anshukushwaha/95095/Backup/Desktop/learn/prism/**
 
 ---
 
 ## Executive Summary
 
-**PRISM** positions itself as an **Enterprise Token Optimizer** — a Rust CLI + MCP server + Memory Palace + GraphRAG stack. In the wider token-compression market, three projects are real and established:
-
 | Project | ⭐ Stars | Language | Focus | Stance |
-|---------|--|--|--|--|
+|---------|---------|----------|-------|--------|
 | **rtk-ai/rtk** | **58,111** | Rust | CLI output compression proxy (60-90% savings) | Largest, most established; command-level only |
-| **yvgude/lean-ctx** | **2,378** | Rust | Full context OS (67 MCP tools, 99% savings) | Most mature "full-stack" competitor; strong feature set |
-| **PRISM** (this project) | **new** | Rust | Enterprise token optimizer (TOON/TRON, 30+ filters, Memory Palace, GraphRAG, MCP) | **Differentiator**: GraphRAG + Memory Palace + structured data encoding |
-| **Zap** | ❌ Not found | — | — | Likely fictional or internal name |
-| **Headroom** | ❌ Not found | — | — | Likely a feature concept, not a standalone project |
-| **OpenWolf** | ❌ Not found | — | — | Likely a feature concept or fork variant |
+| **yvgude/lean-ctx** | **2,378** | Rust | Full context OS (67 MCP tools, 99% savings) | Most mature "full-stack" competitor |
+| **PRISM** (this project) | **new** | Rust | Enterprise token optimizer — TOON/TRON, 30+ filters, TurboVec ANN, Memory Palace, GraphRAG, CRAG, MCP | **Differentiator**: TurboVec ANN + CRAG + Memory Palace + structured encoding |
+
+---
+
+## What Changed Since Last Analysis (2026-06-03 → 2026-06-15)
+
+| Area | Before | Now |
+|------|--------|-----|
+| **Vector search** | Brute-force cosine over HashMap | **TurboVec `IdMapIndex`** — Google TurboQuant ANN, AVX-512BW SIMD, 10M docs/4GB, 4× compression |
+| **Semantic cache** | HashMap + cosine distance | sled + TurboVec ANN `find_similar()` — sub-millisecond recall |
+| **Retrieval** | Basic graph keyword search | **CRAG** (Corrective RAG) — relevance eval → re-query below threshold → merge + rank |
+| **Auth (prism-hub)** | bcrypt | **argon2** (`@node-rs/argon2`) — faster, more secure, no native compile deps |
+| **Build portability** | Hardcoded BLAS path | `build.rs` auto-detects BLAS (pkg-config → libgslcblas fallback → install hint) |
+| **Docs** | None | README.md + TROUBLESHOOT.md added |
 
 ---
 
@@ -25,198 +33,207 @@
 ### Scope & Architecture
 
 | Dimension | rtk-ai/rtk | yvgude/lean-ctx | PRISM |
-|-----------|--||--|
+|-----------|-----------|----------------|-------|
 | **Primary Role** | CLI output proxy | Cognitive context layer | Enterprise token optimizer |
 | **Language** | Rust | Rust | Rust |
-| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 5 tools + Memory Palace + GraphRAG |
-| **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) + LLMLingua |
+| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 5 tools + Memory Palace + GraphRAG + CRAG |
+| **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) |
 | **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 30+ commands |
-| **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive layers) |
-| **Code Graph** | ❌ (basic dependency graph) | Property graph (18 langs, 4 edge types) | GraphRAG (cross-file import + dependency) |
-| **Token Analytics** | ✅ Economics tracking | Context Manager dashboard + lean-ctx gain | TokenCounter (tiktoken) + per-message/cost tracking |
-| **MCP Server** | ❌ | 67 MCP tools (ctx_read, ctx_memory, ctx_graph, etc.) | 5 MCP tools (prism_encode, prism_filter, prism_memory, prism_compose, prism_analytics) |
-| **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | HTTP proxy server on configurable port |
-| **Extensions** | None (shell-only) | VS Code, Cursor, Claude Code, Copilot, Windsurf, Codex, Gemini | VS Code extension (scaffolded) |
-| **Config** | None (zero config) | TOML (.lean-ctx.toml) | YAML/prismrc |
+| **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive + sled + TurboVec ANN) |
+| **Vector Index** | ❌ | Embeddings + RRF | **TurboVec `IdMapIndex`** (TurboQuant, dim=16, AVX-512BW) |
+| **Retrieval** | ❌ | Graph search | **CRAG** — evaluate relevance → re-query if below threshold |
+| **Code Graph** | ❌ | Property graph (18 langs, 4 edge types) | GraphRAG (cross-file import + dependency) |
+| **Token Analytics** | ✅ Economics tracking | Context Manager dashboard | tiktoken-rs `cl100k_base` + per-message/cost tracking |
+| **MCP Server** | ❌ | 67 MCP tools | 5 MCP tools (memory_search, memory_save, graph_query, toon_encode, count_tokens) |
+| **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | axum HTTP proxy + TOON encoding + TurboVec semantic cache |
+| **Extensions** | None | VS Code, Cursor, Claude Code, Copilot, Windsurf, Codex, Gemini | VS Code extension (5 commands) |
+| **Hub / Backend** | ❌ | ❌ | **prism-hub** — NestJS + PostgreSQL + argon2 + JWT |
 
 ### Token Compression & Savings
 
 | Command | RTK | LeanCTX | PRISM |
-|---------|-----|---------|--|
-| `git status` | **-80%** (600/3000) | ~120 (auto) | ~70% (git dedup filter) |
-| `cargo test` | **-90%** (2500/25000) | ~80% | ~60-80% (cargo filter) |
-| File re-read (cached) | N/A | **~13 tokens** | Semantic cache |
+|---------|-----|---------|-------|
+| `git status` | **-80%** | ~120 tokens (auto) | ~70% |
+| `cargo test` | **-90%** | ~80% | ~60-80% |
+| File re-read (cached) | N/A | **~13 tokens** | TurboVec ANN cache hit |
 | TOON encoding | N/A | N/A | **45-72%** (structured data) |
 | TRON encoding | N/A | N/A | **0-20%** (visual tables) |
+| Re-query (CRAG corrected) | N/A | N/A | **+relevance** vs cold query |
 | Max claimed savings | **60-90%** | **60-99%** | **50-95%** (combined pipeline) |
 
 ### Unique Advantages
 
 | Project | Unique Strength |
-|---------|--|
-| **RTK** | Largest ecosystem (58k ⭐), 100+ commands, proven battle-tested, zero-config, <10ms overhead, economics dashboard - telemetry, star history |
-| **LeanCTX** | Most complete feature set - 10 file read modes, AST parsing (18 langs), property graph, context proofs, multi-agent support, observability, per-event savings ledger, 67 MCP tools |
-| **PRISM** | **GraphRAG** (cross-file codebase understanding), **Memory Palace** (3-layer structured persistence), **TOON/TRON structured data encoding** (unique), 5-layer token analytics pipeline |
+|---------|----------------|
+| **RTK** | Largest ecosystem (58k ⭐), 100+ commands, proven battle-tested, zero-config, <10ms overhead |
+| **LeanCTX** | Most complete feature set — 10 file read modes, AST (18 langs), property graph, context proofs, 67 MCP tools |
+| **PRISM** | **TurboVec ANN** (Google TurboQuant, no training, 10M docs/4GB) + **CRAG** (corrective re-query) + **TOON/TRON** (structured encoding) + **Memory Palace** (3-layer) + **prism-hub** (team backend) |
 
 ### Where PRISM Beats Competitors
 
-1. **Structured Data Encoding** — TOON/TRON are proprietary formats not found in RTK or LeanCTX. For API responses, config objects, and tabular data, they offer better savings than generic text filters.
+1. **TurboVec ANN Search** — `IdMapIndex` with AVX-512BW SIMD quantization. 10M docs in 4GB RAM, no training required. Neither RTK nor LeanCTX uses hardware-accelerated ANN indexing.
 
-2. **Memory Palace** — PRISM uses a 3-layer hierarchical memory system (Recall → Core → Archive) with keyword scoring and semantic cache search. LeanCTX has session memory, RTK has none.
+2. **Corrective RAG (CRAG)** — unique retrieval pipeline: retrieve → evaluate relevance → if below threshold, rewrite query with technical synonyms + broaden graph traversal → merge + rank. LeanCTX has embeddings + RRF but no corrective re-query loop.
 
-3. **GraphRAG Pipeline** — PRISM builds dependency graphs from source files and enables "how does X relate to Y" queries across files. LeanCTX has a property graph but PRISM focuses specifically on codebase reasoning.
+3. **Structured Data Encoding** — TOON/TRON are proprietary formats not found in RTK or LeanCTX. 45-72% savings on API responses, config objects, tabular data.
 
-4. **Token Analytics** — PRISM combines tiktoken-rs with per-message breakdown + project/session totals + cost estimation. LeanCTX has context proof, RTK has economics, but PRISM combines all three into one pipeline.
+4. **Memory Palace** — 3-layer hierarchy (Recall → Core → Archive) with keyword scoring, semantic cache fallback via TurboVec ANN. More granular than LeanCTX's session memory.
+
+5. **prism-hub Backend** — Team deployment backend (NestJS, PostgreSQL, Prisma, argon2 auth, JWT). No competitor offers a shared-session analytics + team config store.
+
+6. **BLAS-Accelerated Matrix Ops** — TurboVec uses OpenBLAS for `cblas_sgemm` in vector quantization. build.rs auto-detects BLAS (portable: pkg-config → gslcblas fallback).
 
 ### Where Competitors Beat PRISM
 
 | Capability | Winner | Why |
-|------------|--|-----|
-| **Maturity/Ecosystem** | RTK | 58k stars vs new; 10+ years of community trust |
+|------------|--------|-----|
+| **Maturity/Ecosystem** | RTK | 58k stars vs new; community trust |
 | **File read modes** | LeanCTX | 10 modes (full, map, signatures, diff, lines:N-M) vs none in PRISM |
-| **Language support** | LeanCTX | AST parsing for 18 languages vs none in PRISM |
+| **Language support** | LeanCTX | AST parsing for 18 languages |
 | **MCP tool count** | LeanCTX | 67 tools vs PRISM's 5 |
 | **Multi-agent** | LeanCTX | Agent handoff + shared state + diary |
-| **Context proofs** | LeanCTX | 4-layer verification + CI drift gates + token transparency |
+| **Context proofs** | LeanCTX | 4-layer verification + CI drift gates |
 | **Zero-config** | RTK | Works immediately vs PRISM requires init |
-| **Compressiveness** | LeanCTX | Up to 99% vs PRISM 50-95% |
+| **Max compression** | LeanCTX | Up to 99% vs PRISM 50-95% |
 
 ---
 
-## PRISM Positioning on the Market
+## PRISM Architecture — Current State
 
 ```
-                        High Feature Set
-                             |
-         LeanCTX     PRISM  |         RTK
-         [Maturity]  [Differentiator]   [Scale]
-                             |
-            ─────────────────┼────────────────
-            Low Feature Set  |  High Command Coverage
+prism/
+├── CLI (14 subcommands)
+│   ├── filter.rs     — 30+ RTK-compatible output filters
+│   ├── cli.rs        — subcommand dispatch
+│   └── hook.rs       — shell hook install/uninstall
+│
+├── Proxy (axum)
+│   ├── proxy.rs      — HTTP reverse proxy
+│   ├── encode.rs     — TOON/TRON encoding
+│   └── cache.rs      — sled + TurboVec ANN semantic cache
+│
+├── Knowledge
+│   ├── graph_rag.rs  — GraphRAG cross-file dependency analysis
+│   └── crag.rs       — Corrective RAG (relevance eval + re-query)
+│
+├── Memory
+│   └── memory.rs     — MemoryPalace 3-layer + TurboVec search
+│
+├── Vector
+│   └── vector.rs     — TurboVecIndex (IdMapIndex, dim=16, bit_width=2)
+│
+├── MCP (axum)
+│   └── mcp.rs        — 5 MCP tools over HTTP
+│
+└── Analytics
+    └── analytics.rs  — tiktoken-rs cl100k_base + gain dashboard
 ```
 
-**RTK** dominates **volume** — it's the standard for CLI output compression. Everyone knows RTK.
-
-**LeanCTX** dominates **completeness** — it's the full context OS for coding agents.
-
-**PRISM** differentiates through **structured encoding + GraphRAG + Memory Palace** — three things neither RTK nor LeanCTX offer together:
-- TOON/TRON for structured data objects (not text)
-- GraphRAG for cross-file code reasoning
-- Memory Palace for persistent knowledge layers
+```
+prism-hub/ (team backend)
+├── backend/          — NestJS + Prisma + PostgreSQL
+│   ├── auth/         — argon2 + JWT
+│   ├── users/
+│   ├── analytics/
+│   └── prisma/       — migrations
+└── frontend/         — nginx-served SPA
+```
 
 ---
 
-## Feature Detail Comparison
-
-### Token Compression Methods
-
-| Method | RTK | LeanCTX | PRISM |
-|--------|-----|---------|-------|
-| Syntax-aware filtering | ✅ (4 strategies) | ✅ (18 langs AST) | ✅ (30+ command filters) |
-| Semantic compression | ❌ | ✅ (embeddings + RRF) | ✅ (pseudo-embedding cosine) |
-| Structured data encoding | ❌ | ❌ | **✅ (TOON/TRON)** |
-| Graph-based relevance | ❌ | ✅ (property graph) | **✅ (GraphRAG pipeline)** |
-| Multi-layer persistence | ❌ | ✅ | **✅ (Memory Palace)** |
-| Token counting | ✅ | ✅ | **✅ (tiktoken + cost)** |
-| Session memory | ❌ | ✅ (CCP) | **✅ (3 levels)** |
-| Cross-file queries | ❌ | ✅ | **✅ (GraphRAG)** |
-
-### Architecture
+## Token Compression Architecture Compared
 
 ```
 RTK:
   CLI → [Smart Filter] → [Group] → [Truncate] → [Dedup] → Model
 
 LeanCTX:
-  MCP Server → [10 Read Modes] + [AST Parser] + [Property Graph] 
+  MCP Server → [10 Read Modes] + [AST Parser] + [Property Graph]
              → [Session Memory] + [Context Proof] + [Dashboard]
-  
+
 PRISM:
-  CLI (14 subcmds) → [TOON/TRON Encoder] + [30+ Filters]
-                   → [Semantic Cache] + [Memory Palace]
-                   → [GraphRAG Pipeline] + [MCP Server (5 tools)]
-                   → [TokenCounter Analytics Pipeline]
+  CLI (14 subcmds) → [30+ Filters] + [TOON/TRON Encoder]
+                   → [TurboVec ANN Cache] + [Memory Palace]
+                   → [CRAG Pipeline] + [GraphRAG]
+                   → [MCP Server (5 tools)] + [TokenCounter Analytics]
 ```
 
-### Command Coverage Comparison
+---
 
-| Command Category | RTK | LeanCTX | PRISM |
-|-----------------|-----|---------|-------|
-| git | ✅ (status, log, diff, add/commit/push) | ✅ (56 modules) | ✅ (dedup filter) |
-| cargo/build | ✅ (cargo test/clippy/build/check) | ✅ (270 rules) | ✅ (filter_cargo) |
-| docker/k8s | ✅ (docker ps, k8s commands) | ✅ | ✅ (k8s_dedup filter) |
-| file reading | ❌ (shell only) | ✅ (10 modes + AST) | **❌ (missing)** |
-| package managers | ✅ (npm, pip, etc.) | ✅ | ✅ (filter_package) |
-| cloud/infra | ✅ (aws, gcloud, terraform) | ✅ | ✅ (cloud/iac filters) |
-| structured data | ❌ | ❌ | **✅ (TOON/TRON objects)** |
-| grep/search | ✅ | ✅ | ✅ (filter_grep) |
-| filesystem | ✅ (ls, tree, find) | ✅ | ✅ (filesystem filter) |
-| network | ✅ (ssh, curl, ping) | ✅ | ✅ (filter_network) |
+## Positioning Map
+
+```
+                        High Feature Set
+                              |
+          LeanCTX      PRISM  |
+          [Maturity]   [ANN+CRAG]
+                              |
+             ─────────────────┼────────────────
+                              |  High Command Coverage
+                         RTK  |
+                         [Scale]
+```
+
+---
+
+## PRISM Gap Analysis — Priority Backlog
+
+| Priority | Feature | Why | Impact |
+|----------|---------|-----|--------|
+| **Critical** | File read modes (`prism read`) | Missing vs LeanCTX 10-mode parity | ⬆️ Highest |
+| **Critical** | AST language parsing | No code understanding beyond imports | ⬆️ High |
+| **High** | Expand MCP to 20+ tools | LeanCTX has 67 vs PRISM's 5 | ⬆️ Medium |
+| **High** | TurboVec save/load persistence | Index rebuilt from sled on every restart | ⬆️ Medium |
+| **Medium** | Context proofs / verification | LeanCTX 4-layer verification | ⬆️ Low-Medium |
+| **Medium** | CRAG threshold tuning per project | Fixed 0.4 threshold not always optimal | ⬆️ Medium |
+| **Low** | Multi-agent support | LeanCTX has agent handoff | ⬆️ Low |
+| **Low** | Token transparency ledger | LeanCTX SHA-256 savings ledger | ⬆️ Low |
 
 ---
 
 ## Recommendation Matrix
 
 ### Use RTK when:
-- You want **plug-and-drop** compression with zero config
-- You need **battle-tested** reliability (58k users)
-- You're happy with **CLI-only** (no structured data encoding)
-- **Cost-per-hour** analysis matters to you
+- **Zero-config** needed — plug in and it works
+- **100+ commands** out of the box
+- **Battle-tested reliability** matters (58k users)
+- You want **CLI-only** compression
 
 ### Use LeanCTX when:
-- You need a **full context OS** for AI agents
-- **File read fidelity modes** (map, signatures, diff) matter
-- **Multi-agent coordination** is needed
-- **Context proofs and governance** are requirements
-- You want the **largest MCP ecosystem** (67 tools)
+- Full **context OS** for AI agents
+- **File read fidelity** modes (map, signatures, diff)
+- **Multi-agent coordination**
+- **Context proofs and governance**
+- **Largest MCP ecosystem** (67 tools)
 
 ### Use PRISM when:
-- You're working with **structured data objects** (APIs, configs, databases)
-- **Cross-file code reasoning** (GraphRAG) is important
-- **Persistent knowledge layers** (Memory Palace) are needed
-- You want a **combined analytics pipeline** (count → compress → track cost)
-- You're building an **enterprise/internal tool** around token optimization
+- **Structured data** (APIs, configs, databases) — TOON/TRON encoding
+- **Cross-file code reasoning** — GraphRAG queries
+- **Corrective retrieval** — CRAG re-queries below relevance threshold
+- **Persistent knowledge layers** — Memory Palace 3-layer
+- **Team deployment** — prism-hub backend (PostgreSQL, argon2, JWT)
+- **Hardware-accelerated ANN** — TurboVec (AVX-512BW, no training)
 
 ### Combined approach (recommended for power users):
 ```
-RTK (CLI proxy) + PRISM (structured encoding + GraphRAG)
+RTK (CLI proxy) + PRISM (ANN cache + CRAG + GraphRAG + structured encoding)
 ```
-RTK handles the raw CLI output. PRISM handles structured data encoding, cross-file analysis, and persistent memory.
 
 ---
 
-## PRISM Competitive Moat
+## Competitive Moat Summary
 
-1. **TOON/TRON Structured Encoding** — No competitor offers tabular/JSON object encoding formats. This is PRISM's **unique value proposition**.
-2. **3-Layer Memory Palace** — Recall → Core → Archive hierarchy with keyword scoring and semantic cache search. Only PRISM and LeanCTX have this; PRISM's 3-layer model is more granular.
-3. **GraphRAG Pipeline** — Direct codebase reasoning queries that neither RTK nor LeanCTX provide at the same level of integration.
-4. **Single-binary economics** — Unlike LeanCTX (heavy ecosystem), PRISM aims to be a focused enterprise toolkit.
-
----
-
-## PRISM Gap Analysis — What to Build Next
-
-| Priority | Feature | Why | Impact |
-|----------|---------|-----|--------|
-| **Critical** | Add file read modes (lean-ctx parity) | PRISM has no `read` command | ⬆️ Highest |
-| **Critical** | AST language parsing (LeanCTX parity) | PRISM has no code understanding beyond imports | ⬆️ High |
-| **High** | Expand MCP to 20+ tools | LeanCTX has 67, RTK has 0 | ⬆️ Medium |
-| **High** | Add file read command (`prism read`) | Missing core UX feature vs competitors | ⬆️ High |
-| **Medium** | Context proofs / verification | LeanCTX has 4-layer verification | ⬆️ Low-Medium |
-| **Low** | Multi-agent support | LeanCTX has agent handoff | ⬆️ Low |
-| **Low** | Token transparency ledger | LeanCTX has SHA-256 savings ledger | ⬆️ Low |
+| Moat | PRISM | RTK | LeanCTX |
+|------|-------|-----|---------|
+| TurboVec ANN (TurboQuant, AVX-512BW) | ✅ | ❌ | ❌ |
+| CRAG corrective re-query | ✅ | ❌ | ❌ |
+| TOON/TRON structured encoding | ✅ | ❌ | ❌ |
+| Memory Palace 3-layer | ✅ | ❌ | partial |
+| Team hub backend | ✅ | ❌ | ❌ |
+| 58k+ ecosystem | ❌ | ✅ | ❌ |
+| 67 MCP tools | ❌ | ❌ | ✅ |
+| AST parsing (18 langs) | ❌ | ❌ | ✅ |
 
 ---
 
-## Conclusion
-
-PRISM is a **novel, focused competitor** in the token optimization space. It doesn't try to be everything (RTK has 100+ commands, LeanCTX has 67 MCP tools). Instead, PRISM carves out a unique niche with:
-
-1. **TOON/TRON** — structured data encoding (no one else has this)
-2. **GraphRAG** — cross-file code reasoning (LeanCTX has graphs but PRISM specializes in code queries)
-3. **Memory Palace** — persistent knowledge hierarchy (more granular than LeanCTX's session memory)
-
-PRISM's biggest gap vs the competition is **file reading modes** — the ability to smartly read code (signatures, diffs, AST views). Adding this (even just 3-4 modes) would bring PRISM to "competitive parity" with LeanCTX on the most valuable dimension: reducing context waste on the primary operation (reading source code).
-
----
-*Analysis based on GitHub data (2026-06-03). RTK: 58,111 ⭐, LeanCTX: 2,378 ⭐. PRISM: newly rebuilt (Rust 2021).*
+*Analysis updated 2026-06-15. RTK: 58,111 ⭐, LeanCTX: 2,378 ⭐. PRISM: rebuilt 2026-06 (Rust 2021).*
