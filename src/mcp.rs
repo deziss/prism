@@ -27,7 +27,7 @@ pub async fn start_mcp_server(port: u16) -> Result<()> {
         .route("/health", any(health))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("PRISM MCP server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
