@@ -28,6 +28,13 @@ pub enum ToonCmd {
     Decode { input: String },
 }
 
+#[derive(Parser, Debug)]
+pub enum HookCmd {
+    Install,
+    Validate,
+    Audit,
+}
+
 fn data_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -42,10 +49,115 @@ pub async fn init(global: bool) -> Result<()> {
     crate::hook::install(global).await?;
     init_data_dirs().await?;
 
+    // Generate CA cert (needed for MITM proxy)
+    let ca = crate::proxy::ensure_ca()?;
+    let ca_path = crate::proxy::ca_dir().join("ca.crt");
+    println!("  CA cert:      {}", ca_path.display());
+
+    if global {
+        // Write env vars to shell rc files
+        write_shell_env(ca_path.to_str().unwrap_or(""))?;
+
+        // Try to install CA to system trust store (requires sudo)
+        match crate::proxy::install_ca_system(&ca.cert_pem) {
+            Ok(msg) => println!("  System trust: {}", msg),
+            Err(_) => {
+                println!("  System trust: manual install required:");
+                println!("    Linux: sudo cp {} /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates", ca_path.display());
+                println!("    macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}", ca_path.display());
+            }
+        }
+
+        // Write Claude Code MCP config
+        write_claude_mcp_config()?;
+    }
+
     println!("\nPRISM initialized ({scope}).");
-    println!("  Hook engine:  installed");
     println!("  Data dir:     {}", data_dir().display());
+    println!("\nNext steps:");
+    println!("  prism serve --port 8080    # start transparent LLM proxy");
+    println!("  prism mcp   --port 3003    # start MCP server for Claude Code");
+    if global {
+        println!("  source ~/.bashrc           # reload shell env vars");
+        println!("  claude mcp add prism --transport http http://localhost:3003");
+    }
     println!("\nRun `prism gain` to see token savings.");
+    Ok(())
+}
+
+fn write_shell_env(ca_cert_path: &str) -> Result<()> {
+    let block = format!(
+        "\n# PRISM — transparent LLM proxy (added by `prism init --global`)\n\
+         export HTTP_PROXY=http://localhost:8080\n\
+         export HTTPS_PROXY=http://localhost:8080\n\
+         export NO_PROXY=localhost,127.0.0.1\n\
+         export PRISM_HUB_URL=http://localhost:3002\n\
+         export NODE_EXTRA_CA_CERTS={ca}\n\
+         export REQUESTS_CA_BUNDLE={ca}\n\
+         export SSL_CERT_FILE={ca}\n\
+         # end PRISM\n",
+        ca = ca_cert_path
+    );
+
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+    let rc_files = [".bashrc", ".zshrc", ".profile"];
+    let mut wrote = false;
+
+    for rc in &rc_files {
+        let path = home.join(rc);
+        if path.exists() {
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            if !existing.contains("PRISM — transparent LLM proxy") {
+                let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+                use std::io::Write;
+                write!(f, "{}", block)?;
+                println!("  Shell env:    written to ~/{}", rc);
+                wrote = true;
+            } else {
+                println!("  Shell env:    already in ~/{} (skipped)", rc);
+                wrote = true;
+            }
+        }
+    }
+
+    if !wrote {
+        // Create ~/.bashrc if none exist
+        let path = home.join(".bashrc");
+        std::fs::write(&path, format!("#!/usr/bin/env bash{}", block))?;
+        println!("  Shell env:    created ~/.bashrc");
+    }
+
+    Ok(())
+}
+
+fn write_claude_mcp_config() -> Result<()> {
+    let config_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~"))
+        .join(".claude");
+    std::fs::create_dir_all(&config_dir)?;
+
+    let settings_path = config_dir.join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Add/update mcpServers.prism
+    let mcp = settings
+        .as_object_mut()
+        .unwrap();
+    mcp.entry("mcpServers").or_insert(serde_json::json!({}));
+    if let Some(servers) = mcp.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        servers.insert("prism".to_string(), serde_json::json!({
+            "type": "http",
+            "url": "http://localhost:3003"
+        }));
+    }
+
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    println!("  Claude MCP:   written to ~/.claude/settings.json");
     Ok(())
 }
 
@@ -112,6 +224,60 @@ pub async fn count(
     };
     let tokens = crate::analytics::count_tokens(&text, &model)?;
     println!("{tokens}");
+    Ok(())
+}
+
+// --- hook (lifecycle hooks: repeated-read detection, write validation) ---
+pub async fn hook(cmd: HookCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let system = crate::hooks::HookSystem::new(&root);
+    match cmd {
+        HookCmd::Install => {
+            let msg = system.install().map_err(|e| anyhow::anyhow!(e))?;
+            println!("{msg}");
+        }
+        HookCmd::Validate => println!("{}", system.validate()),
+        HookCmd::Audit => println!("{}", crate::hooks::hook_audit_stats(&root.join(".prism"))),
+    }
+    Ok(())
+}
+
+// --- compress (LLMLingua-style context compression) ---
+pub async fn compress(
+    string: Option<String>,
+    file: Option<std::path::PathBuf>,
+    ratio: f64,
+) -> Result<()> {
+    let text = if let Some(s) = string {
+        s
+    } else if let Some(f) = file {
+        std::fs::read_to_string(f)?
+    } else {
+        anyhow::bail!("Use --string or --file");
+    };
+    let out = crate::compress::compress(&text, ratio);
+    println!("{}", out.compressed);
+    eprintln!(
+        "[prism] {} -> {} tokens ({:.1}% saved)",
+        out.original_tokens, out.compressed_tokens, out.savings_pct
+    );
+    Ok(())
+}
+
+// --- vscode (generate VS Code extension scaffold) ---
+pub async fn vscode_gen(output: std::path::PathBuf) -> Result<()> {
+    std::fs::create_dir_all(output.join("out"))?;
+    std::fs::write(
+        output.join("package.json"),
+        crate::vscode::ExtensionManifest::generate(),
+    )?;
+    std::fs::write(
+        output.join("out").join("extension.js"),
+        crate::vscode::ExtensionManifest::generate_extension_js(),
+    )?;
+    println!("VS Code extension scaffold written to {}", output.display());
+    println!("  package.json");
+    println!("  out/extension.js");
     Ok(())
 }
 

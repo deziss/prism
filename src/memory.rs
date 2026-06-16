@@ -284,6 +284,10 @@ fn memory_palace_dir() -> std::path::PathBuf {
         .join("prism")
 }
 
+pub fn memory_palace_dir_pub() -> std::path::PathBuf {
+    memory_palace_dir()
+}
+
 pub async fn search(query: &str) -> anyhow::Result<()> {
     let palace = MemoryPalace::new(memory_palace_dir()).map_err(|e| anyhow::anyhow!(e))?;
     let results = palace.search(query, 10);

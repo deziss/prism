@@ -33,7 +33,17 @@ tokio = { version = "1.40", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+hyper = { version = "1.0", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+
+# TLS for MITM proxy
+rcgen = "0.12"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2.1"
+webpki-roots = "0.26"
 
 # Vector index (TurboQuant — 10M docs/4GB, AVX-512BW SIMD)
 turbovec = "0.2"
@@ -51,6 +61,8 @@ tracing-appender = "0.2"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
+# Pin time to avoid rcgen/time 0.3.48 From trait coherence conflict (E0119)
+time = "=0.3.36"
 
 # Utilities
 dirs = "5.0"

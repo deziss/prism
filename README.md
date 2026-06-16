@@ -1,174 +1,107 @@
-# PRISM
+# PRISM — Personal Reasoning & Intelligence System for Models
 
-**Personal Reasoning & Intelligence System for Models**
+PRISM intercepts every LLM API call on your system — from browser, terminal, scripts, or any app — compresses prompts before sending, and tracks token usage per user. No API keys stored. No code changes required. One command setup.
 
-Enterprise-grade token optimizer CLI for AI coding tools. Single Rust binary, zero runtime dependencies, 60–90% token reduction on common dev operations.
-
----
-
-## Features
-
-| Category | Capability |
-|----------|-----------|
-| **RTK Filters** | 30+ command-specific output filters (git, cargo, pytest, kubectl, docker, gh, tsc, jest, vitest, …) |
-| **Proxy** | HTTP reverse proxy with TOON/TRON encoding, semantic cache, response compression |
-| **Memory Palace** | 3-layer hierarchical persistence (Recall → Core → Archive) backed by JSONL + sled |
-| **GraphRAG** | Cross-file codebase dependency analysis, Obsidian export |
-| **CRAG** | Corrective Retrieval-Augmented Generation — auto re-queries below relevance threshold |
-| **TurboVec** | Google TurboQuant ANN index (10M docs / 4GB, AVX-512BW SIMD, 4× compression) |
-| **MCP Server** | 5-tool Model Context Protocol server over HTTP (axum) |
-| **Token Counter** | tiktoken-rs `cl100k_base` — accurate token counts per model |
-| **Analytics** | Gain dashboard, command history, session discovery |
-| **VS Code Extension** | 5 commands, proxy port config, integrated terminal launch |
+```
+Before: Your app ──────────────────────────────────► api.openai.com  (2000 tokens, $0.01)
+After:  Your app → PRISM proxy → compress → forward ► api.openai.com  (600 tokens, $0.003)
+                                  ↓
+                              Dashboard (token savings, cost, cache hits)
+```
 
 ---
 
-## Quick Start
+## Quick Install — System (Rust binary)
 
 ```bash
-# Build
-cargo build --release
+# 1. Build and install
+cargo install --path .
 
-# Install
-cp target/release/prism ~/.local/bin/
+# 2. One-time setup: CA cert + shell env + Claude Code MCP config
+sudo prism init --global
 
-# Initialize (writes CLAUDE.md hook instructions)
-prism init --global
+# 3. Reload shell
+source ~/.bashrc   # or ~/.zshrc
 
-# Token savings dashboard
-prism gain
+# 4. Start the proxy (intercepts all HTTPS traffic to AI providers)
+prism serve --port 8080
 
-# Run any command through PRISM filters
-prism git status
-prism cargo test
-prism pytest
-
-# Count tokens in text or file
-prism count --string "Hello world"
-prism count --file src/main.rs --model gpt-4
+# 5. Start the MCP server (for Claude Code tool integration)
+prism mcp --port 3003
 ```
+
+`prism init --global` does all of:
+- Generates PRISM CA certificate at `~/.local/share/prism/ca/ca.crt`
+- Installs CA cert to system trust store (`update-ca-certificates` on Linux, `security` on macOS)
+- Appends to `~/.bashrc` and `~/.zshrc`:
+  ```bash
+  export HTTP_PROXY=http://localhost:8080
+  export HTTPS_PROXY=http://localhost:8080
+  export NO_PROXY=localhost,127.0.0.1
+  export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt
+  export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt
+  export SSL_CERT_FILE=~/.local/share/prism/ca/ca.crt
+  ```
+- Writes Claude Code MCP config to `~/.claude/settings.json`
 
 ---
 
-## Subcommands
-
-```
-prism init [--global]              Write RTK hook instructions to CLAUDE.md
-prism gain [--history]             Token savings dashboard / command history
-prism discover                     Analyze Claude Code sessions for missed savings
-prism proxy <cmd...>               Run command without filters (debug)
-prism serve [--port 8080]          Start HTTP proxy (upstream: OpenAI-compatible API)
-  [--upstream http://...]
-prism mcp [--port 9090]            Start MCP server (5 tools)
-prism memory search <query>        Search Memory Palace
-prism memory save <key> <value>    Save to Memory Palace
-prism memory list                  List all memory blocks
-prism memory stats                 Memory layer statistics
-prism memory compact               Evict oldest Recall blocks
-prism graph query <query>          Query knowledge graph
-prism graph extract <url|file>     Extract knowledge from source
-prism graph export [--output dir]  Export to Obsidian vault
-prism graph stats                  Graph statistics
-prism toon encode <json>           Encode JSON to TOON tabular format
-prism toon decode <toon>           Decode TOON back to JSON
-prism count [--string|-f <file>]   Count tokens
-  [--model cl100k_base]
-prism <any command>                Pass-through with RTK filtering
-```
-
----
-
-## Command Filters (RTK-compatible)
+## Quick Install — Docker (all-in-one)
 
 ```bash
-prism git status / diff / log / branch / add / commit / push / pull
-prism cargo build / test / check / clippy / doc
-prism pytest / jest / vitest / rspec / rake test / go test
-prism tsc / eslint / lint / prettier --check
-prism docker ps / images / logs
-prism kubectl get / logs
-prism gh pr view / pr checks / run list / issue list
-prism pnpm / npm / npx
-prism grep / find / ls
-prism aws / psql / dotnet / mypy / ruff / rubocop / pip
-prism next build / prisma migrate
+# Start PRISM Hub (dashboard + API) + proxy + MCP server
+cd prism-hub
+docker compose --profile tools up -d
+
+# Services:
+#   localhost:5174   Dashboard (frontend)
+#   localhost:3002   API (backend)
+#   localhost:8080   Transparent proxy
+#   localhost:3003   MCP server
+
+# One-time: trust the CA cert from Docker volume
+cat prism_data/ca/ca.crt | sudo tee /usr/local/share/ca-certificates/prism.crt
+sudo update-ca-certificates
+
+# Set proxy for current shell
+export HTTP_PROXY=http://localhost:8080
+export HTTPS_PROXY=http://localhost:8080
+export REQUESTS_CA_BUNDLE=$PWD/prism_data/ca/ca.crt
 ```
 
 ---
 
-## Architecture
+## Browser Setup
 
-```
-prism/
-├── src/
-│   ├── main.rs          — CLI entry point (clap, 14 subcommands)
-│   ├── lib.rs           — Module exports + prism_data_dir()
-│   ├── filter.rs        — 30+ RTK-compatible output filters
-│   ├── cli.rs           — Subcommand handlers
-│   ├── proxy.rs         — axum HTTP proxy + TOON encoding
-│   ├── mcp.rs           — MCP server (5 tools)
-│   ├── cache.rs         — SemanticCache: sled + TurboVec ANN
-│   ├── vector.rs        — TurboVecIndex (IdMapIndex wrapper, dim=16)
-│   ├── memory.rs        — MemoryPalace 3-layer + async API
-│   ├── analytics.rs     — tiktoken-rs token counting + gain dashboard
-│   ├── encode.rs        — TOON/TRON encoding/decoding
-│   ├── compress.rs      — Output compression
-│   ├── hook.rs          — Shell hook install/uninstall
-│   ├── config.rs        — Configuration management
-│   ├── utils.rs         — Shared utilities
-│   ├── vscode.rs        — VS Code extension types
-│   └── knowledge/
-│       ├── mod.rs       — GraphRAG API + async wrappers
-│       ├── graph_rag.rs — Dependency graph analysis
-│       └── crag.rs      — Corrective RAG (re-query below threshold)
-├── extensions/vscode/   — VS Code extension
-├── build.rs             — Portable BLAS detection for turbovec
-├── .cargo/config.toml   — Build config
-└── .blas-link/          — Machine-local BLAS symlinks (gitignored)
-```
+After starting the proxy, configure your browser to use `localhost:8080` as HTTP/HTTPS proxy:
+
+- **Chrome/Chromium**: Settings → System → Open proxy settings → set HTTP and HTTPS proxy to `localhost:8080`
+- **Firefox**: Settings → Network → Manual proxy → HTTP proxy: `localhost:8080`
+- **System-wide** (Linux GNOME): Settings → Network → Proxy → Manual → HTTP/HTTPS: `localhost:8080`
+
+The PRISM CA cert must be trusted in the browser too:
+- **Chrome**: Settings → Privacy → Manage certificates → Import `~/.local/share/prism/ca/ca.crt`
+- **Firefox**: Settings → Privacy → Certificates → Import → select `ca.crt`, trust for websites
 
 ---
 
-## Data Directory Layout
+## Claude Code MCP Integration
 
-```
-~/.local/share/prism/
-├── sessions/
-│   ├── recall/blocks.jsonl    # Short-term memory
-│   ├── core/blocks.jsonl      # Mid-term memory
-│   └── archive/blocks.jsonl   # Long-term memory
-├── cache/
-│   └── sled/                  # TurboVec + sled semantic cache
-├── graph/
-│   ├── entities.jsonl
-│   └── relationships.jsonl
-├── analytics/
-│   └── commands.jsonl         # Command history for gain dashboard
-└── hooks/                     # Shell hook scripts
+```bash
+# Add PRISM as an MCP server in Claude Code
+claude mcp add prism --transport http http://localhost:3003
+
+# Verify tools are visible
+claude mcp list
 ```
 
----
-
-## MCP Tools
-
-The `prism mcp` server exposes these tools to Claude / other MCP clients:
-
-| Tool | Description |
-|------|-------------|
-| `prism_memory_search` | Search Memory Palace by query string |
-| `prism_memory_save` | Save key-value pair to Memory Palace |
-| `prism_graph_query` | Query knowledge graph |
-| `prism_toon_encode` | Encode JSON to TOON tabular format |
-| `prism_count_tokens` | Count tokens with tiktoken-rs |
-
-Connect from Claude Code:
+Or set it manually in `~/.claude/settings.json`:
 ```json
-// .claude/settings.json
 {
   "mcpServers": {
     "prism": {
       "type": "http",
-      "url": "http://localhost:9090"
+      "url": "http://localhost:3003"
     }
   }
 }
@@ -176,66 +109,94 @@ Connect from Claude Code:
 
 ---
 
-## System Requirements
+## Available MCP Tools
 
-| Requirement | Minimum |
-|-------------|---------|
-| Rust | 1.75+ (2021 edition) |
-| OS | Linux x86_64, macOS (Apple Silicon or Intel) |
-| BLAS | `libopenblas-dev` or `libgsl-dev` (for turbovec) |
-| OpenSSL | `libssl-dev` (for reqwest TLS) |
-
-### Install system dependencies
-
-**Ubuntu / Debian:**
-```bash
-sudo apt-get install libopenblas-dev libssl-dev pkg-config
-```
-
-**Fedora / RHEL:**
-```bash
-sudo dnf install openblas-devel openssl-devel pkgconfig
-```
-
-**macOS:**
-```bash
-brew install openblas openssl
-```
-
-> See [TROUBLESHOOT.md](TROUBLESHOOT.md) if `cargo build` fails with BLAS or OpenSSL errors.
+| Tool | Description | Example |
+|------|-------------|---------|
+| `prism_count_tokens` | Count tokens in text (tiktoken cl100k) | `{"text": "hello world"}` → `2 tokens` |
+| `prism_compress` | Compress text using BM25 scoring | `{"text": "...", "ratio": 0.5}` → compressed text |
+| `prism_memory_search` | Search memory palace by query | `{"query": "authentication flow"}` |
+| `prism_memory_save` | Save text to memory palace | `{"content": "key fact", "tags": ["auth"]}` |
+| `prism_graph_query` | Query knowledge graph | `{"query": "what modules use auth?"}` |
+| `prism_toon_encode` | TOON semantic encoding for vectors | `{"text": "concept to encode"}` |
 
 ---
 
-## Key Dependencies
+## How Token Monitoring Works
 
-| Crate | Purpose |
-|-------|---------|
-| `turbovec = "0.2"` | TurboQuant ANN index (Google Research, low-memory) |
-| `tiktoken-rs = "0.6"` | OpenAI-compatible token counting |
-| `axum = "0.8"` | HTTP server for proxy + MCP |
-| `sled = "0.34"` | Embedded key-value store for semantic cache |
-| `clap = "4.5"` | CLI argument parsing |
-| `colored = "2.1"` | Colored terminal output |
-| `tokio = "1.40"` | Async runtime |
-| `petgraph = "0.7"` | Knowledge graph data structure |
-| `tiktoken-rs = "0.6"` | `cl100k_base` BPE tokenizer |
+Every request through the proxy is logged with:
 
----
+| Field | Description |
+|-------|-------------|
+| `api_key_hash` | First 8 chars of hashed API key — never stored in full |
+| `provider` | `openai`, `anthropic`, `gemini`, `mistral`, `cohere` |
+| `model` | e.g. `gpt-4o-mini`, `claude-3-5-sonnet` |
+| `orig_tokens` | Tokens in original request |
+| `sent_tokens` | Tokens actually sent (after compression) |
+| `resp_tokens` | Tokens in response |
+| `cost_usd` | Estimated cost using public pricing |
+| `latency_ms` | Round-trip time |
+| `cache_hit` | Whether response was served from semantic cache |
+| `compression_ratio` | `sent/orig` — lower = more compression |
 
-## prism-hub
-
-`prism-hub` is a companion NestJS/PostgreSQL service for team deployments.
-It stores session metadata, team/project configs, user settings, and analytics aggregates.
-Local PRISM data (memory JSONL, TurboVec index, knowledge graph) stays on each machine.
-
-See `/home/anshukushwaha/Desktop/learn/prism-hub/` for the hub backend + frontend.
-
-**Auth:** JWT + argon2 password hashing  
-**DB:** PostgreSQL via Prisma ORM  
-**API:** NestJS with Swagger docs at `/api/docs`
+Events are written to `~/.local/share/prism/analytics/proxy_events.jsonl` and also sent to PRISM Hub (if `PRISM_HUB_URL` is set) for dashboard display.
 
 ---
 
-## License
+## Compression Pipeline
 
-UNLICENSED — private project.
+For each request body (JSON with `messages[].content`):
+
+1. **Token count** — tiktoken cl100k accurate count
+2. **Skip if small** — pass through unchanged if < 500 tokens
+3. **BM25 sentence scoring** — TF-IDF weight per sentence, boost code definitions (`fn`, `def`, `class`), headers (`#`), error lines
+4. **Greedy selection** — keep top sentences to hit `target_ratio` (default 0.75)
+5. **Re-join in original order** — preserves flow
+6. **Anthropic cache injection** — add `cache_control: {"type":"ephemeral"}` on system prompts automatically (90% cost reduction on repeated contexts)
+
+Typical compression: 30-50% reduction. For large repeated system prompts with Anthropic: 90% reduction via caching.
+
+---
+
+## Architecture
+
+```
+Browser / terminal / scripts / any app
+         │
+         │  HTTP_PROXY=http://localhost:8080
+         │  HTTPS_PROXY=http://localhost:8080
+         ▼
+PRISM Proxy  :8080
+   ├── HTTP CONNECT tunnel
+   ├── Per-domain TLS cert (signed by PRISM CA)
+   ├── Detect AI provider by hostname
+   ├── Compress messages[] content (BM25)
+   ├── Inject Anthropic cache_control
+   ├── Forward with original headers (API key unchanged)
+   ├── Log telemetry → PRISM Hub + local JSONL
+   └── Non-AI hosts → raw passthrough
+         │
+         ▼
+api.openai.com / api.anthropic.com / etc.
+
+PRISM MCP  :3003
+   └── JSON-RPC 2.0 → Claude Code tools
+
+PRISM Hub  :3002 / :5174
+   └── Dashboard, analytics, per-user tracking
+```
+
+---
+
+## CLI Reference
+
+```bash
+prism init --global          # One-time setup (CA cert + shell env + MCP config)
+prism serve --port 8080      # Start transparent HTTPS proxy
+prism mcp --port 3003        # Start MCP server
+prism compress --file f.txt --ratio 0.5    # Compress a file
+prism compress --string "..." --ratio 0.7  # Compress inline text
+prism memory search "query"  # Search memory
+prism memory save "content"  # Save to memory
+prism graph query "question" # Query knowledge graph
+```

@@ -252,7 +252,7 @@ fn load_community_reports() -> Result<Vec<KnowledgeCommunityReport>> {
     Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
-fn search_graph(query: &str) -> Result<Vec<String>> {
+pub fn search_graph(query: &str) -> Result<Vec<String>> {
     let entities = load_all_entities()?;
     let query_lower = query.to_lowercase();
     Ok(entities
