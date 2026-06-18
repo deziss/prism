@@ -11,7 +11,7 @@
 |---------|---------|----------|-------|--------|
 | **rtk-ai/rtk** | **58,111** | Rust | CLI output compression proxy (60-90% savings) | Largest, most established; command-level only |
 | **yvgude/lean-ctx** | **2,378** | Rust | Full context OS (67 MCP tools, 99% savings) | Most mature "full-stack" competitor |
-| **PRISM** (this project) | **new** | Rust | Enterprise token optimizer — TOON/TRON, 30+ filters, TurboVec ANN, Memory Palace, GraphRAG, CRAG, MCP | **Differentiator**: TurboVec ANN + CRAG + Memory Palace + structured encoding |
+| **PRISM** (this project) | **new** | Rust | Enterprise token optimizer — TOON/TRON, 65+ filters, TurboVec ANN, Memory Palace, GraphRAG, CRAG, MCP | **Differentiator**: TurboVec ANN + CRAG + Memory Palace + structured encoding |
 
 ---
 
@@ -38,7 +38,7 @@
 | **Language** | Rust | Rust | Rust |
 | **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 5 tools + Memory Palace + GraphRAG + CRAG |
 | **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) |
-| **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 30+ commands |
+| **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 65+ commands |
 | **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive + sled + TurboVec ANN) |
 | **Vector Index** | ❌ | Embeddings + RRF | **TurboVec `IdMapIndex`** (TurboQuant, dim=16, AVX-512BW) |
 | **Retrieval** | ❌ | Graph search | **CRAG** — evaluate relevance → re-query if below threshold |
@@ -103,7 +103,7 @@
 ```
 prism/
 ├── CLI (14 subcommands)
-│   ├── filter.rs     — 30+ RTK-compatible output filters
+│   ├── filter.rs     — 65+ RTK-compatible output filters
 │   ├── cli.rs        — subcommand dispatch
 │   └── hook.rs       — shell hook install/uninstall
 │
@@ -152,7 +152,7 @@ LeanCTX:
              → [Session Memory] + [Context Proof] + [Dashboard]
 
 PRISM:
-  CLI (14 subcmds) → [30+ Filters] + [TOON/TRON Encoder]
+  CLI (14 subcmds) → [65+ Filters] + [TOON/TRON Encoder]
                    → [TurboVec ANN Cache] + [Memory Palace]
                    → [CRAG Pipeline] + [GraphRAG]
                    → [MCP Server (5 tools)] + [TokenCounter Analytics]

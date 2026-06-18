@@ -51,6 +51,22 @@ enum Args {
         #[arg(long, default_value_t = String::from("gpt-4"))]
         model: String,
     },
+    Hook {
+        #[command(subcommand)]
+        cmd: cli::HookCmd,
+    },
+    Compress {
+        #[arg(short, long)]
+        string: Option<String>,
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(short, long, default_value_t = 0.5)]
+        ratio: f64,
+    },
+    Vscode {
+        #[arg(short, long, default_value = "prism-vscode")]
+        output: std::path::PathBuf,
+    },
     #[allow(non_camel_case_types)]
     Cmd {
         #[arg(trailing_var_arg = true)]
@@ -74,6 +90,9 @@ async fn main() -> Result<()> {
         Args::Graph { cmd } => cli::graph(cmd).await,
         Args::Toon { cmd } => cli::toon(cmd).await,
         Args::Count { string, file, model } => cli::count(string, file, model).await,
+        Args::Hook { cmd } => cli::hook(cmd).await,
+        Args::Compress { string, file, ratio } => cli::compress(string, file, ratio).await,
+        Args::Vscode { output } => cli::vscode_gen(output).await,
         Args::Cmd { args } => cli::run_command(args).await,
     }
 }

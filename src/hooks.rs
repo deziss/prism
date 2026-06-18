@@ -2,7 +2,6 @@
 // Implements the invisible hook pattern that OpenWolf owns.
 // No other competitor has this, but Prism now does.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -123,7 +122,7 @@ fi
             ),
             (
                 "on_file_write.before",
-                r##"#!/usr/bin/env bash
+                r###"#!/usr/bin/env bash
 # PRISM Hook: on_file_write.before
 # Fires BEFORE any file write.
 # Checks cerebrum for Do-Not-Repeat rules.
@@ -135,7 +134,7 @@ if [ -f "$PRISM_DIR/cerebrum.md" ]; then
         echo "$MATCHES" >&2
     fi
 fi
-"##,
+"###,
             ),
             (
                 "on_file_write.after",
@@ -167,7 +166,7 @@ fi
 # Fires when a new Claude Code session begins.
 # Initializes SessionState, clears read log, loads cerebrium.
 PRISM_DIR="${PRISM_DIR:-$(pwd)/.prism}"
-mkdir -p "$PRISM_DIR/sessions
+mkdir -p "$PRISM_DIR/sessions"
 > "$PRISM_DIR/read_log"
 if [ -f "$PRISM_DIR/cerebrium.md" ]; then
     LINES=$(wc -l < "$PRISM_DIR/cerebrium.md" 2>/dev/null || echo 0)
@@ -190,6 +189,7 @@ fi
             ),
         ];
 
+        let hook_count = hook_defs.len();
         let mut created = Vec::new();
         for (name, content) in hook_defs {
             let fp = hooks_dir.join(name);
@@ -232,7 +232,7 @@ max_depth = 10
             "PRISM hooks installed: {}\nInstall dir: {}\nHook count: {}",
             msg,
             self.install_dir.display(),
-            hook_defs.len()
+            hook_count
         ))
     }
 

@@ -6,6 +6,7 @@ pub mod config;
 pub mod encode;
 pub mod filter;
 pub mod hook;
+pub mod hooks;
 pub mod knowledge;
 pub mod mcp;
 pub mod memory;
