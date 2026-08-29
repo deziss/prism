@@ -25,30 +25,87 @@ impl std::fmt::Display for CompressedOutput {
     }
 }
 
-/// Compress text using BM25 sentence scoring + regex cleanup.
+/// Compress text: BM25 sentence scoring over prose, code passed through intact.
+///
 /// `ratio` = fraction of tokens to keep (0.7 = keep 70%, discard 30%).
+///
+/// Segmentation runs first and guards both later stages. That matters for the
+/// cleanup pass as much as for the scorer: `regex_clean` collapses runs of
+/// spaces, which would silently reindent — and in Python, break — any code it
+/// touched.
 pub fn compress(text: &str, ratio: f64) -> CompressedOutput {
     if text.is_empty() {
-        return CompressedOutput { compressed: String::new(), original_tokens: 0, compressed_tokens: 0, savings_pct: 0.0 };
+        return CompressedOutput {
+            compressed: String::new(),
+            original_tokens: 0,
+            compressed_tokens: 0,
+            savings_pct: 0.0,
+        };
     }
 
     let original_tokens = count_tokens_accurate(text);
+    let segments = segment_protected(text);
 
-    // Step 1: regex cleanup (always applied — no-loss passes)
-    let cleaned = regex_clean(text);
+    let protected_tokens: usize = segments
+        .iter()
+        .filter(|s| s.protected)
+        .map(|s| count_tokens_accurate(&s.text))
+        .sum();
+    let prose_total: usize = segments
+        .iter()
+        .filter(|s| !s.protected)
+        .map(|s| count_tokens_accurate(&s.text))
+        .sum();
 
-    // Step 2: BM25 sentence selection to hit target_ratio
+    // Nothing but code — there is nothing safe to compress.
+    if prose_total == 0 {
+        return CompressedOutput {
+            compressed: text.to_string(),
+            original_tokens,
+            compressed_tokens: original_tokens,
+            savings_pct: 0.0,
+        };
+    }
+
     let target_tokens = (original_tokens as f64 * ratio.clamp(0.1, 1.0)) as usize;
-    let compressed = if original_tokens > 300 {
-        bm25_select(&cleaned, target_tokens)
-    } else {
-        cleaned // Short texts: skip BM25, regex cleanup is enough
-    };
+    // Code is never dropped, so prose absorbs the whole reduction. Keep at least
+    // a fifth of it so code-heavy prompts stay readable.
+    let prose_budget = target_tokens
+        .saturating_sub(protected_tokens)
+        .max(prose_total / 5);
 
+    let mut out = String::with_capacity(text.len());
+    for seg in &segments {
+        if seg.protected {
+            out.push_str(&seg.text);
+            continue;
+        }
+
+        let cleaned = regex_clean(&seg.text);
+        let seg_tokens = count_tokens_accurate(&seg.text);
+        let share = seg_tokens as f64 / prose_total as f64;
+        let seg_budget = (prose_budget as f64 * share).round() as usize;
+
+        // Short inputs: the cleanup pass alone is enough.
+        let piece = if original_tokens > 300 {
+            bm25_select_prose(&cleaned, seg_budget)
+        } else {
+            cleaned
+        };
+        out.push_str(&piece);
+        out.push('\n');
+    }
+
+    let compressed = out.trim_end_matches('\n').to_string();
     let compressed_tokens = count_tokens_accurate(&compressed);
     let savings_pct = (1.0 - compressed_tokens as f64 / original_tokens.max(1) as f64) * 100.0;
 
-    CompressedOutput { compressed, original_tokens, compressed_tokens, savings_pct: savings_pct.max(0.0) }
+    CompressedOutput {
+        compressed,
+        original_tokens,
+        compressed_tokens,
+        savings_pct: savings_pct.max(0.0),
+    }
 }
 
 // ── Regex cleanup (lossless or near-lossless) ─────────────────────────────────
@@ -92,7 +149,83 @@ fn regex_clean(text: &str) -> String {
 
 /// Score sentences by BM25-style importance, keep top sentences until we
 /// hit `target_tokens`. Re-joins in original order to preserve coherence.
-fn bm25_select(text: &str, target_tokens: usize) -> String {
+// ── Code protection ───────────────────────────────────────────────────────────
+//
+// BM25 drops whole lines. Applied blindly to a prompt containing a fenced code
+// block, it happily deletes lines from the middle of that block and forwards
+// syntactically broken code to the model. Code spans are therefore segmented
+// out and passed through verbatim; only prose is ever scored.
+
+struct Segment {
+    text: String,
+    protected: bool,
+}
+
+fn push_segment(segs: &mut Vec<Segment>, cur: &mut String, protected: bool) {
+    if !cur.is_empty() {
+        segs.push(Segment { text: std::mem::take(cur), protected });
+    }
+}
+
+/// A line that looks like code, a diff hunk, or structured output.
+fn is_code_like_line(line: &str) -> bool {
+    if line.trim().is_empty() {
+        return false;
+    }
+    line.starts_with("    ")
+        || line.starts_with('\t')
+        || line.starts_with("@@ ")
+        || line.starts_with("diff --git")
+        || line.starts_with("+++ ")
+        || line.starts_with("--- ")
+}
+
+/// Split text into alternating prose and protected (code) segments.
+fn segment_protected(text: &str) -> Vec<Segment> {
+    let mut segs: Vec<Segment> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_protected = false;
+    let mut in_fence = false;
+    let mut fence_marker = String::new();
+
+    for line in text.split('\n') {
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+
+        if in_fence {
+            cur.push_str(line);
+            cur.push('\n');
+            if is_fence && trimmed.starts_with(&fence_marker) {
+                in_fence = false;
+                push_segment(&mut segs, &mut cur, true);
+                cur_protected = false;
+            }
+            continue;
+        }
+
+        if is_fence {
+            push_segment(&mut segs, &mut cur, cur_protected);
+            fence_marker = trimmed.chars().take_while(|c| *c == '`' || *c == '~').collect();
+            in_fence = true;
+            cur.push_str(line);
+            cur.push('\n');
+            continue;
+        }
+
+        let code_like = is_code_like_line(line);
+        if code_like != cur_protected {
+            push_segment(&mut segs, &mut cur, cur_protected);
+            cur_protected = code_like;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+
+    push_segment(&mut segs, &mut cur, in_fence || cur_protected);
+    segs
+}
+
+fn bm25_select_prose(text: &str, target_tokens: usize) -> String {
     // Split into sentences (paragraphs / lines as units — better for prompts)
     let sentences: Vec<&str> = text
         .split('\n')
@@ -201,11 +334,11 @@ fn is_stopword(w: &str) -> bool {
 // ── Token counting (accurate via tiktoken) ────────────────────────────────────
 
 fn count_tokens_accurate(text: &str) -> usize {
-    if let Ok(bpe) = tiktoken_rs::cl100k_base() {
-        bpe.encode_ordinary(text).len()
-    } else {
+    // Shared, lazily-built tokenizer — see analytics::bpe.
+    match crate::analytics::bpe() {
+        Some(b) => b.encode_ordinary(text).len(),
         // Fallback: chars / 3.5 ≈ tokens (BPE approximation)
-        (text.chars().count() as f64 / 3.5) as usize
+        None => (text.chars().count() as f64 / 3.5) as usize,
     }
 }
 
@@ -239,4 +372,63 @@ pub fn compress_git_diff(diff: &str) -> String {
         .collect();
     let count = lines.len();
     format!("{}\n\n[{} changed lines]", lines.join("\n"), count)
+}
+
+#[cfg(test)]
+mod code_protection_tests {
+    use super::*;
+
+    /// Long enough to push `compress` past its BM25 threshold.
+    fn prose(lines: usize) -> String {
+        (0..lines)
+            .map(|i| {
+                format!(
+                    "Paragraph {i} explains a routine detail about the surrounding system \
+                     and repeats several common words so the scorer has something to rank."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn fenced_code_block_survives_verbatim() {
+        let code = "```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n    println!(\"{}\", x + y);\n}\n```";
+        let input = format!("{}\n{}\n{}", prose(40), code, prose(40));
+
+        let out = compress(&input, 0.3).compressed;
+
+        for line in code.lines() {
+            assert!(
+                out.contains(line),
+                "compression dropped a line from inside a fenced block: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_hunk_survives_verbatim() {
+        let diff = "@@ -1,4 +1,4 @@\n-let old = 1;\n+let new = 2;\n context line here";
+        let input = format!("{}\n{}\n{}", prose(40), diff, prose(40));
+
+        let out = compress(&input, 0.3).compressed;
+
+        for line in diff.lines() {
+            assert!(out.contains(line), "compression dropped a diff line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn segmentation_marks_fences_protected() {
+        let segs = segment_protected("intro line\n```\ncode\n```\noutro line");
+        assert!(segs.iter().any(|s| s.protected && s.text.contains("code")));
+        assert!(segs.iter().any(|s| !s.protected && s.text.contains("intro")));
+    }
+
+    #[test]
+    fn compression_never_grows_short_text() {
+        let short = "hello world";
+        let out = compress(short, 0.5);
+        assert!(out.compressed_tokens <= out.original_tokens.max(1));
+    }
 }

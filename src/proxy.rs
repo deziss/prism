@@ -125,52 +125,383 @@ fn make_domain_cert(hostname: &str, _ca_cert_pem: &[u8], ca_key_pem: &[u8]) -> R
     Ok((cert_pem, key_pem))
 }
 
-// ── Request compression ───────────────────────────────────────────────────────
+// ── HTTP framing helpers ──────────────────────────────────────────────────────
 
-/// Compress `messages[].content` in an LLM API JSON body.
-/// Returns (modified_body, orig_tokens, sent_tokens, model).
-fn compress_request_body(body: &[u8], provider: &str) -> (Vec<u8>, u32, u32, String) {
-    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (body.to_vec(), 0, 0, String::new());
+fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Case-insensitive lookup of a single HTTP header value.
+fn header_value(headers: &[u8], name: &str) -> Option<String> {
+    let s = std::str::from_utf8(headers).ok()?;
+    let target = name.to_lowercase();
+    // Skip the request/status line.
+    for line in s.split("\r\n").skip(1) {
+        let (k, v) = line.split_once(':')?;
+        if k.trim().to_lowercase() == target {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+fn is_chunked(headers: &[u8]) -> bool {
+    header_value(headers, "transfer-encoding")
+        .map(|v| v.to_lowercase().contains("chunked"))
+        .unwrap_or(false)
+}
+
+fn content_length(headers: &[u8]) -> Option<usize> {
+    header_value(headers, "content-length")?.trim().parse().ok()
+}
+
+fn wants_close(headers: &[u8]) -> bool {
+    header_value(headers, "connection")
+        .map(|v| v.to_lowercase().contains("close"))
+        .unwrap_or(false)
+}
+
+const MAX_HEADER_BYTES: usize = 256 * 1024;
+
+/// Read HTTP headers until the terminating CRLFCRLF, however many reads it takes.
+/// `carry` holds bytes left over from a previous message on the same connection.
+/// Returns (header_bytes_including_terminator, leftover_bytes_after_headers).
+async fn read_headers<S>(stream: &mut S, carry: Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = carry;
+    let mut tmp = vec![0u8; 16384];
+    loop {
+        if let Some(pos) = find_sub(&buf, b"\r\n\r\n") {
+            let rest = buf.split_off(pos + 4);
+            return Some((buf, rest));
+        }
+        if buf.len() > MAX_HEADER_BYTES {
+            return None;
+        }
+        match stream.read(&mut tmp).await {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        }
+    }
+}
+
+/// Read exactly one message body, honouring Content-Length or chunked encoding.
+/// Returns (decoded_body, leftover_bytes_belonging_to_the_next_message).
+async fn read_body<S>(stream: &mut S, headers: &[u8], have: Vec<u8>) -> (Vec<u8>, Vec<u8>)
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    if is_chunked(headers) {
+        return read_chunked(stream, have).await;
+    }
+    match content_length(headers) {
+        Some(0) | None => (Vec::new(), have),
+        Some(len) => {
+            let mut body = have;
+            let mut tmp = vec![0u8; 16384];
+            while body.len() < len {
+                match stream.read(&mut tmp).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => body.extend_from_slice(&tmp[..n]),
+                }
+            }
+            if body.len() > len {
+                let leftover = body.split_off(len);
+                (body, leftover)
+            } else {
+                (body, Vec::new())
+            }
+        }
+    }
+}
+
+/// Decode a chunked-transfer body into plain bytes.
+async fn read_chunked<S>(stream: &mut S, have: Vec<u8>) -> (Vec<u8>, Vec<u8>)
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = have;
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    let mut tmp = vec![0u8; 16384];
+
+    loop {
+        // Chunk-size line.
+        let line_end = loop {
+            if let Some(p) = find_sub(&buf[pos..], b"\r\n") {
+                break pos + p;
+            }
+            match stream.read(&mut tmp).await {
+                Ok(0) | Err(_) => return (out, Vec::new()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        };
+        let size = std::str::from_utf8(&buf[pos..line_end])
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.split(';').next().unwrap_or("").trim(), 16).ok())
+            .unwrap_or(0);
+        pos = line_end + 2;
+
+        if size == 0 {
+            // Consume the trailer terminator if present, then stop.
+            while find_sub(&buf[pos.saturating_sub(2)..], b"\r\n").is_none() {
+                match stream.read(&mut tmp).await {
+                    Ok(0) | Err(_) => return (out, Vec::new()),
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+            let leftover = if pos + 2 <= buf.len() { buf[pos + 2..].to_vec() } else { Vec::new() };
+            return (out, leftover);
+        }
+
+        while buf.len() < pos + size + 2 {
+            match stream.read(&mut tmp).await {
+                Ok(0) | Err(_) => return (out, Vec::new()),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        out.extend_from_slice(&buf[pos..pos + size]);
+        pos += size + 2;
+    }
+}
+
+/// Rebuild a request with the (possibly compressed) body.
+/// Drops Transfer-Encoding (we already de-chunked) and forces identity encoding
+/// so the response body stays parseable for token accounting.
+fn rebuild_request(headers: &[u8], body: &[u8]) -> Vec<u8> {
+    let s = String::from_utf8_lossy(headers);
+    let mut out = String::with_capacity(headers.len() + 64);
+
+    for (i, line) in s.split("\r\n").enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        if i > 0 {
+            let lower = line.to_lowercase();
+            if lower.starts_with("content-length:")
+                || lower.starts_with("transfer-encoding:")
+                || lower.starts_with("accept-encoding:")
+            {
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+
+    out.push_str("Accept-Encoding: identity\r\n");
+    if !body.is_empty() {
+        out.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    out.push_str("\r\n");
+
+    let mut req = out.into_bytes();
+    req.extend_from_slice(body);
+    req
+}
+
+// ── Response relay (streaming-safe) ───────────────────────────────────────────
+
+/// Pull `usage` token counts out of either a plain JSON body or an SSE stream.
+fn extract_resp_tokens(body: &[u8]) -> u32 {
+    fn usage_of(j: &serde_json::Value) -> Option<u32> {
+        j.pointer("/usage/completion_tokens")
+            .or_else(|| j.pointer("/usage/output_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }
+
+    if let Ok(j) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(t) = usage_of(&j) {
+            return t;
+        }
+    }
+
+    // Streaming: the final events carry cumulative usage.
+    let s = String::from_utf8_lossy(body);
+    let mut best = 0u32;
+    for line in s.lines() {
+        let payload = line.strip_prefix("data:").unwrap_or(line).trim();
+        if !payload.starts_with('{') {
+            continue;
+        }
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) {
+            if let Some(t) = usage_of(&j) {
+                best = best.max(t);
+            }
+        }
+    }
+    best
+}
+
+const MAX_SNIFF_BYTES: usize = 512 * 1024;
+
+/// Copy the upstream response to the client as it arrives, flushing every chunk
+/// so SSE reaches the client token-by-token. Returns (response_tokens, upstream_wants_close).
+async fn relay_response<U, C>(upstream: &mut U, client: &mut C) -> Option<(u32, bool)>
+where
+    U: tokio::io::AsyncRead + Unpin,
+    C: tokio::io::AsyncWrite + Unpin,
+{
+    let (headers, first_body) = read_headers(upstream, Vec::new()).await?;
+
+    client.write_all(&headers).await.ok()?;
+    client.flush().await.ok()?;
+
+    let chunked = is_chunked(&headers);
+    let clen = content_length(&headers);
+    let close = wants_close(&headers);
+
+    let mut sniff: Vec<u8> = Vec::new();
+    let mut tail: Vec<u8> = Vec::new();
+    let mut seen = 0usize;
+
+    let mut push = |bytes: &[u8], sniff: &mut Vec<u8>, tail: &mut Vec<u8>| {
+        if sniff.len() < MAX_SNIFF_BYTES {
+            sniff.extend_from_slice(bytes);
+        }
+        tail.extend_from_slice(bytes);
+        if tail.len() > 32 {
+            let cut = tail.len() - 32;
+            tail.drain(..cut);
+        }
     };
 
-    let model = json.get("model")
+    if !first_body.is_empty() {
+        client.write_all(&first_body).await.ok()?;
+        client.flush().await.ok()?;
+        seen += first_body.len();
+        push(&first_body, &mut sniff, &mut tail);
+    }
+
+    let terminated = |chunked: bool, tail: &[u8], seen: usize| -> bool {
+        if chunked {
+            find_sub(tail, b"0\r\n\r\n").is_some()
+        } else if let Some(l) = clen {
+            seen >= l
+        } else {
+            false
+        }
+    };
+
+    let mut tmp = vec![0u8; 16384];
+    while !terminated(chunked, &tail, seen) {
+        match upstream.read(&mut tmp).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                client.write_all(&tmp[..n]).await.ok()?;
+                client.flush().await.ok()?;
+                seen += n;
+                push(&tmp[..n], &mut sniff, &mut tail);
+            }
+        }
+    }
+
+    // Chunked bodies still carry their framing; decode before parsing usage.
+    let parseable = if chunked { dechunk_bytes(&sniff) } else { sniff };
+    Some((extract_resp_tokens(&parseable), close))
+}
+
+/// Strip chunk framing from an already-buffered chunked body.
+fn dechunk_bytes(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        let Some(rel) = find_sub(&buf[pos..], b"\r\n") else { break };
+        let line_end = pos + rel;
+        let Some(size) = std::str::from_utf8(&buf[pos..line_end])
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.split(';').next().unwrap_or("").trim(), 16).ok())
+        else {
+            break;
+        };
+        pos = line_end + 2;
+        if size == 0 || pos + size > buf.len() {
+            break;
+        }
+        out.extend_from_slice(&buf[pos..pos + size]);
+        pos += size + 2;
+    }
+    out
+}
+
+// ── Request compression ───────────────────────────────────────────────────────
+
+/// Below this, compression is not worth the semantic risk.
+const MIN_COMPRESS_TOKENS: u32 = 500;
+/// How many trailing messages are eligible for compression. Everything before
+/// them is the provider's cacheable prefix and must stay byte-stable.
+const COMPRESSIBLE_TAIL: usize = 2;
+/// Anthropic allows at most 4 cache breakpoints.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// Compress an LLM API request body.
+///
+/// Compression is deliberately confined to the tail of the conversation. The
+/// system prompt and all earlier messages form the prefix that OpenAI (implicit,
+/// >=1024 tokens) and Anthropic (`cache_control`) cache; a cache read costs 10%
+/// of input on Anthropic, so rewriting that prefix to shave 25% off it is a net
+/// loss. We leave the prefix untouched and add cache breakpoints instead.
+///
+/// Returns (modified_body, orig_tokens, sent_tokens, model, is_stream).
+fn compress_request_body(
+    body: &[u8],
+    provider: &str,
+    ratio: f64,
+) -> (Vec<u8>, u32, u32, String, bool) {
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return (body.to_vec(), 0, 0, String::new(), false);
+    };
+
+    let model = json
+        .get("model")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let is_stream = json
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut orig_total = 0u32;
     let mut sent_total = 0u32;
 
     if let Some(messages) = json.get_mut("messages").and_then(|v| v.as_array_mut()) {
-        for msg in messages.iter_mut() {
-            if let Some(content) = msg.get_mut("content") {
-                if let Some(text) = content.as_str() {
-                    let ot = crate::analytics::count_tokens(text, &model).unwrap_or(0) as u32;
-                    orig_total += ot;
-                    if ot > 500 {
-                        let c = crate::compress::compress(text, 0.75);
-                        *content = serde_json::Value::String(c.compressed);
-                        sent_total += c.compressed_tokens as u32;
-                    } else {
-                        sent_total += ot;
+        let total = messages.len();
+        let first_compressible = total.saturating_sub(COMPRESSIBLE_TAIL);
+
+        for (idx, msg) in messages.iter_mut().enumerate() {
+            // Prefix messages are counted but never rewritten.
+            let may_compress = idx >= first_compressible;
+            let Some(content) = msg.get_mut("content") else { continue };
+
+            if let Some(text) = content.as_str().map(|s| s.to_string()) {
+                let (out, ot, st) = maybe_compress(&text, &model, ratio, may_compress);
+                orig_total += ot;
+                sent_total += st;
+                if let Some(new_text) = out {
+                    *content = serde_json::Value::String(new_text);
+                }
+            } else if let Some(blocks) = content.as_array_mut() {
+                for block in blocks.iter_mut() {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+                        continue;
                     }
-                } else if let Some(blocks) = content.as_array_mut() {
-                    for block in blocks.iter_mut() {
-                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            if let Some(text_val) = block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()) {
-                                let ot = crate::analytics::count_tokens(&text_val, &model).unwrap_or(0) as u32;
-                                orig_total += ot;
-                                if ot > 500 {
-                                    let c = crate::compress::compress(&text_val, 0.75);
-                                    sent_total += c.compressed_tokens as u32;
-                                    if let Some(t) = block.get_mut("text") {
-                                        *t = serde_json::Value::String(c.compressed);
-                                    }
-                                } else {
-                                    sent_total += ot;
-                                }
-                            }
+                    let Some(text) = block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    else {
+                        continue;
+                    };
+                    let (out, ot, st) = maybe_compress(&text, &model, ratio, may_compress);
+                    orig_total += ot;
+                    sent_total += st;
+                    if let Some(new_text) = out {
+                        if let Some(t) = block.get_mut("text") {
+                            *t = serde_json::Value::String(new_text);
                         }
                     }
                 }
@@ -178,31 +509,129 @@ fn compress_request_body(body: &[u8], provider: &str) -> (Vec<u8>, u32, u32, Str
         }
     }
 
-    // Inject Anthropic context caching on system prompt (saves 90% on repeated contexts)
     if provider == "anthropic" {
-        if let Some(system) = json.get_mut("system") {
-            if let Some(text) = system.as_str().map(|s| s.to_string()) {
-                *system = serde_json::json!([{
-                    "type": "text",
-                    "text": text,
-                    "cache_control": {"type": "ephemeral"}
-                }]);
+        apply_anthropic_caching(&mut json, &model, &mut orig_total, &mut sent_total);
+    }
+
+    let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec());
+    (modified, orig_total, sent_total, model, is_stream)
+}
+
+/// Returns (replacement_text_if_compressed, orig_tokens, sent_tokens).
+fn maybe_compress(
+    text: &str,
+    model: &str,
+    ratio: f64,
+    may_compress: bool,
+) -> (Option<String>, u32, u32) {
+    let orig = crate::analytics::count_tokens(text, model).unwrap_or(0) as u32;
+    if !may_compress || orig <= MIN_COMPRESS_TOKENS {
+        return (None, orig, orig);
+    }
+    let c = crate::compress::compress(text, ratio);
+    // Never let "compression" grow the payload.
+    if c.compressed_tokens as u32 >= orig {
+        return (None, orig, orig);
+    }
+    (Some(c.compressed), orig, c.compressed_tokens as u32)
+}
+
+/// Add `cache_control` breakpoints so repeated context bills at 10% of input.
+///
+/// Anthropic caches everything from the start of the prompt up to and including
+/// each breakpoint, and allows at most 4. We anchor one on the system prompt
+/// (the most stable block) and spread the rest across earlier conversation
+/// turns, so long sessions keep a live breakpoint inside the lookback window
+/// instead of ageing out and re-paying full price every turn.
+fn apply_anthropic_caching(
+    json: &mut serde_json::Value,
+    model: &str,
+    orig_total: &mut u32,
+    sent_total: &mut u32,
+) {
+    let mut breakpoints = 0usize;
+
+    // 1. System prompt — always the most reusable block.
+    if let Some(system) = json.get_mut("system") {
+        if let Some(text) = system.as_str().map(|s| s.to_string()) {
+            let t = crate::analytics::count_tokens(&text, model).unwrap_or(0) as u32;
+            *orig_total += t;
+            *sent_total += t;
+            *system = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+            breakpoints += 1;
+        } else if let Some(blocks) = system.as_array_mut() {
+            if let Some(last) = blocks.last_mut() {
+                if let Some(obj) = last.as_object_mut() {
+                    obj.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                    breakpoints += 1;
+                }
             }
         }
     }
 
-    let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec());
-    (modified, orig_total, sent_total, model)
+    // 2. Spread remaining breakpoints over the stable part of the conversation.
+    let Some(messages) = json.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    // Only the prefix is stable; the tail changes every turn and would thrash.
+    let stable = messages.len().saturating_sub(COMPRESSIBLE_TAIL);
+    if stable == 0 {
+        return;
+    }
+    let remaining = MAX_CACHE_BREAKPOINTS.saturating_sub(breakpoints);
+    if remaining == 0 {
+        return;
+    }
+
+    // Anchor at evenly spaced points, biased toward the most recent stable turn
+    // so the newest breakpoint stays inside the cache lookback window.
+    let step = (stable / remaining).max(1);
+    let mut anchors: Vec<usize> = (0..remaining)
+        .map(|i| stable.saturating_sub(1 + i * step))
+        .collect();
+    anchors.dedup();
+
+    for idx in anchors {
+        let Some(msg) = messages.get_mut(idx) else { continue };
+        let Some(content) = msg.get_mut("content") else { continue };
+
+        // cache_control lives on a content block, so a bare string must be lifted.
+        if let Some(text) = content.as_str().map(|s| s.to_string()) {
+            *content = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }]);
+        } else if let Some(blocks) = content.as_array_mut() {
+            if let Some(last) = blocks.last_mut() {
+                if let Some(obj) = last.as_object_mut() {
+                    obj.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ── Privacy-safe API key hash ─────────────────────────────────────────────────
 
+/// Hash the caller's API key so usage can be attributed without ever storing
+/// the credential. Only the first 8 hex chars are kept.
 fn hash_api_key(headers_raw: &[u8]) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let s = std::str::from_utf8(headers_raw).unwrap_or("");
-    for line in s.lines() {
+    for line in s.split("\r\n") {
         let lower = line.to_lowercase();
         let key_part = if lower.starts_with("authorization:") {
             line[14..].trim().trim_start_matches("Bearer ").trim_start_matches("bearer ")
@@ -220,6 +649,126 @@ fn hash_api_key(headers_raw: &[u8]) -> String {
     "unknown".to_string()
 }
 
+// ── MITM session ──────────────────────────────────────────────────────────────
+
+/// Idle timeout for a kept-alive tunnel waiting on the next request.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn connect_upstream(
+    hostname: &str,
+    port: u16,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let tcp = TcpStream::connect(format!("{}:{}", hostname, port)).await?;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let name = rustls::pki_types::ServerName::try_from(hostname.to_string())
+        .map_err(|_| anyhow!("invalid server name: {}", hostname))?;
+    Ok(tokio_rustls::TlsConnector::from(cfg).connect(name, tcp).await?)
+}
+
+/// Serve every request on one decrypted tunnel until the client goes away.
+async fn serve_session(
+    mut client: tokio_rustls::server::TlsStream<TcpStream>,
+    hostname: String,
+    port: u16,
+    provider: &'static str,
+    source_ip: String,
+    ratio: f64,
+) {
+    let mut upstream = match connect_upstream(&hostname, port).await {
+        Ok(u) => u,
+        Err(e) => {
+            error!("upstream connect {}: {}", hostname, e);
+            return;
+        }
+    };
+
+    let mut carry: Vec<u8> = Vec::new();
+
+    loop {
+        // Wait for the next request on this tunnel.
+        let headers_read = tokio::time::timeout(IDLE_TIMEOUT, read_headers(&mut client, carry)).await;
+        let Ok(Some((req_headers, body_start))) = headers_read else {
+            return;
+        };
+
+        let (raw_body, leftover) = read_body(&mut client, &req_headers, body_start).await;
+        carry = leftover;
+
+        let api_key_hash = hash_api_key(&req_headers);
+        let client_close = wants_close(&req_headers);
+
+        let (body, orig_tokens, sent_tokens, model, is_stream) = if raw_body.is_empty() {
+            (raw_body, 0, 0, String::new(), false)
+        } else {
+            compress_request_body(&raw_body, provider, ratio)
+        };
+
+        let forward = rebuild_request(&req_headers, &body);
+
+        let t0 = std::time::Instant::now();
+        if upstream.write_all(&forward).await.is_err() {
+            // Upstream dropped a pooled connection; reopen once and retry.
+            match connect_upstream(&hostname, port).await {
+                Ok(u) => {
+                    upstream = u;
+                    if upstream.write_all(&forward).await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+        let _ = upstream.flush().await;
+
+        let Some((resp_tokens, upstream_close)) = relay_response(&mut upstream, &mut client).await
+        else {
+            return;
+        };
+        let latency_ms = t0.elapsed().as_millis() as u64;
+
+        let model_s = if model.is_empty() { "unknown".to_string() } else { model };
+        let provider_s = provider.to_string();
+        let ip = source_ip.clone();
+        let key = api_key_hash.clone();
+
+        tokio::spawn(async move {
+            crate::analytics::record_proxy_event(
+                &ip, &key, &provider_s, &model_s,
+                orig_tokens, sent_tokens, resp_tokens, latency_ms, false,
+            );
+            let saved = orig_tokens.saturating_sub(sent_tokens);
+            info!(
+                "{} {} {}in {}out{} {}ms{}",
+                provider_s,
+                model_s,
+                orig_tokens,
+                resp_tokens,
+                if is_stream { " (stream)" } else { "" },
+                latency_ms,
+                if saved > 0 {
+                    format!(
+                        " — saved {} tokens (~${:.5})",
+                        saved,
+                        crate::analytics::estimate_cost(&model_s, saved, 0)
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        });
+
+        if client_close || upstream_close {
+            return;
+        }
+    }
+}
+
 // ── CONNECT tunnel handler ────────────────────────────────────────────────────
 
 async fn handle_connect(
@@ -228,218 +777,157 @@ async fn handle_connect(
     ca_cert_pem: Arc<Vec<u8>>,
     ca_key_pem: Arc<Vec<u8>>,
     client_addr: SocketAddr,
+    ratio: f64,
 ) {
-    let provider = detect_provider(&host);
     let hostname = host.split(':').next().unwrap_or(&host).to_string();
     let port: u16 = host.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(443);
+    let provider = detect_provider(&host);
 
-    // Acknowledge CONNECT
-    if client.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await.is_err() {
+    if client
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .is_err()
+    {
         return;
     }
 
-    if provider.is_none() {
-        // Not an AI host — raw passthrough tunnel
-        let Ok(upstream) = TcpStream::connect(format!("{}:{}", hostname, port)).await else { return; };
+    // Non-AI traffic is none of our business — tunnel it untouched.
+    let Some(provider) = provider else {
+        let Ok(upstream) = TcpStream::connect(format!("{}:{}", hostname, port)).await else {
+            return;
+        };
         let (mut cr, mut cw) = client.into_split();
         let (mut ur, mut uw) = upstream.into_split();
-        tokio::join!(tokio::io::copy(&mut cr, &mut uw), tokio::io::copy(&mut ur, &mut cw));
+        let _ = tokio::join!(
+            tokio::io::copy(&mut cr, &mut uw),
+            tokio::io::copy(&mut ur, &mut cw)
+        );
         return;
-    }
-
-    let provider = provider.unwrap();
-
-    // Generate domain cert
-    let (domain_cert, domain_key) = match make_domain_cert(&hostname, &ca_cert_pem, &ca_key_pem) {
-        Ok(p) => p,
-        Err(e) => { warn!("Cert gen for {}: {}", hostname, e); return; }
     };
 
-    // Build TLS server config (presented to client)
+    let (domain_cert, domain_key) = match make_domain_cert(&hostname, &ca_cert_pem, &ca_key_pem) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("cert gen {}: {}", hostname, e);
+            return;
+        }
+    };
+
     let server_config = {
         use rustls::pki_types::CertificateDer;
         use rustls_pemfile::{certs, private_key};
         use std::io::BufReader;
 
-        let certs_vec: Vec<CertificateDer<'static>> =
+        let chain: Vec<CertificateDer<'static>> =
             certs(&mut BufReader::new(domain_cert.as_slice()))
                 .filter_map(|c| c.ok())
                 .map(|c| c.into_owned())
                 .collect();
-        let key = match private_key(&mut BufReader::new(domain_key.as_slice())).ok().flatten() {
-            Some(k) => k,
-            None => { warn!("No key for {}", hostname); return; }
+        let Some(key) = private_key(&mut BufReader::new(domain_key.as_slice())).ok().flatten() else {
+            warn!("no private key for {}", hostname);
+            return;
         };
-        match rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs_vec, key) {
+        match rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key)
+        {
             Ok(c) => Arc::new(c),
-            Err(e) => { warn!("TLS server config: {}", e); return; }
+            Err(e) => {
+                warn!("tls server config {}: {}", hostname, e);
+                return;
+            }
         }
     };
 
-    // TLS handshake with client (we impersonate the AI host)
-    let Ok(mut tls_client) = tokio_rustls::TlsAcceptor::from(server_config).accept(client).await else {
-        warn!("TLS accept failed for {}", hostname);
+    let Ok(tls_client) = tokio_rustls::TlsAcceptor::from(server_config).accept(client).await else {
+        warn!("tls handshake failed for {}", hostname);
         return;
     };
 
-    // Read decrypted HTTP request
-    let mut req_buf = vec![0u8; 65536];
-    let n = match tls_client.read(&mut req_buf).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
-    let request_bytes = &req_buf[..n];
-
-    // Split headers / body
-    let header_end = request_bytes.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(n);
-    let headers_raw = &request_bytes[..header_end.min(n)];
-    let body_raw = if header_end < n { &request_bytes[header_end..] } else { &[] };
-
-    let api_key_hash = hash_api_key(headers_raw);
-    let is_post = request_bytes.starts_with(b"POST");
-
-    let (final_body, orig_tokens, sent_tokens, model) = if is_post && !body_raw.is_empty() {
-        compress_request_body(body_raw, provider)
-    } else {
-        (body_raw.to_vec(), 0, 0, String::new())
-    };
-
-    // Connect to real upstream with proper TLS
-    let Ok(upstream_tcp) = TcpStream::connect(format!("{}:{}", hostname, port)).await else {
-        error!("Upstream connect failed: {}", hostname);
-        return;
-    };
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_cfg = Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    );
-    let server_name = match rustls::pki_types::ServerName::try_from(hostname.clone()) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let Ok(mut tls_upstream) = tokio_rustls::TlsConnector::from(client_cfg)
-        .connect(server_name, upstream_tcp).await else {
-        error!("TLS connect to {} failed", hostname);
-        return;
-    };
-
-    // Rebuild request with compressed body (update Content-Length)
-    let forward_request = if is_post && !final_body.is_empty() {
-        let header_str = std::str::from_utf8(headers_raw).unwrap_or("");
-        let updated: String = header_str.lines()
-            .filter(|l| !l.is_empty())
-            .map(|line| {
-                if line.to_lowercase().starts_with("content-length:") {
-                    format!("Content-Length: {}\r\n", final_body.len())
-                } else {
-                    format!("{}\r\n", line)
-                }
-            })
-            .collect();
-        let mut req = updated.into_bytes();
-        req.extend_from_slice(b"\r\n");
-        req.extend_from_slice(&final_body);
-        req
-    } else {
-        request_bytes.to_vec()
-    };
-
-    // Forward & collect response
-    let t0 = std::time::Instant::now();
-    if tls_upstream.write_all(&forward_request).await.is_err() { return; }
-
-    let mut resp_buf: Vec<u8> = Vec::with_capacity(32768);
-    let mut tmp = vec![0u8; 8192];
-    loop {
-        match tls_upstream.read(&mut tmp).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => resp_buf.extend_from_slice(&tmp[..n]),
-        }
-    }
-    let latency_ms = t0.elapsed().as_millis() as u64;
-
-    // Count response tokens from usage field
-    let resp_tokens: u32 = resp_buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .and_then(|i| serde_json::from_slice::<serde_json::Value>(&resp_buf[i + 4..]).ok())
-        .and_then(|j| {
-            j.pointer("/usage/completion_tokens")
-                .or_else(|| j.pointer("/usage/output_tokens"))
-                .and_then(|v| v.as_u64())
-        })
-        .unwrap_or(0) as u32;
-
-    // Send response back to client
-    let _ = tls_client.write_all(&resp_buf).await;
-
-    // Log telemetry
-    let provider_s = provider.to_string();
-    let model_s = if model.is_empty() { "unknown".to_string() } else { model };
-    let source_ip = client_addr.ip().to_string();
-    tokio::spawn(async move {
-        crate::analytics::record_proxy_event(
-            &source_ip, &api_key_hash, &provider_s, &model_s,
-            orig_tokens, sent_tokens, resp_tokens, latency_ms, false,
-        );
-        if orig_tokens > 0 && sent_tokens < orig_tokens {
-            let saved = orig_tokens - sent_tokens;
-            info!("[PRISM proxy] {} {} — {} → {} tokens ({} saved, ~${:.5})",
-                provider_s, model_s, orig_tokens, sent_tokens, saved,
-                crate::analytics::estimate_cost(&model_s, saved, 0));
-        }
-    });
+    serve_session(
+        tls_client,
+        hostname,
+        port,
+        provider,
+        client_addr.ip().to_string(),
+        ratio,
+    )
+    .await;
 }
 
 // ── Plain HTTP pass-through ───────────────────────────────────────────────────
 
 async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>) {
-    let s = std::str::from_utf8(&request).unwrap_or("");
-    let host_line = s.lines().find(|l| l.to_lowercase().starts_with("host:"));
-    let (host, port) = if let Some(hl) = host_line {
-        let v = hl[5..].trim();
-        let mut parts = v.splitn(2, ':');
-        let h = parts.next().unwrap_or("localhost").to_string();
-        let p: u16 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(80);
-        (h, p)
-    } else {
-        ("localhost".to_string(), 80)
-    };
-    if let Ok(mut upstream) = TcpStream::connect(format!("{}:{}", host, port)).await {
-        let _ = upstream.write_all(&request).await;
-        let mut buf = vec![0u8; 65536];
-        if let Ok(n) = upstream.read(&mut buf).await {
-            let _ = client.write_all(&buf[..n]).await;
+    let s = String::from_utf8_lossy(&request);
+    let host_line = s.split("\r\n").find(|l| l.to_lowercase().starts_with("host:"));
+    let (host, port) = match host_line {
+        Some(hl) => {
+            let v = hl[5..].trim();
+            let mut parts = v.splitn(2, ':');
+            let h = parts.next().unwrap_or("").to_string();
+            let p: u16 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(80);
+            (h, p)
         }
+        None => return,
+    };
+    if host.is_empty() {
+        return;
     }
+
+    let Ok(mut upstream) = TcpStream::connect(format!("{}:{}", host, port)).await else {
+        return;
+    };
+    if upstream.write_all(&request).await.is_err() {
+        return;
+    }
+    let (mut ur, mut uw) = upstream.into_split();
+    let (mut cr, mut cw) = client.split();
+    let _ = tokio::join!(
+        tokio::io::copy(&mut ur, &mut cw),
+        tokio::io::copy(&mut cr, &mut uw)
+    );
+}
+
+/// rustls 0.23 refuses to pick a crypto backend on its own when more than one is
+/// compiled in — and `reqwest`'s rustls-tls pulls in aws-lc-rs alongside our
+/// `ring`. Without this, every TLS handshake dies with SSL_ERROR_SYSCALL.
+fn install_crypto_provider() {
+    // Errs only if a provider is already installed, which is equally fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 // ── Main server ───────────────────────────────────────────────────────────────
 
 pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
+    install_crypto_provider();
+
     let ca = ensure_ca()?;
     let ca_cert = Arc::new(ca.cert_pem);
-    let ca_key  = Arc::new(ca.key_pem);
+    let ca_key = Arc::new(ca.key_pem);
+
+    // compression_ratio is Option<f64> inside an Option<PrismConfig>.
+    let ratio = crate::config::load_global()
+        .and_then(|c| c.compression_ratio)
+        .unwrap_or(0.75)
+        .clamp(0.1, 1.0);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
 
-    info!("PRISM transparent HTTPS proxy on :{}", port);
+    info!("PRISM MITM proxy listening on :{} (compression ratio {})", port, ratio);
     info!("CA cert: {}", ca_dir().join("ca.crt").display());
-    info!("Set: HTTP_PROXY=http://localhost:{0}  HTTPS_PROXY=http://localhost:{0}", port);
+    info!(
+        "Set HTTP_PROXY=http://localhost:{0} and HTTPS_PROXY=http://localhost:{0}",
+        port
+    );
 
     loop {
         let (stream, addr) = listener.accept().await?;
         let cc = Arc::clone(&ca_cert);
         let ck = Arc::clone(&ca_key);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, cc, ck).await {
-                warn!("Connection error: {}", e);
+            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio).await {
+                warn!("connection error: {}", e);
             }
         });
     }
@@ -450,22 +938,40 @@ async fn handle_connection(
     client_addr: SocketAddr,
     ca_cert_pem: Arc<Vec<u8>>,
     ca_key_pem: Arc<Vec<u8>>,
+    ratio: f64,
 ) -> Result<()> {
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 { return Ok(()); }
-    let request = &buf[..n];
+    let Some((headers, body_start)) = read_headers(&mut stream, Vec::new()).await else {
+        return Ok(());
+    };
+    let line = String::from_utf8_lossy(&headers)
+        .split("\r\n")
+        .next()
+        .unwrap_or("")
+        .to_string();
 
-    if request.starts_with(b"CONNECT ") {
-        let host = std::str::from_utf8(request)?
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .ok_or_else(|| anyhow!("No host in CONNECT"))?
+    // Liveness probe on the proxy port itself — must not be tunnelled anywhere.
+    if line.starts_with("GET /health") || line.starts_with("HEAD /health") {
+        let body = b"{\"status\":\"ok\",\"service\":\"prism-proxy\"}";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(resp.as_bytes()).await?;
+        stream.write_all(body).await?;
+        return Ok(());
+    }
+
+    if line.starts_with("CONNECT ") {
+        let host = line
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| anyhow!("no host in CONNECT"))?
             .to_string();
-        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr).await;
+        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr, ratio).await;
     } else {
-        handle_plain_http(stream, request.to_vec()).await;
+        let mut request = headers;
+        request.extend_from_slice(&body_start);
+        handle_plain_http(stream, request).await;
     }
     Ok(())
 }
@@ -487,10 +993,13 @@ pub fn install_ca_system(ca_cert_pem: &[u8]) -> Result<String> {
         let tmp = std::env::temp_dir().join("prism-ca.crt");
         std::fs::write(&tmp, ca_cert_pem)?;
         let ok = std::process::Command::new("security")
-            .args(["add-trusted-cert", "-d", "-r", "trustRoot",
-                   "-k", "/Library/Keychains/System.keychain",
-                   tmp.to_str().unwrap_or("")])
-            .status()?.success();
+            .args([
+                "add-trusted-cert", "-d", "-r", "trustRoot",
+                "-k", "/Library/Keychains/System.keychain",
+                tmp.to_str().unwrap_or(""),
+            ])
+            .status()?
+            .success();
         return if ok {
             Ok("CA cert installed (macOS system trust store)".to_string())
         } else {
@@ -498,6 +1007,292 @@ pub fn install_ca_system(ca_cert_pem: &[u8]) -> Result<String> {
         };
     }
     #[allow(unreachable_code)]
-    Err(anyhow!("Platform not supported — install {} manually to system trust store",
-        ca_dir().join("ca.crt").display()))
+    Err(anyhow!(
+        "Platform not supported — install {} manually to the system trust store",
+        ca_dir().join("ca.crt").display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn long_prose(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("Sentence {i} carries ordinary explanatory filler about the system."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    // ── framing ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_lookup_is_case_insensitive_and_skips_request_line() {
+        let h = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Length: 42\r\n\r\n";
+        assert_eq!(header_value(h, "content-length").as_deref(), Some("42"));
+        assert_eq!(header_value(h, "CONTENT-LENGTH").as_deref(), Some("42"));
+        assert_eq!(header_value(h, "host").as_deref(), Some("api.anthropic.com"));
+        assert_eq!(header_value(h, "authorization"), None);
+    }
+
+    #[test]
+    fn detects_chunked_and_close() {
+        let h = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        assert!(is_chunked(h));
+        assert!(wants_close(h));
+        let k = b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n";
+        assert!(!is_chunked(k));
+        assert!(!wants_close(k));
+        assert_eq!(content_length(k), Some(3));
+    }
+
+    #[tokio::test]
+    async fn reads_headers_spanning_multiple_reads() {
+        // A body larger than one read must still be fully collected.
+        let body = "x".repeat(100_000);
+        let raw = format!(
+            "POST /v1/messages HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut cursor = std::io::Cursor::new(raw.into_bytes());
+
+        let (headers, start) = read_headers(&mut cursor, Vec::new()).await.unwrap();
+        let (got, leftover) = read_body(&mut cursor, &headers, start).await;
+
+        assert_eq!(got.len(), 100_000, "body was truncated");
+        assert!(leftover.is_empty());
+    }
+
+    #[tokio::test]
+    async fn decodes_chunked_body() {
+        let raw = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.as_bytes().to_vec());
+
+        let (headers, start) = read_headers(&mut cursor, Vec::new()).await.unwrap();
+        let (body, _) = read_body(&mut cursor, &headers, start).await;
+
+        assert_eq!(String::from_utf8_lossy(&body), "hello world");
+    }
+
+    #[test]
+    fn dechunk_bytes_strips_framing() {
+        let framed = b"4\r\nabcd\r\n3\r\nefg\r\n0\r\n\r\n";
+        assert_eq!(String::from_utf8_lossy(&dechunk_bytes(framed)), "abcdefg");
+    }
+
+    #[test]
+    fn rebuild_request_fixes_framing_headers() {
+        let headers = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nAccept-Encoding: gzip, br\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\nx-api-key: secret\r\n\r\n";
+        let out = rebuild_request(headers, b"{\"a\":1}");
+        let s = String::from_utf8_lossy(&out);
+
+        assert!(s.contains("Content-Length: 7"), "length not recomputed:\n{s}");
+        assert!(!s.contains("Content-Length: 999"));
+        assert!(!s.contains("Transfer-Encoding"), "de-chunked body still claims chunked");
+        assert!(!s.to_lowercase().contains("gzip"), "gzip would break usage parsing");
+        assert!(s.contains("Accept-Encoding: identity"));
+        // Credentials must pass through untouched.
+        assert!(s.contains("x-api-key: secret"));
+        assert!(s.ends_with("{\"a\":1}"));
+    }
+
+    // ── token accounting ──────────────────────────────────────────────────────
+
+    #[test]
+    fn extracts_usage_from_plain_json() {
+        let body = br#"{"usage":{"completion_tokens":123}}"#;
+        assert_eq!(extract_resp_tokens(body), 123);
+    }
+
+    #[test]
+    fn extracts_usage_from_sse_stream() {
+        let sse = "event: message_start\ndata: {\"usage\":{\"output_tokens\":1}}\n\n\
+                   event: message_delta\ndata: {\"usage\":{\"output_tokens\":57}}\n\n\
+                   data: [DONE]\n\n";
+        assert_eq!(extract_resp_tokens(sse.as_bytes()), 57);
+    }
+
+    // ── compression policy ────────────────────────────────────────────────────
+
+    #[test]
+    fn system_prompt_is_never_rewritten() {
+        // The system prompt is the cacheable prefix; rewriting it forfeits a
+        // 90% cache discount to save ~25% of its tokens.
+        let system = long_prose(200);
+        let req = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "system": system,
+            "messages": [{"role": "user", "content": long_prose(200)}],
+        });
+
+        let (out, _, _, _, _) =
+            compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.5);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(parsed["system"].as_str().unwrap(), system);
+    }
+
+    #[test]
+    fn earlier_messages_stay_byte_stable() {
+        // Only the last two messages may change, so the prefix keeps hitting cache.
+        let first = long_prose(200);
+        let req = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": first},
+                {"role": "assistant", "content": long_prose(200)},
+                {"role": "user", "content": long_prose(200)},
+            ],
+        });
+
+        let (out, orig, sent, model, _) =
+            compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.5);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(parsed["messages"][0]["content"].as_str().unwrap(), first);
+        assert_eq!(model, "gpt-4o-mini");
+        assert!(orig > 0);
+        assert!(sent <= orig, "compression must not grow the payload");
+    }
+
+    #[test]
+    fn compression_is_deterministic() {
+        // Identical input must produce identical bytes, or the provider's
+        // prefix cache misses on every turn.
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "system": long_prose(200),
+            "messages": [{"role": "user", "content": long_prose(300)}],
+        });
+        let raw = serde_json::to_vec(&req).unwrap();
+
+        let (a, ..) = compress_request_body(&raw, "anthropic", 0.5);
+        let (b, ..) = compress_request_body(&raw, "anthropic", 0.5);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn anthropic_gets_cache_breakpoints_without_losing_text() {
+        let system = long_prose(50);
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "system": system,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+
+        let (out, ..) = compress_request_body(&serde_json::to_vec(&req).unwrap(), "anthropic", 0.75);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        let block = &parsed["system"][0];
+        assert_eq!(block["text"].as_str().unwrap(), system);
+        assert_eq!(block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn stream_flag_is_detected() {
+        let req = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let (.., is_stream) =
+            compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.75);
+        assert!(is_stream);
+    }
+
+    // ── streaming ─────────────────────────────────────────────────────────────
+
+    fn chunk(s: &str) -> Vec<u8> {
+        format!("{:x}\r\n{}\r\n", s.len(), s).into_bytes()
+    }
+
+    /// The whole point of the relay: an SSE event must reach the client while
+    /// the upstream is still producing. Buffering to EOF makes streaming look
+    /// frozen and, on a keep-alive connection, never returns at all.
+    #[tokio::test]
+    async fn sse_reaches_client_before_stream_ends() {
+        use std::time::Duration;
+        use tokio::io::duplex;
+
+        let (mut up_tx, mut up_rx) = duplex(64 * 1024);
+        let (mut cli_tx, mut cli_rx) = duplex(64 * 1024);
+
+        // Upstream: headers + one event, a long pause, then the rest.
+        let producer = tokio::spawn(async move {
+            up_tx
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            up_tx.write_all(&chunk("data: {\"delta\":\"first\"}\n\n")).await.unwrap();
+            up_tx.flush().await.unwrap();
+
+            tokio::time::sleep(Duration::from_millis(600)).await;
+
+            up_tx
+                .write_all(&chunk("data: {\"usage\":{\"output_tokens\":42}}\n\n"))
+                .await
+                .unwrap();
+            up_tx.write_all(b"0\r\n\r\n").await.unwrap();
+            up_tx.flush().await.unwrap();
+        });
+
+        let relay = tokio::spawn(async move { relay_response(&mut up_rx, &mut cli_tx).await });
+
+        // Collect whatever the client can see well before the producer finishes.
+        let mut early = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let mut buf = vec![0u8; 4096];
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), cli_rx.read(&mut buf)).await {
+                Ok(Ok(0)) | Err(_) => continue,
+                Ok(Ok(n)) => early.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+            }
+        }
+
+        let seen = String::from_utf8_lossy(&early).to_string();
+        assert!(seen.contains("200 OK"), "headers were not forwarded early: {seen:?}");
+        assert!(
+            seen.contains("first"),
+            "first SSE event did not reach the client within 250ms while upstream \
+             was still streaming — the response is being buffered: {seen:?}"
+        );
+        assert!(
+            !seen.contains("usage"),
+            "test is not proving anything: upstream finished too early"
+        );
+
+        // Drain the rest so the relay can complete and report usage.
+        let drain = tokio::spawn(async move {
+            let mut sink = Vec::new();
+            let _ = cli_rx.read_to_end(&mut sink).await;
+        });
+        producer.await.unwrap();
+        let (tokens, _) = relay.await.unwrap().expect("relay returned no result");
+        let _ = drain.await;
+
+        assert_eq!(tokens, 42, "usage was not recovered from the SSE stream");
+    }
+
+    #[test]
+    fn non_ai_hosts_are_not_intercepted() {
+        assert_eq!(detect_provider("api.openai.com:443"), Some("openai"));
+        assert_eq!(detect_provider("api.anthropic.com"), Some("anthropic"));
+        assert_eq!(detect_provider("github.com:443"), None);
+        assert_eq!(detect_provider("example.com"), None);
+    }
+
+    #[test]
+    fn api_key_is_hashed_not_stored() {
+        let h = b"POST / HTTP/1.1\r\nAuthorization: Bearer sk-secret-value-12345\r\n\r\n";
+        let hash = hash_api_key(h);
+        assert_eq!(hash.len(), 8);
+        assert!(!hash.contains("secret"));
+        // Stable across calls so usage attributes to one identity.
+        assert_eq!(hash, hash_api_key(h));
+        assert_eq!(hash_api_key(b"POST / HTTP/1.1\r\n\r\n"), "unknown");
+    }
 }

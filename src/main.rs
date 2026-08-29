@@ -28,7 +28,7 @@ enum Args {
         upstream: Option<String>,
     },
     Mcp {
-        #[arg(short, long, default_value_t = 3000)]
+        #[arg(short, long, default_value_t = 3003)]
         port: u16,
     },
     Memory {
@@ -74,11 +74,26 @@ enum Args {
     },
 }
 
+/// Long-running servers log to stderr; one-shot CLI commands stay quiet so
+/// their output remains pipeable. Override with RUST_LOG.
+fn init_tracing(verbose: bool) {
+    use tracing_subscriber::EnvFilter;
+    let default = if verbose { "info" } else { "warn" };
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     prism::init_prism_dirs()?;
 
     let args = Args::parse();
+    init_tracing(matches!(args, Args::Serve { .. } | Args::Mcp { .. }));
     match args {
         Args::Init { global } => cli::init(global).await,
         Args::Gain { history } => analytics::show_gains(history).await,

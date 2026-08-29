@@ -130,34 +130,41 @@ fn write_shell_env(ca_cert_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Register PRISM as an MCP server for Claude Code.
+///
+/// Claude Code reads MCP server definitions from `~/.claude.json`, not from
+/// `settings.json` — an entry written to the latter is silently ignored. The
+/// existing file is merged, never overwritten, since it holds unrelated state.
 fn write_claude_mcp_config() -> Result<()> {
-    let config_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~"))
-        .join(".claude");
-    std::fs::create_dir_all(&config_dir)?;
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let config_path = home.join(".claude.json");
 
-    let settings_path = config_dir.join("settings.json");
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let raw = std::fs::read_to_string(&settings_path).unwrap_or_else(|_| "{}".to_string());
-        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}))
+    let mut config: serde_json::Value = if config_path.exists() {
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
 
-    // Add/update mcpServers.prism
-    let mcp = settings
-        .as_object_mut()
-        .unwrap();
-    mcp.entry("mcpServers").or_insert(serde_json::json!({}));
-    if let Some(servers) = mcp.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-        servers.insert("prism".to_string(), serde_json::json!({
-            "type": "http",
-            "url": "http://localhost:3003"
-        }));
+    if !config.is_object() {
+        config = serde_json::json!({});
     }
 
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-    println!("  Claude MCP:   written to ~/.claude/settings.json");
+    let root = config.as_object_mut().expect("config is an object");
+    root.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+
+    let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
+        anyhow::bail!("~/.claude.json has a non-object mcpServers field; leaving it alone");
+    };
+    servers.insert(
+        "prism".to_string(),
+        serde_json::json!({ "type": "http", "url": "http://localhost:3003" }),
+    );
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    println!("  Claude MCP:   registered in ~/.claude.json");
     Ok(())
 }
 

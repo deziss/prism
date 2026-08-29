@@ -1,6 +1,8 @@
 # PRISM — Personal Reasoning & Intelligence System for Models
 
-PRISM intercepts every LLM API call on your system — from browser, terminal, scripts, or any app — compresses prompts before sending, and tracks token usage per user. No API keys stored. No code changes required. One command setup.
+PRISM intercepts every LLM API call on your system — from browser, terminal, scripts, or any app — trims prompts before sending, and tracks token usage per user. No API keys stored. No code changes required. One command setup.
+
+It is an explicit HTTP `CONNECT`/MITM proxy: clients reach it because `HTTP_PROXY`/`HTTPS_PROXY` point at it, not through kernel packet redirection. Streaming (SSE) is relayed chunk-by-chunk, so `"stream": true` behaves exactly as it does without the proxy.
 
 ```
 Before: Your app ──────────────────────────────────► api.openai.com  (2000 tokens, $0.01)
@@ -42,7 +44,7 @@ prism mcp --port 3003
   export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt
   export SSL_CERT_FILE=~/.local/share/prism/ca/ca.crt
   ```
-- Writes Claude Code MCP config to `~/.claude/settings.json`
+- Registers PRISM as an MCP server in `~/.claude.json` (merged, not overwritten)
 
 ---
 
@@ -56,7 +58,7 @@ docker compose --profile tools up -d
 # Services:
 #   localhost:5174   Dashboard (frontend)
 #   localhost:3002   API (backend)
-#   localhost:8080   Transparent proxy
+#   localhost:8080   MITM proxy
 #   localhost:3003   MCP server
 
 # One-time: trust the CA cert from Docker volume
@@ -95,7 +97,8 @@ claude mcp add prism --transport http http://localhost:3003
 claude mcp list
 ```
 
-Or set it manually in `~/.claude/settings.json`:
+Or set it manually in `~/.claude.json` — note this file, **not** `settings.json`;
+Claude Code does not read MCP server definitions from `settings.json`:
 ```json
 {
   "mcpServers": {
@@ -136,25 +139,49 @@ Every request through the proxy is logged with:
 | `resp_tokens` | Tokens in response |
 | `cost_usd` | Estimated cost using public pricing |
 | `latency_ms` | Round-trip time |
-| `cache_hit` | Whether response was served from semantic cache |
+| `cache_hit` | Reserved for the semantic cache (not yet wired — always false) |
 | `compression_ratio` | `sent/orig` — lower = more compression |
 
-Events are written to `~/.local/share/prism/analytics/proxy_events.jsonl` and also sent to PRISM Hub (if `PRISM_HUB_URL` is set) for dashboard display.
+Events are written to `~/.local/share/prism/analytics/proxy_events.jsonl` and also
+POSTed to `$PRISM_HUB_URL/analytics/proxy-event` when `PRISM_HUB_URL` is set. The
+Hub mounts its API under `/api`, so a bare host gets `/api` appended
+automatically. `prism gain` reports measured savings straight from this log.
 
 ---
 
 ## Compression Pipeline
 
-For each request body (JSON with `messages[].content`):
+Two rules constrain what PRISM is willing to rewrite. Both exist because the
+naive version of this feature costs more than it saves.
 
-1. **Token count** — tiktoken cl100k accurate count
-2. **Skip if small** — pass through unchanged if < 500 tokens
-3. **BM25 sentence scoring** — TF-IDF weight per sentence, boost code definitions (`fn`, `def`, `class`), headers (`#`), error lines
-4. **Greedy selection** — keep top sentences to hit `target_ratio` (default 0.75)
-5. **Re-join in original order** — preserves flow
-6. **Anthropic cache injection** — add `cache_control: {"type":"ephemeral"}` on system prompts automatically (90% cost reduction on repeated contexts)
+**Rule 1 — the cacheable prefix is never touched.**
+OpenAI caches implicitly on a stable prefix of >=1024 tokens; Anthropic caches at
+`cache_control` breakpoints. A cache read bills at **10% of input** on Anthropic
+(50% on OpenAI). Rewriting a system prompt to shave 25% off it turns a 90%
+discount into a full-price miss — a large net loss on any repeated context. So
+PRISM leaves the system prompt and all earlier messages byte-identical and adds
+cache breakpoints there instead. Only the last 2 messages are eligible for
+compression, which is where the bulk of new tokens actually is.
 
-Typical compression: 30-50% reduction. For large repeated system prompts with Anthropic: 90% reduction via caching.
+**Rule 2 — code is never compressed.**
+BM25 drops whole lines. Applied to a fenced code block it would silently delete
+lines from the middle and forward broken code to the model. Fenced blocks,
+indented blocks, and diff hunks are segmented out and passed through verbatim;
+only prose is ever scored.
+
+For an eligible prose span:
+
+1. **Token count** — tiktoken cl100k
+2. **Skip if small** — unchanged below 500 tokens; compression is not worth the semantic risk
+3. **BM25 sentence scoring** — TF-IDF weight per line, boosting definitions, headers, and error lines
+4. **Greedy selection** to hit `compression_ratio` (default 0.75; set in `~/.prism/config.yaml`)
+5. **Re-join in original order**
+6. **Never grows the payload** — if the "compressed" text is not smaller, the original is sent
+
+On Anthropic, up to 4 `cache_control` breakpoints are placed: one on the system
+prompt, the rest spread across the stable part of the conversation so long
+sessions keep a live breakpoint inside the cache lookback window instead of
+ageing out and re-paying full price every turn.
 
 ---
 
@@ -167,14 +194,15 @@ Browser / terminal / scripts / any app
          │  HTTPS_PROXY=http://localhost:8080
          ▼
 PRISM Proxy  :8080
-   ├── HTTP CONNECT tunnel
+   ├── HTTP CONNECT tunnel, keep-alive (many requests per tunnel)
    ├── Per-domain TLS cert (signed by PRISM CA)
    ├── Detect AI provider by hostname
-   ├── Compress messages[] content (BM25)
-   ├── Inject Anthropic cache_control
+   ├── Compress tail messages only (BM25, code-safe)
+   ├── Place Anthropic cache_control breakpoints
    ├── Forward with original headers (API key unchanged)
+   ├── Relay response streaming — SSE flushed chunk-by-chunk
    ├── Log telemetry → PRISM Hub + local JSONL
-   └── Non-AI hosts → raw passthrough
+   └── Non-AI hosts → raw passthrough, untouched
          │
          ▼
 api.openai.com / api.anthropic.com / etc.

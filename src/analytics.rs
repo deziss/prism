@@ -19,11 +19,23 @@ pub fn history_path() -> PathBuf {
 }
 
 /// Count tokens in text for a given model.
+/// Shared cl100k tokenizer.
+///
+/// Building this parses a ~1.7MB BPE table and takes on the order of a second.
+/// The scorer calls it once per sentence, so rebuilding per call added tens of
+/// seconds of latency to every large proxied request.
+pub fn bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
+    BPE.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref()
+}
+
+/// Count tokens in `text`. Falls back to a chars/3.5 estimate if the tokenizer
+/// is unavailable.
 pub fn count_tokens(text: &str, _model: &str) -> Result<usize> {
-    use tiktoken_rs::cl100k_base;
-    let bpe = cl100k_base()?;
-    let tokens = bpe.encode_ordinary(text);
-    Ok(tokens.len())
+    Ok(match bpe() {
+        Some(b) => b.encode_ordinary(text).len(),
+        None => (text.chars().count() as f64 / 3.5) as usize,
+    })
 }
 
 /// Pricing table: (model prefix, input $/1K tokens, output $/1K tokens)
@@ -56,6 +68,20 @@ pub fn estimate_cost(model: &str, input_tokens: u32, output_tokens: u32) -> f64 
 }
 
 /// Log a proxy event (fire-and-forget, errors silently ignored).
+/// Normalise a PRISM Hub base URL to the API root.
+///
+/// The NestJS backend mounts everything under a global `/api` prefix, so a bare
+/// host must have it appended — while a URL that already ends in `/api` must not
+/// get it twice.
+fn hub_base(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/api") {
+        trimmed.to_string()
+    } else {
+        format!("{}/api", trimmed)
+    }
+}
+
 pub fn record_proxy_event(
     source_ip: &str,
     api_key_hash: &str,
@@ -87,9 +113,9 @@ pub fn record_proxy_event(
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{}", event);
     }
-    // Also fire telemetry to PRISM Hub if configured
+    // Also fire telemetry to PRISM Hub if configured.
     if let Ok(hub_url) = std::env::var("PRISM_HUB_URL") {
-        let url = format!("{}/analytics/proxy-event", hub_url.trim_end_matches('/'));
+        let url = format!("{}/analytics/proxy-event", hub_base(&hub_url));
         let body = event.to_string();
         tokio::spawn(async move {
             let _ = reqwest::Client::new()
@@ -128,6 +154,38 @@ pub fn record_command(cmd: &str, input_bytes: usize, output_tokens: usize) -> Re
     })
 }
 
+#[derive(Default)]
+struct ProxySummary {
+    requests: usize,
+    orig_tokens: u64,
+    sent_tokens: u64,
+    cost_usd: f64,
+}
+
+impl ProxySummary {
+    fn saved_tokens(&self) -> u64 {
+        self.orig_tokens.saturating_sub(self.sent_tokens)
+    }
+}
+
+/// Aggregate the proxy event log written by `record_proxy_event`.
+fn load_proxy_summary() -> ProxySummary {
+    let path = analytics_dir().join("proxy_events.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return ProxySummary::default();
+    };
+
+    let mut sum = ProxySummary::default();
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        sum.requests += 1;
+        sum.orig_tokens += v.get("orig_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        sum.sent_tokens += v.get("sent_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        sum.cost_usd += v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    }
+    sum
+}
+
 /// Show token savings dashboard.
 pub async fn show_gains(history_flag: bool) -> Result<()> {
     use colored::Colorize;
@@ -142,20 +200,34 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
         }
     } else {
         let total: usize = hist.commands.iter().map(|e| e.output_tokens).sum();
-        let estimated_savings = (total as f64 * 0.65) as usize;
 
         println!("\n  {} PRISM Token Analytics {}\n", "═".repeat(50), "═".repeat(5));
         println!("  Total commands tracked:  {}", hist.commands.len().to_string().cyan());
         println!("  Total output tokens:      {}", total.to_string().cyan());
-        println!(
-            "  Estimated savings:         {} ({}%)",
-            estimated_savings.to_string().green(),
-            "65".green()
-        );
-        println!(
-            "  Remaining after PRISM:    {}",
-            (total.saturating_sub(estimated_savings)).to_string().yellow()
-        );
+
+        // Measured proxy savings — read from the event log, not estimated.
+        let proxy = load_proxy_summary();
+        if proxy.requests > 0 {
+            let pct = if proxy.orig_tokens > 0 {
+                (proxy.saved_tokens() as f64 / proxy.orig_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!("\n  Proxy-intercepted LLM requests: {}", proxy.requests.to_string().cyan());
+            println!("  Prompt tokens before PRISM:    {}", proxy.orig_tokens.to_string().cyan());
+            println!("  Prompt tokens actually sent:   {}", proxy.sent_tokens.to_string().cyan());
+            println!(
+                "  Measured savings:              {} ({:.1}%)",
+                proxy.saved_tokens().to_string().green(),
+                pct
+            );
+            println!("  Spend on forwarded requests:   ${:.4}", proxy.cost_usd);
+        } else {
+            println!(
+                "\n  {}",
+                "No proxy traffic recorded yet — start it with `prism serve`.".dimmed()
+            );
+        }
 
         let mut by_cmd: HashMap<&str, usize> = HashMap::new();
         for e in &hist.commands {
