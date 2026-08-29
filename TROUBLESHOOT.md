@@ -5,9 +5,13 @@
 - [OpenSSL Not Found](#openssl-not-found)
 - [Sled Database Corruption](#sled-database-corruption)
 - [MCP Server Not Starting](#mcp-server-not-starting)
-- [Proxy 502 / Upstream Connection Refused](#proxy-502--upstream-connection-refused)
-- [tiktoken-rs Slow First Run](#tiktoken-rs-slow-first-run)
+- [Proxy: TLS handshake fails / SSL_ERROR_SYSCALL](#proxy-tls-handshake-fails--ssl_error_syscall)
+- [Proxy: requests hang, or streaming never appears](#proxy-requests-hang-or-streaming-never-appears)
+- [Proxy: certificate errors from clients](#proxy-certificate-errors-from-clients)
+- [Telemetry never reaches PRISM Hub](#telemetry-never-reaches-prism-hub)
+- [tiktoken slow on large requests](#tiktoken-slow-on-large-requests)
 - [Memory Palace Empty After Restart](#memory-palace-empty-after-restart)
+- [Claude Code does not see PRISM tools](#claude-code-does-not-see-prism-tools)
 
 ---
 
@@ -151,52 +155,134 @@ prism memory list
 ## MCP Server Not Starting
 
 ### Symptom
-`prism mcp --port 9090` exits immediately or prints address already in use.
+`prism mcp` (default port 3003) exits immediately or prints address already in use.
 
 ### Fix
 ```bash
 # Check if port is occupied
-ss -tlnp | grep 9090
+ss -tlnp | grep 3003
 
 # Kill existing process
-fuser -k 9090/tcp
+fuser -k 3003/tcp
 
 # Use different port
-prism mcp --port 9091
+prism mcp --port 3004
 ```
 
 ---
 
-## Proxy 502 / Upstream Connection Refused
+## Proxy: TLS handshake fails / SSL_ERROR_SYSCALL
 
 ### Symptom
 ```
-prism serve --port 8080 --upstream http://localhost:11434
+* OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to api.openai.com:443
 ```
-Returns 502 for all requests.
-
-### Fix
-- Verify upstream is running: `curl http://localhost:11434/v1/models`
-- Check firewall: `sudo ufw status`
-- Try with explicit IP: `--upstream http://127.0.0.1:11434`
-- Check proxy logs: `RUST_LOG=debug prism serve --port 8080`
-
----
-
-## tiktoken-rs Slow First Run
-
-### Symptom
-First `prism count` or `prism gain` takes 5-10 seconds.
+and the proxy log shows:
+```
+Could not automatically determine the process-level CryptoProvider from Rustls
+crate features.
+```
 
 ### Cause
-`tiktoken-rs` downloads the `cl100k_base` BPE vocabulary on first use and caches it.
+`reqwest`'s rustls-tls pulls in `aws-lc-rs` alongside our `ring`, so rustls 0.23
+refuses to pick a backend on its own.
 
 ### Fix
-This is normal. Subsequent runs use the cache. If offline:
+Already fixed in `proxy.rs` — `install_crypto_provider()` runs at startup. If you
+see this, your binary predates that; rebuild.
+
+---
+
+## Proxy: requests hang, or streaming never appears
+
+### Symptom
+A proxied request sits for 60+ seconds, or `"stream": true` produces nothing
+until the response is complete.
+
+### Cause
+Fixed. The old response loop buffered until upstream EOF, which never arrives on
+a keep-alive connection.
+
+### Fix
+Rebuild. Confirm with a streaming request — tokens must appear incrementally:
 ```bash
-# Pre-download on a machine with internet, copy cache to offline server
-ls ~/.cache/huggingface/hub/  # tiktoken cache location
+curl -N --proxy http://localhost:8080 --cacert ~/.local/share/prism/ca/ca.crt \
+  https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":100,"stream":true,
+       "messages":[{"role":"user","content":"count to 20 slowly"}]}'
 ```
+
+---
+
+## Proxy: certificate errors from clients
+
+### Symptom
+`SSL certificate problem: unable to get local issuer certificate`, or the browser
+warns about an untrusted certificate for an AI provider domain.
+
+### Cause
+PRISM presents a certificate it signs itself. Clients must trust the PRISM CA.
+
+### Fix
+```bash
+# System trust store (done by `prism init --global`)
+sudo cp ~/.local/share/prism/ca/ca.crt /usr/local/share/ca-certificates/prism.crt
+sudo update-ca-certificates
+
+# Runtimes that use their own bundle
+export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt   # Node
+export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt    # Python requests
+export SSL_CERT_FILE=~/.local/share/prism/ca/ca.crt         # OpenSSL
+
+# Firefox and Chrome keep separate stores — import ca.crt in their settings.
+```
+
+Note `--upstream` on `prism serve` is accepted but ignored. PRISM is a MITM
+`CONNECT` proxy that routes by request hostname, not a reverse proxy to one
+upstream.
+
+---
+
+## Telemetry never reaches PRISM Hub
+
+### Symptom
+`SELECT count(*) FROM "ProxyEvent"` stays 0 while the proxy logs traffic.
+
+### Cause
+The backend mounts its API under a global `/api` prefix. Posting to
+`/analytics/proxy-event` 404s silently — telemetry is fire-and-forget, so nothing
+surfaces.
+
+### Fix
+Fixed: a bare `PRISM_HUB_URL` now has `/api` appended automatically. Verify:
+```bash
+PRISM_HUB_URL=http://localhost:3002 prism serve --port 8080
+# after one proxied request:
+curl http://localhost:3002/api/analytics/proxy-stats?hours=1
+```
+The proxy also always writes `~/.local/share/prism/analytics/proxy_events.jsonl`,
+so `prism gain` reports savings even with no Hub running.
+
+---
+
+## tiktoken slow on large requests
+
+### Symptom
+A large proxied request adds tens of seconds of latency that the proxy's own
+logged `latency_ms` does not account for.
+
+### Cause
+`cl100k_base()` parses a ~1.7MB BPE table, and the scorer called it once per
+sentence — so the table was rebuilt hundreds of times per request.
+
+### Fix
+Fixed: the tokenizer is built once per process (`analytics::bpe`). Note the table
+is compiled into the binary, so there is no download and no network dependency.
+
+A debug build still pays roughly a second on the first call, and far more on a
+cold start — debug is 10-50x slower at this. Do not read latency numbers off a
+debug build; use `cargo build --release`.
 
 ---
 
@@ -240,3 +326,28 @@ cat ~/.local/share/prism/sessions/core/blocks.jsonl
 1. Run `prism --help` or `prism <subcommand> --help`
 2. Check build output: `cargo build 2>&1 | grep error`
 3. Enable verbose logging: `RUST_LOG=prism=debug prism <cmd>`
+
+---
+
+## Claude Code does not see PRISM tools
+
+### Symptom
+`claude mcp list` does not show `prism`, or the tools never appear in a session.
+
+### Cause
+MCP servers are configured in `~/.claude.json`. An entry in
+`~/.claude/settings.json` is silently ignored — earlier versions of
+`prism init --global` wrote to the wrong file.
+
+### Fix
+```bash
+prism mcp --port 3003 &
+claude mcp add prism --transport http http://localhost:3003
+claude mcp list
+```
+Check the server is actually up first:
+```bash
+curl -s http://localhost:3003/health
+# {"status":"ok","mcp":true,"version":"2024-11-05"}
+```
+Note `prism mcp` defaults to 3003, matching what `init` registers.

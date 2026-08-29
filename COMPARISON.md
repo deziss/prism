@@ -1,6 +1,6 @@
 # PRISM vs Competitors — Token Optimization Landscape
 
-**Updated: 2026-06-15**
+**Updated: 2026-08-29**
 **Workdir: /home/anshukushwaha/95095/Backup/Desktop/learn/prism/**
 
 ---
@@ -15,13 +15,40 @@
 
 ---
 
+## Implementation status (read this before the comparison tables)
+
+Several capabilities below exist as compiled, tested code but are **not wired
+into any live path**. The comparison sections were written from the design, not
+from call-graph reality; they are kept for positioning but should be read against
+this table.
+
+| Capability | Status | Evidence |
+|---|---|---|
+| MITM proxy (CONNECT, TLS, keep-alive, SSE relay) | **Live** | `proxy.rs`, verified end-to-end against api.openai.com |
+| Prompt compression (BM25, code-safe, prefix-preserving) | **Live** | `compress.rs`, 31 tests |
+| Anthropic cache breakpoints + context editing | **Live** | `proxy.rs::apply_anthropic_caching`, `apply_context_editing` |
+| Token/cost telemetry → JSONL + Hub | **Live** | `analytics.rs::record_proxy_event` |
+| MCP server (JSON-RPC 2.0, 6 tools) | **Live** | `mcp.rs` |
+| TOON/TRON encoding, command filters | **Live** | `encode.rs`, `filter.rs` |
+| **Semantic cache** | **Not wired** | `cache.rs::put` has zero call sites, so the cache is always empty and `find_similar` always returns `[]`. `pseudo_embedding` is a 16-dim byte-bucket sum, not a semantic embedding. |
+| **CRAG (corrective retrieval)** | **Dead code** | `knowledge/crag.rs` — zero call sites; no CLI or MCP tool reaches it. |
+| **GraphRAG** | **Dead code** | `knowledge/graph_rag.rs` — zero uses outside its own file. `knowledge/mod.rs` has a separate, unrelated JSONL entity store. |
+| **TurboVec ANN** | **Built, barely used** | `vector.rs` is correct, but its only consumer is an empty-cache fallback in `memory.rs`. |
+| Config file (`compression_ratio`, ports) | **Partly wired** | The proxy reads `compression_ratio`; the other fields are still ignored. |
+
+So the honest current differentiator is the **proxy layer** — system-wide
+interception with cache-aware, code-safe compression and Anthropic context
+editing — not the retrieval stack.
+
+---
+
 ## What Changed Since Last Analysis (2026-06-03 → 2026-06-15)
 
 | Area | Before | Now |
 |------|--------|-----|
 | **Vector search** | Brute-force cosine over HashMap | **TurboVec `IdMapIndex`** — Google TurboQuant ANN, AVX-512BW SIMD, 10M docs/4GB, 4× compression |
-| **Semantic cache** | HashMap + cosine distance | sled + TurboVec ANN `find_similar()` — sub-millisecond recall |
-| **Retrieval** | Basic graph keyword search | **CRAG** (Corrective RAG) — relevance eval → re-query below threshold → merge + rank |
+| **Semantic cache** | HashMap + cosine distance | sled + TurboVec ANN scaffolding — **never populated**, see status table |
+| **Retrieval** | Basic graph keyword search | CRAG implemented in `crag.rs` but **not reachable** — no caller |
 | **Auth (prism-hub)** | bcrypt | **argon2** (`@node-rs/argon2`) — faster, more secure, no native compile deps |
 | **Build portability** | Hardcoded BLAS path | `build.rs` auto-detects BLAS (pkg-config → libgslcblas fallback → install hint) |
 | **Docs** | None | README.md + TROUBLESHOOT.md added |
@@ -36,7 +63,7 @@
 |-----------|-----------|----------------|-------|
 | **Primary Role** | CLI output proxy | Cognitive context layer | Enterprise token optimizer |
 | **Language** | Rust | Rust | Rust |
-| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 5 tools + Memory Palace + GraphRAG + CRAG |
+| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 6 tools + MITM proxy + Memory Palace |
 | **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) |
 | **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 65+ commands |
 | **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive + sled + TurboVec ANN) |
@@ -45,7 +72,7 @@
 | **Code Graph** | ❌ | Property graph (18 langs, 4 edge types) | GraphRAG (cross-file import + dependency) |
 | **Token Analytics** | ✅ Economics tracking | Context Manager dashboard | tiktoken-rs `cl100k_base` + per-message/cost tracking |
 | **MCP Server** | ❌ | 67 MCP tools | 5 MCP tools (memory_search, memory_save, graph_query, toon_encode, count_tokens) |
-| **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | axum HTTP proxy + TOON encoding + TurboVec semantic cache |
+| **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | **MITM CONNECT proxy** — per-domain TLS, keep-alive, SSE relay, code-safe compression, Anthropic cache breakpoints + context editing |
 | **Extensions** | None | VS Code, Cursor, Claude Code, Copilot, Windsurf, Codex, Gemini | VS Code extension (5 commands) |
 | **Hub / Backend** | ❌ | ❌ | **prism-hub** — NestJS + PostgreSQL + argon2 + JWT |
 
@@ -55,10 +82,10 @@
 |---------|-----|---------|-------|
 | `git status` | **-80%** | ~120 tokens (auto) | ~70% |
 | `cargo test` | **-90%** | ~80% | ~60-80% |
-| File re-read (cached) | N/A | **~13 tokens** | TurboVec ANN cache hit |
+| File re-read (cached) | N/A | **~13 tokens** | _design target — cache not wired_ |
 | TOON encoding | N/A | N/A | **45-72%** (structured data) |
 | TRON encoding | N/A | N/A | **0-20%** (visual tables) |
-| Re-query (CRAG corrected) | N/A | N/A | **+relevance** vs cold query |
+| Re-query (CRAG corrected) | N/A | N/A | _design target — CRAG unreachable_ |
 | Max claimed savings | **60-90%** | **60-99%** | **50-95%** (combined pipeline) |
 
 ### Unique Advantages
@@ -110,7 +137,7 @@ prism/
 ├── Proxy (axum)
 │   ├── proxy.rs      — HTTP reverse proxy
 │   ├── encode.rs     — TOON/TRON encoding
-│   └── cache.rs      — sled + TurboVec ANN semantic cache
+│   └── cache.rs      — sled + TurboVec ANN semantic cache (not wired)
 │
 ├── Knowledge
 │   ├── graph_rag.rs  — GraphRAG cross-file dependency analysis
