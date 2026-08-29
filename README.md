@@ -185,6 +185,45 @@ ageing out and re-paying full price every turn.
 
 ---
 
+## Context Editing (Anthropic agent runs)
+
+Long agent runs accumulate tool output that is never read again but is re-sent,
+and re-billed, on every turn. For Anthropic requests that carry `tool_result`
+blocks, PRISM opts the request into server-side context editing:
+
+```json
+"context_management": {
+  "edits": [{
+    "type": "clear_tool_uses_20250919",
+    "trigger":        {"type": "input_tokens", "value": 100000},
+    "keep":           {"type": "tool_uses",    "value": 3},
+    "clear_at_least": {"type": "input_tokens", "value": 10000}
+  }]
+}
+```
+
+sent with `anthropic-beta: context-management-2025-06-27` (merged with any beta
+header the caller already set, never replacing it).
+
+Above the trigger, Anthropic replaces the oldest tool results with a placeholder
+while keeping the 3 most recent intact. Anthropic reports large reductions on
+long runs — 84% on a 100-turn evaluation.
+
+`clear_at_least` matters more than it looks. Clearing rewrites the prompt prefix,
+which invalidates the cache from that point; without a floor, a long run can
+clear just enough to fall back under the trigger every turn, paying a cache miss
+each time to save almost nothing. Batching the clears amortises that.
+
+PRISM stays out of the way when:
+
+- the request has no `tool_result` blocks — nothing to clear
+- the caller set `context_management` themselves — theirs wins
+- the provider is not Anthropic
+- `PRISM_NO_CONTEXT_EDITING` is set — this changes what the model can see, so
+  there is an off switch that does not require a rebuild
+
+---
+
 ## Architecture
 
 ```

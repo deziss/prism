@@ -273,9 +273,9 @@ where
 /// Rebuild a request with the (possibly compressed) body.
 /// Drops Transfer-Encoding (we already de-chunked) and forces identity encoding
 /// so the response body stays parseable for token accounting.
-fn rebuild_request(headers: &[u8], body: &[u8]) -> Vec<u8> {
+fn rebuild_request(headers: &[u8], body: &[u8], extra: &[(String, String)]) -> Vec<u8> {
     let s = String::from_utf8_lossy(headers);
-    let mut out = String::with_capacity(headers.len() + 64);
+    let mut out = String::with_capacity(headers.len() + 128);
 
     for (i, line) in s.split("\r\n").enumerate() {
         if line.is_empty() {
@@ -289,9 +289,20 @@ fn rebuild_request(headers: &[u8], body: &[u8]) -> Vec<u8> {
             {
                 continue;
             }
+            // Headers we are replacing are dropped here and re-emitted below.
+            if extra
+                .iter()
+                .any(|(k, _)| lower.starts_with(&format!("{}:", k.to_lowercase())))
+            {
+                continue;
+            }
         }
         out.push_str(line);
         out.push_str("\r\n");
+    }
+
+    for (k, v) in extra {
+        out.push_str(&format!("{}: {}\r\n", k, v));
     }
 
     out.push_str("Accept-Encoding: identity\r\n");
@@ -622,6 +633,140 @@ fn apply_anthropic_caching(
     }
 }
 
+// ── Anthropic context editing ─────────────────────────────────────────────────
+
+/// Beta header gating server-side context management.
+const CONTEXT_MGMT_BETA: &str = "context-management-2025-06-27";
+/// Start clearing stale tool results once the prompt passes this many tokens.
+/// Anthropic's own documented default; deliberately conservative so ordinary
+/// conversations are never touched.
+const CONTEXT_EDIT_TRIGGER_TOKENS: u64 = 100_000;
+/// How many of the most recent tool results to keep verbatim.
+const CONTEXT_EDIT_KEEP_TOOL_USES: u64 = 3;
+/// Minimum to clear per trigger.
+///
+/// Clearing rewrites the prompt prefix, which invalidates the cache from that
+/// point. Without a floor, a long run can clear just enough to fall back under
+/// the threshold on every single turn — paying a cache miss each time to save
+/// almost nothing. Batching the clears keeps that cost amortised.
+const CONTEXT_EDIT_CLEAR_AT_LEAST_TOKENS: u64 = 10_000;
+
+/// True if any message carries a `tool_result` block.
+fn has_tool_results(json: &serde_json::Value) -> bool {
+    let Some(messages) = json.get("messages").and_then(|m| m.as_array()) else {
+        return false;
+    };
+    messages.iter().any(|m| {
+        m.get("content")
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Ask Anthropic to drop stale tool results server-side.
+///
+/// Long agent runs accumulate tool output that is never read again but is
+/// re-sent, and re-billed, on every turn. `clear_tool_uses_20250919` replaces
+/// the oldest results with a placeholder once the prompt crosses a threshold,
+/// keeping the most recent few intact. Unlike rewriting the prompt ourselves
+/// this is designed to preserve the cache, so it composes with the breakpoints
+/// placed in `apply_anthropic_caching`.
+///
+/// Returns the `anthropic-beta` header to send, or None if this request should
+/// be left alone.
+fn apply_context_editing(
+    json: &mut serde_json::Value,
+    headers: &[u8],
+    enabled: bool,
+) -> Option<(String, String)> {
+    if !enabled {
+        return None;
+    }
+    // The caller configured it themselves — theirs wins.
+    if json.get("context_management").is_some() {
+        return None;
+    }
+    // Nothing to clear; adding a beta header would be noise.
+    if !has_tool_results(json) {
+        return None;
+    }
+
+    json.as_object_mut()?.insert(
+        "context_management".into(),
+        serde_json::json!({
+            "edits": [{
+                "type": "clear_tool_uses_20250919",
+                "trigger":        {"type": "input_tokens", "value": CONTEXT_EDIT_TRIGGER_TOKENS},
+                "keep":           {"type": "tool_uses",    "value": CONTEXT_EDIT_KEEP_TOOL_USES},
+                "clear_at_least": {"type": "input_tokens", "value": CONTEXT_EDIT_CLEAR_AT_LEAST_TOKENS},
+            }]
+        }),
+    );
+
+    // Merge rather than clobber — callers may already request other betas.
+    let merged = match header_value(headers, "anthropic-beta") {
+        Some(existing) if existing.contains(CONTEXT_MGMT_BETA) => existing,
+        Some(existing) => format!("{},{}", existing, CONTEXT_MGMT_BETA),
+        None => CONTEXT_MGMT_BETA.to_string(),
+    };
+    Some(("anthropic-beta".to_string(), merged))
+}
+
+// ── Request preparation ───────────────────────────────────────────────────────
+
+/// Everything the proxy needs to forward one request.
+struct Prepared {
+    body: Vec<u8>,
+    orig_tokens: u32,
+    sent_tokens: u32,
+    model: String,
+    is_stream: bool,
+    extra_headers: Vec<(String, String)>,
+}
+
+impl Prepared {
+    /// A body we are not touching (empty, or unparseable as JSON).
+    fn passthrough(body: Vec<u8>) -> Self {
+        Prepared {
+            body,
+            orig_tokens: 0,
+            sent_tokens: 0,
+            model: String::new(),
+            is_stream: false,
+            extra_headers: Vec::new(),
+        }
+    }
+}
+
+/// Compress, add cache breakpoints, and opt long Anthropic agent runs into
+/// server-side context editing.
+fn prepare_request(raw: &[u8], headers: &[u8], provider: &str, ratio: f64) -> Prepared {
+    // Escape hatch: context editing changes what the model can see, so it must
+    // be possible to turn off without rebuilding.
+    let context_editing = std::env::var("PRISM_NO_CONTEXT_EDITING").is_err();
+    let (mut body, orig_tokens, sent_tokens, model, is_stream) =
+        compress_request_body(raw, provider, ratio);
+    let mut extra_headers = Vec::new();
+
+    if provider == "anthropic" {
+        if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body) {
+            if let Some(header) = apply_context_editing(&mut json, headers, context_editing) {
+                if let Ok(rewritten) = serde_json::to_vec(&json) {
+                    body = rewritten;
+                    extra_headers.push(header);
+                }
+            }
+        }
+    }
+
+    Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers }
+}
+
 // ── Privacy-safe API key hash ─────────────────────────────────────────────────
 
 /// Hash the caller's API key so usage can be attributed without ever storing
@@ -703,13 +848,14 @@ async fn serve_session(
         let api_key_hash = hash_api_key(&req_headers);
         let client_close = wants_close(&req_headers);
 
-        let (body, orig_tokens, sent_tokens, model, is_stream) = if raw_body.is_empty() {
-            (raw_body, 0, 0, String::new(), false)
+        let prepared = if raw_body.is_empty() {
+            Prepared::passthrough(raw_body)
         } else {
-            compress_request_body(&raw_body, provider, ratio)
+            prepare_request(&raw_body, &req_headers, provider, ratio)
         };
+        let Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers } = prepared;
 
-        let forward = rebuild_request(&req_headers, &body);
+        let forward = rebuild_request(&req_headers, &body, &extra_headers);
 
         let t0 = std::time::Instant::now();
         if upstream.write_all(&forward).await.is_err() {
@@ -1084,7 +1230,7 @@ mod tests {
     #[test]
     fn rebuild_request_fixes_framing_headers() {
         let headers = b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nAccept-Encoding: gzip, br\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\nx-api-key: secret\r\n\r\n";
-        let out = rebuild_request(headers, b"{\"a\":1}");
+        let out = rebuild_request(headers, b"{\"a\":1}", &[]);
         let s = String::from_utf8_lossy(&out);
 
         assert!(s.contains("Content-Length: 7"), "length not recomputed:\n{s}");
@@ -1275,6 +1421,106 @@ mod tests {
         let _ = drain.await;
 
         assert_eq!(tokens, 42, "usage was not recovered from the SSE stream");
+    }
+
+    // ── context editing ───────────────────────────────────────────────────────
+
+    fn agent_request_with_tools() -> serde_json::Value {
+        serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "messages": [
+                {"role": "user", "content": "run the thing"},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "a big pile of output"}
+                ]},
+            ],
+        })
+    }
+
+    #[test]
+    fn long_agent_runs_opt_into_context_editing() {
+        let raw = serde_json::to_vec(&agent_request_with_tools()).unwrap();
+        let headers = b"POST /v1/messages HTTP/1.1\r\nx-api-key: k\r\n\r\n";
+
+        let p = prepare_request(raw.as_slice(), headers, "anthropic", 0.75);
+        let json: serde_json::Value = serde_json::from_slice(&p.body).unwrap();
+
+        let edit = &json["context_management"]["edits"][0];
+        assert_eq!(edit["type"], "clear_tool_uses_20250919");
+        assert_eq!(edit["trigger"]["value"], 100_000);
+        assert_eq!(edit["keep"]["value"], 3);
+        assert_eq!(edit["keep"]["type"], "tool_uses");
+        // Batched clearing: see CONTEXT_EDIT_CLEAR_AT_LEAST_TOKENS.
+        assert_eq!(edit["clear_at_least"]["value"], 10_000);
+
+        assert_eq!(
+            p.extra_headers,
+            vec![("anthropic-beta".to_string(), CONTEXT_MGMT_BETA.to_string())]
+        );
+    }
+
+    #[test]
+    fn context_editing_skipped_without_tool_results() {
+        // No tool output to clear — adding a beta header would be pure noise.
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "messages": [{"role": "user", "content": "just a chat"}],
+        });
+        let raw = serde_json::to_vec(&req).unwrap();
+        let p = prepare_request(raw.as_slice(), b"POST / HTTP/1.1\r\n\r\n", "anthropic", 0.75);
+
+        let json: serde_json::Value = serde_json::from_slice(&p.body).unwrap();
+        assert!(json.get("context_management").is_none());
+        assert!(p.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn caller_context_management_is_never_overridden() {
+        let mut req = agent_request_with_tools();
+        req["context_management"] = serde_json::json!({"edits": []});
+        let raw = serde_json::to_vec(&req).unwrap();
+
+        let p = prepare_request(raw.as_slice(), b"POST / HTTP/1.1\r\n\r\n", "anthropic", 0.75);
+        let json: serde_json::Value = serde_json::from_slice(&p.body).unwrap();
+
+        assert_eq!(json["context_management"]["edits"].as_array().unwrap().len(), 0);
+        assert!(p.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn existing_beta_headers_are_merged_not_clobbered() {
+        let raw = serde_json::to_vec(&agent_request_with_tools()).unwrap();
+        let headers = b"POST / HTTP/1.1\r\nanthropic-beta: some-other-beta\r\n\r\n";
+
+        let p = prepare_request(raw.as_slice(), headers, "anthropic", 0.75);
+        let (_, value) = &p.extra_headers[0];
+        assert!(value.contains("some-other-beta"), "dropped the caller's beta: {value}");
+        assert!(value.contains(CONTEXT_MGMT_BETA));
+
+        // And the merged value must actually replace the original on the wire.
+        let wire = String::from_utf8(rebuild_request(headers, &p.body, &p.extra_headers)).unwrap();
+        assert_eq!(wire.matches("anthropic-beta:").count(), 1, "duplicate header:\n{wire}");
+        assert!(wire.contains("some-other-beta"));
+    }
+
+    #[test]
+    fn context_editing_can_be_disabled() {
+        // PRISM_NO_CONTEXT_EDITING flips this flag; mutating process env from a
+        // test would race with every other test in the binary.
+        let mut json = agent_request_with_tools();
+        let out = apply_context_editing(&mut json, b"POST / HTTP/1.1\r\n\r\n", false);
+
+        assert!(out.is_none());
+        assert!(json.get("context_management").is_none());
+    }
+
+    #[test]
+    fn context_editing_is_anthropic_only() {
+        let raw = serde_json::to_vec(&agent_request_with_tools()).unwrap();
+        let p = prepare_request(raw.as_slice(), b"POST / HTTP/1.1\r\n\r\n", "openai", 0.75);
+        let json: serde_json::Value = serde_json::from_slice(&p.body).unwrap();
+        assert!(json.get("context_management").is_none());
+        assert!(p.extra_headers.is_empty());
     }
 
     #[test]
