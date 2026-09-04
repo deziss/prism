@@ -2,3 +2,5 @@ target/
 graphify-out/
 # BLAS symlink dir (created by build.rs, machine-local)
 .blas-link/
+.prism/
+.prismrc

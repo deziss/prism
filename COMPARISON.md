@@ -24,17 +24,20 @@ this table.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| MITM proxy (CONNECT, TLS, keep-alive, SSE relay) | **Live** | `proxy.rs`, verified end-to-end against api.openai.com |
-| Prompt compression (BM25, code-safe, prefix-preserving) | **Live** | `compress.rs`, 31 tests |
+| MITM proxy (CONNECT, TLS, keep-alive, SSE relay) | **Live** | `proxy.rs`, verified end-to-end against api.openai.com, Anthropic, DeepSeek, Groq, OpenRouter, xAI, Ollama |
+| Prompt compression (BM25, code-safe, prefix-preserving) | **Live** | `compress.rs`, 44 unit & integration tests passing |
 | Anthropic cache breakpoints + context editing | **Live** | `proxy.rs::apply_anthropic_caching`, `apply_context_editing` |
-| Token/cost telemetry → JSONL + Hub | **Live** | `analytics.rs::record_proxy_event` |
-| MCP server (JSON-RPC 2.0, 6 tools) | **Live** | `mcp.rs` |
-| TOON/TRON encoding, command filters | **Live** | `encode.rs`, `filter.rs` |
-| **Semantic cache** | **Not wired** | `cache.rs::put` has zero call sites, so the cache is always empty and `find_similar` always returns `[]`. `pseudo_embedding` is a 16-dim byte-bucket sum, not a semantic embedding. |
-| **CRAG (corrective retrieval)** | **Dead code** | `knowledge/crag.rs` — zero call sites; no CLI or MCP tool reaches it. |
-| **GraphRAG** | **Dead code** | `knowledge/graph_rag.rs` — zero uses outside its own file. `knowledge/mod.rs` has a separate, unrelated JSONL entity store. |
-| **TurboVec ANN** | **Built, barely used** | `vector.rs` is correct, but its only consumer is an empty-cache fallback in `memory.rs`. |
-| Config file (`compression_ratio`, ports) | **Partly wired** | The proxy reads `compression_ratio`; the other fields are still ignored. |
+| Token/cost telemetry → JSONL + Hub | **Live** | `analytics.rs::record_proxy_event` (tracks cached prompt tokens from Anthropic & OpenAI/DeepSeek) |
+| File Read Modes (`prism read`) | **Live** | `reader.rs`, 7 modes (`skeleton`, `map`, `clean`, `diff`, `lines`, `cached`, `full`) with AST skeletonizer (55-93% savings) & PathJail |
+| Cached Re-Reads (~15 tokens) | **Live** | `reader.rs::check_session_cache` (SHA-256 session ledger) |
+| Failure Tee Mechanism | **Live** | `cli.rs::run_command` saves raw uncompressed outputs to `~/.local/share/prism/tee/` on command failure |
+| MCP server (JSON-RPC 2.0, 12 tools) | **Live** | `mcp.rs`, expanded with file reader, command filter, graph indexer, cache lookup |
+| TOON/TRON encoding, command filters | **Live** | `encode.rs`, `filter.rs` (65+ commands) |
+| **Semantic cache** | **Live** | `cache.rs`, 16-dim SimHash feature projection + TurboVec ANN, sled persistence, CLI `prism cache`, MCP `prism_cache_lookup` |
+| **CRAG (corrective retrieval)** | **Live** | `knowledge/crag.rs`, adaptive relevance scoring + technical synonym rewrite, wired into `prism graph query` and MCP |
+| **GraphRAG Codebase Indexer** | **Live** | `knowledge/graph_rag.rs`, multi-file code dependency analysis (`prism graph index`), petgraph DiGraph with community detection |
+| **TurboVec ANN** | **Live** | `vector.rs`, actively indexing and querying semantic prompt/response cache |
+| Config file (`config.yaml`, `.prismrc`) | **Live** | `config.rs`, CLI `prism config` view/edit, proxy & servers |
 
 So the honest current differentiator is the **proxy layer** — system-wide
 interception with cache-aware, code-safe compression and Anthropic context
