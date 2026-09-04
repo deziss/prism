@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 
 // PRISM encode.rs — TOON (Token-Oriented Object Notation) + TRON encoding
 

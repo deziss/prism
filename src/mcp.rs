@@ -41,14 +41,82 @@ async fn memory_save_str(key: &str, value: &str) -> anyhow::Result<String> {
     Ok(format!("Saved: {}", key))
 }
 
-async fn graph_query_str(query: &str) -> anyhow::Result<String> {
-    use crate::knowledge::search_graph;
-    let results = search_graph(query)?;
+async fn graph_query_str(query: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+    use crate::knowledge::search_graph_with_path;
+    let results = search_graph_with_path(query, custom_path)?;
     if results.is_empty() {
         Ok(format!("No graph results for: {}", query))
     } else {
         Ok(format!("Knowledge Graph results:\n{}", results.iter().map(|r| format!("  • {}", r)).collect::<Vec<_>>().join("\n")))
     }
+}
+
+async fn graph_explain_str(node: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
+        Some(pair) => pair,
+        None => return Ok("No active graph found. Run `prism graph index` or provide a graph path.".to_string()),
+    };
+
+    match rag.explain_node(node) {
+        Some(exp) => {
+            let mut lines = Vec::new();
+            lines.push(format!("Node: {} (id: {})", exp.node.label, exp.node.id));
+            lines.push(format!("Source Graph: {}", path.display()));
+            lines.push(format!("Kind: {} | Path: {}", exp.node.kind, exp.node.path));
+            if let Some(comm) = exp.node.community {
+                lines.push(format!("Community: {}", comm));
+            }
+            lines.push(format!("Total Degree: {}", exp.outgoing.len() + exp.incoming.len()));
+
+            if !exp.outgoing.is_empty() {
+                lines.push(format!("\nOutgoing Connections ({}):", exp.outgoing.len()));
+                for (target, kind, weight) in exp.outgoing.iter().take(15) {
+                    lines.push(format!("  --> {} [{}] (w: {:.1}) in {}", target.label, kind, weight, target.path));
+                }
+            }
+            if !exp.incoming.is_empty() {
+                lines.push(format!("\nIncoming Connections ({}):", exp.incoming.len()));
+                for (source, kind, weight) in exp.incoming.iter().take(15) {
+                    lines.push(format!("  <-- {} [{}] (w: {:.1}) in {}", source.label, kind, weight, source.path));
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+        None => Ok(format!("Node '{}' not found in graph ({})", node, path.display())),
+    }
+}
+
+async fn graph_path_str(from: &str, to: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
+        Some(pair) => pair,
+        None => return Ok("No active graph found.".to_string()),
+    };
+
+    match rag.shortest_path(from, to) {
+        Some(steps) if steps.is_empty() => Ok(format!("Identical node: '{}' is '{}'.", from, to)),
+        Some(steps) => {
+            let mut lines = vec![format!("Shortest path in {} ({} hops):", path.display(), steps.len())];
+            for (i, (src, rel, tgt)) in steps.iter().enumerate() {
+                lines.push(format!("  [{}] {} --[{}]--> {}", i + 1, src.label, rel, tgt.label));
+            }
+            Ok(lines.join("\n"))
+        }
+        None => Ok(format!("No path found between '{}' and '{}' in graph.", from, to)),
+    }
+}
+
+async fn graph_god_nodes_str(top: usize, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
+        Some(pair) => pair,
+        None => return Ok("No active graph found.".to_string()),
+    };
+
+    let hubs = rag.god_nodes(top);
+    let mut lines = vec![format!("God Nodes / Architectural Hubs (Source: {}):", path.display())];
+    for (i, (node, degree)) in hubs.iter().enumerate() {
+        lines.push(format!("  {:2}. {:<25} {:>3} edges [{}] in {}", i + 1, node.label, degree, node.kind, node.path));
+    }
+    Ok(lines.join("\n"))
 }
 
 // ── JSON-RPC 2.0 envelope types ──────────────────────────────────────────────
@@ -115,6 +183,32 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "prism_read_file",
+            "description": "Intelligent 7-mode file reader. Modes: 'skeleton' (AST signatures, omits bodies, 70-85% savings), 'map' (outline), 'clean' (no comments), 'diff' (git diff against HEAD), 'lines' (range N-M), 'cached' (~15 token receipt if unchanged), 'full'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to file"},
+                    "mode": {"type": "string", "description": "Mode: skeleton, map, clean, diff, lines, cached, full", "default": "skeleton"},
+                    "lines": {"type": "string", "description": "Line range (e.g. 10-50) for lines mode"},
+                    "line_numbers": {"type": "boolean", "description": "Include line numbers", "default": false}
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "prism_filter_cmd",
+            "description": "Filter raw shell/CLI command output using 65+ RTK-compatible filters (git, cargo, pytest, tsc, docker, k8s, etc.).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Original command (e.g. 'git status' or 'cargo test')"},
+                    "output":  {"type": "string", "description": "Raw stdout/stderr output"}
+                },
+                "required": ["command", "output"]
+            }
+        },
+        {
             "name": "prism_memory_search",
             "description": "Search PRISM Memory Palace for previously stored facts, code snippets, and context.",
             "inputSchema": {
@@ -138,14 +232,80 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "prism_memory_stats",
+            "description": "View Memory Palace statistics across Recall, Core, and Archive tiers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
             "name": "prism_graph_query",
-            "description": "Query the PRISM Knowledge Graph built from your codebase entities and relationships.",
+            "description": "Query the PRISM Knowledge Graph or any existing Graphify graph (graphify-out/graph.json) using Corrective RAG (CRAG).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Graph query (entity name, relationship, or keyword)"}
+                    "query": {"type": "string", "description": "Graph query (entity name, relationship, function, or keyword)"},
+                    "graph": {"type": "string", "description": "Optional path to existing graph.json (e.g. 'graphify-out/graph.json')"}
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "prism_graph_explain",
+            "description": "Explain a codebase node/symbol and inspect its incoming/outgoing dependencies (compatible with Graphify and PRISM graphs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node": {"type": "string", "description": "Node name, symbol, or file path to explain"},
+                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
+                },
+                "required": ["node"]
+            }
+        },
+        {
+            "name": "prism_graph_path",
+            "description": "Find the shortest dependency call/import path between two nodes in the codebase graph.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "Source node or symbol"},
+                    "to": {"type": "string", "description": "Target node or symbol"},
+                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
+                },
+                "required": ["from", "to"]
+            }
+        },
+        {
+            "name": "prism_graph_god_nodes",
+            "description": "List the most connected architectural hub nodes in the graph (degree centrality).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "top": {"type": "integer", "description": "Top N nodes to return (default: 10)", "default": 10},
+                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
+                }
+            }
+        },
+        {
+            "name": "prism_graph_import",
+            "description": "Import and activate any existing Graphify (graphify-out/graph.json) or NetworkX graph into PRISM.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to graph.json"}
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "prism_graph_index",
+            "description": "Index a codebase directory into the PRISM GraphRAG dependency graph (extracts files, functions, types, and imports).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path to index (default: '.')", "default": "."}
+                }
             }
         },
         {
@@ -169,6 +329,39 @@ fn tools_list() -> Value {
                     "ratio": {"type": "number", "description": "Target compression ratio 0.0-1.0 (default 0.7 = keep 70%)", "default": 0.7}
                 },
                 "required": ["text"]
+            }
+        },
+        {
+            "name": "prism_cache_save",
+            "description": "Store a prompt-response pair into the PRISM Semantic Cache and TurboVec ANN vector index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Prompt text to cache"},
+                    "response": {"type": "string", "description": "Response text to cache"},
+                    "model": {"type": "string", "description": "Model name (default: gpt-4)", "default": "gpt-4"}
+                },
+                "required": ["prompt", "response"]
+            }
+        },
+        {
+            "name": "prism_cache_lookup",
+            "description": "Query the PRISM Semantic Cache using TurboVec ANN search for similar past prompts and responses.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Prompt or query string"},
+                    "limit": {"type": "integer", "description": "Max results to return (default: 3)", "default": 3}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "prism_analytics_summary",
+            "description": "Get a summary of PRISM token savings, cost economics, and semantic cache status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
             }
         }
     ])
@@ -214,9 +407,47 @@ async fn call_tool(name: &str, arguments: &Value) -> (Value, bool) {
 
         "prism_graph_query" => {
             let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            match graph_query_str(query).await {
+            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
+            match graph_query_str(query, graph_path).await {
                 Ok(result) => (text_content(result), false),
                 Err(e) => (text_content(format!("Graph query error: {}", e)), true),
+            }
+        }
+
+        "prism_graph_explain" => {
+            let node = arguments.get("node").and_then(|v| v.as_str()).unwrap_or("");
+            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
+            match graph_explain_str(node, graph_path).await {
+                Ok(result) => (text_content(result), false),
+                Err(e) => (text_content(format!("Graph explain error: {}", e)), true),
+            }
+        }
+
+        "prism_graph_path" => {
+            let from = arguments.get("from").and_then(|v| v.as_str()).unwrap_or("");
+            let to = arguments.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
+            match graph_path_str(from, to, graph_path).await {
+                Ok(result) => (text_content(result), false),
+                Err(e) => (text_content(format!("Graph path error: {}", e)), true),
+            }
+        }
+
+        "prism_graph_god_nodes" => {
+            let top = arguments.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
+            match graph_god_nodes_str(top, graph_path).await {
+                Ok(result) => (text_content(result), false),
+                Err(e) => (text_content(format!("Graph god nodes error: {}", e)), true),
+            }
+        }
+
+        "prism_graph_import" => {
+            let path_str = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = std::path::Path::new(path_str);
+            match crate::knowledge::import_graph(path).await {
+                Ok(_) => (text_content(format!("Successfully imported and activated graph from: {}", path_str)), false),
+                Err(e) => (text_content(format!("Graph import error: {}", e)), true),
             }
         }
 
@@ -244,13 +475,105 @@ async fn call_tool(name: &str, arguments: &Value) -> (Value, bool) {
             )), false)
         }
 
+        "prism_read_file" => {
+            let path_str = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let mode_str = arguments.get("mode").and_then(|v| v.as_str()).unwrap_or("skeleton");
+            let lines_opt = arguments.get("lines").and_then(|v| v.as_str());
+            let line_numbers = arguments.get("line_numbers").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let mode = if let Some(range) = lines_opt {
+                crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
+            } else {
+                mode_str.parse::<crate::reader::ReadMode>().unwrap_or(crate::reader::ReadMode::Skeleton)
+            };
+
+            match crate::reader::read_file(std::path::Path::new(path_str), mode, line_numbers) {
+                Ok(out) => {
+                    let header = format!(
+                        "// Mode: {} | Tokens: {} -> {} ({:.1}% saved)\n\n",
+                        out.mode_used, out.original_tokens, out.returned_tokens, out.savings_pct
+                    );
+                    (text_content(format!("{}{}", header, out.content)), false)
+                }
+                Err(e) => (text_content(format!("Read error: {}", e)), true),
+            }
+        }
+
+        "prism_filter_cmd" => {
+            let cmd_str = arguments.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let output_str = arguments.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+            let cmd = parts.first().copied().unwrap_or("");
+            let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+            let filtered = crate::filter::filter_output(output_str, cmd, &args);
+            (text_content(filtered.into_owned()), false)
+        }
+
+        "prism_memory_stats" => {
+            match memory::MemoryPalace::new(memory::memory_palace_dir_pub()) {
+                Ok(palace) => {
+                    let stats_str = format!(
+                        "Memory Palace Statistics:\n  Recall:  {} blocks\n  Core:    {} blocks\n  Archive: {} blocks",
+                        palace.count(memory::MemoryLayer::Recall),
+                        palace.count(memory::MemoryLayer::Core),
+                        palace.count(memory::MemoryLayer::Archive),
+                    );
+                    (text_content(stats_str), false)
+                }
+                Err(e) => (text_content(format!("Memory stats error: {}", e)), true),
+            }
+        }
+
+        "prism_graph_index" => {
+            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            match crate::knowledge::index_codebase(std::path::Path::new(path)).await {
+                Ok(_) => (text_content(format!("Successfully indexed codebase at '{}'", path)), false),
+                Err(e) => (text_content(format!("Indexing error: {}", e)), true),
+            }
+        }
+
+        "prism_cache_save" => {
+            let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+            let response = arguments.get("response").and_then(|v| v.as_str()).unwrap_or("");
+            let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("mcp");
+            if prompt.is_empty() || response.is_empty() {
+                (text_content("prompt and response are required".to_string()), true)
+            } else {
+                crate::cache::cache_response(prompt, response, model);
+                (text_content(format!("Cached response in TurboVec for prompt: {}", prompt)), false)
+            }
+        }
+
+        "prism_cache_lookup" => {
+            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+            let results = crate::cache::lookup_similar(query, limit);
+            if results.is_empty() {
+                (text_content(format!("No cached entries found for: {}", query)), false)
+            } else {
+                let formatted = results.iter().map(|e| {
+                    format!("[Cache: {} | model: {}] {}", e.key_hash, e.model.as_deref().unwrap_or("unknown"), e.response)
+                }).collect::<Vec<_>>().join("\n---\n");
+                (text_content(formatted), false)
+            }
+        }
+
+        "prism_analytics_summary" => {
+            let stats = crate::cache::get_cache_stats();
+            let report = format!(
+                "PRISM Analytics Summary:\n  Cache Entries: {}\n  Cache Location: {}",
+                stats.total_entries, stats.sled_path
+            );
+            (text_content(report), false)
+        }
+
         _ => (text_content(format!("Unknown tool: {}", name)), true),
     }
 }
 
 // ── JSON-RPC 2.0 dispatcher ───────────────────────────────────────────────────
 
-async fn handle_jsonrpc(headers: HeaderMap, body: Bytes) -> Response {
+async fn handle_jsonrpc(_headers: HeaderMap, body: Bytes) -> Response {
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {

@@ -16,10 +16,68 @@ pub enum MemoryCmd {
 
 #[derive(Parser, Debug)]
 pub enum GraphCmd {
-    Query { query: String },
+    Query {
+        query: String,
+        #[arg(short, long)]
+        graph: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        graphify: bool,
+    },
+    Explain {
+        node: String,
+        #[arg(short, long)]
+        graph: Option<std::path::PathBuf>,
+    },
+    Path {
+        from: String,
+        to: String,
+        #[arg(short, long)]
+        graph: Option<std::path::PathBuf>,
+    },
+    GodNodes {
+        #[arg(short, long, default_value_t = 10)]
+        top: usize,
+        #[arg(short, long)]
+        graph: Option<std::path::PathBuf>,
+    },
+    Import {
+        path: std::path::PathBuf,
+    },
     Extract { source: String },
     Export { output: String },
+    Stats {
+        #[arg(short, long)]
+        graph: Option<std::path::PathBuf>,
+    },
+    Index {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        #[arg(long)]
+        from_graphify: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum CacheCmd {
     Stats,
+    Clear,
+    Query { query: String },
+    Put {
+        #[arg(short, long)]
+        prompt: String,
+        #[arg(short, long)]
+        response: String,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub struct ConfigCmd {
+    #[arg(long, default_value_t = false)]
+    pub show: bool,
+    #[arg(long)]
+    pub set_key: Option<String>,
+    #[arg(long)]
+    pub set_val: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -42,7 +100,7 @@ fn data_dir() -> std::path::PathBuf {
 }
 
 // --- init ---
-pub async fn init(global: bool) -> Result<()> {
+pub async fn init(global: bool, guide: bool) -> Result<()> {
     let scope = if global { "global" } else { "local" };
     println!("Initializing PRISM ({scope})...");
 
@@ -72,16 +130,42 @@ pub async fn init(global: bool) -> Result<()> {
         write_claude_mcp_config()?;
     }
 
-    println!("\nPRISM initialized ({scope}).");
+    println!("
+PRISM initialized ({scope}).");
     println!("  Data dir:     {}", data_dir().display());
-    println!("\nNext steps:");
-    println!("  prism serve --port 8080    # start transparent LLM proxy");
+    println!("
+Next steps:");
+    println!("  prism serve --port 8081    # start transparent LLM proxy");
     println!("  prism mcp   --port 3003    # start MCP server for Claude Code");
     if global {
         println!("  source ~/.bashrc           # reload shell env vars");
         println!("  claude mcp add prism --transport http http://localhost:3003");
     }
-    println!("\nRun `prism gain` to see token savings.");
+    println!("
+Run prism gain to see token savings.");
+
+    if guide {
+        crate::guide::show_guide(None);
+    } else {
+        use std::io::Write;
+        print!("
+  [?] Explore the PRISM Interactive User Guide now? [y/N]: ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() {
+            let answer = line.trim().to_lowercase();
+            if answer == "y" || answer == "yes" {
+                crate::guide::show_guide(None);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// --- guide ---
+pub async fn guide(topic: Option<String>) -> Result<()> {
+    crate::guide::show_guide(topic.as_deref());
     Ok(())
 }
 
@@ -193,11 +277,136 @@ pub async fn memory(cmd: MemoryCmd) -> Result<()> {
 // --- graph ---
 pub async fn graph(cmd: GraphCmd) -> Result<()> {
     match cmd {
-        GraphCmd::Query { query } => crate::knowledge::query_graph(&query).await,
+        GraphCmd::Query { query, graph, graphify } => {
+            if graphify {
+                crate::knowledge::explain_node(&query, graph.as_deref()).await
+            } else {
+                crate::knowledge::query_graph(&query, graph.as_deref()).await
+            }
+        }
+        GraphCmd::Explain { node, graph } => {
+            crate::knowledge::explain_node(&node, graph.as_deref()).await
+        }
+        GraphCmd::Path { from, to, graph } => {
+            crate::knowledge::shortest_path(&from, &to, graph.as_deref()).await
+        }
+        GraphCmd::GodNodes { top, graph } => {
+            crate::knowledge::god_nodes(top, graph.as_deref()).await
+        }
+        GraphCmd::Import { path } => {
+            crate::knowledge::import_graph(&path).await
+        }
         GraphCmd::Extract { source } => crate::knowledge::extract_from_source(&source).await,
         GraphCmd::Export { output } => crate::knowledge::export_to_obsidian(&output).await,
-        GraphCmd::Stats => crate::knowledge::graph_stats().await,
+        GraphCmd::Stats { graph } => crate::knowledge::graph_stats(graph.as_deref()).await,
+        GraphCmd::Index { path, from_graphify } => {
+            if let Some(gf) = from_graphify {
+                crate::knowledge::import_graph(&gf).await
+            } else {
+                crate::knowledge::index_codebase(&path).await
+            }
+        }
     }
+}
+
+// --- read ---
+pub async fn read(
+    path: std::path::PathBuf,
+    mode_str: String,
+    lines: Option<String>,
+    line_numbers: bool,
+) -> Result<()> {
+    let mode = if let Some(range) = lines {
+        crate::reader::parse_lines_range(&range)?
+    } else {
+        mode_str.parse::<crate::reader::ReadMode>()?
+    };
+
+    let out = crate::reader::read_file(&path, mode, line_numbers)?;
+    println!("{}", out.content);
+    if !out.is_cached_receipt {
+        eprintln!(
+            "[prism read] {} ({}) — {} -> {} tokens ({:.1}% saved)",
+            path.display(), out.mode_used, out.original_tokens, out.returned_tokens, out.savings_pct
+        );
+    }
+    Ok(())
+}
+
+// --- cache ---
+pub async fn cache(cmd: CacheCmd) -> Result<()> {
+    match cmd {
+        CacheCmd::Stats => {
+            let stats = crate::cache::get_cache_stats();
+            println!("\n  PRISM Semantic Cache Statistics");
+            println!("  {}", "═".repeat(40));
+            println!("  Total entries: {}", stats.total_entries);
+            println!("  Storage path:  {}", stats.sled_path);
+        }
+        CacheCmd::Clear => {
+            let cleared = crate::cache::clear_cache()?;
+            println!("Cleared {} cache entries.", cleared);
+        }
+        CacheCmd::Query { query } => {
+            let results = crate::cache::lookup_similar(&query, 5);
+            if results.is_empty() {
+                println!("No cached entries found for: {}", query);
+            } else {
+                println!("Cache matches for '{}':\n", query);
+                for (i, entry) in results.iter().enumerate() {
+                    println!("  [{}] hash: {} | model: {}", i + 1, entry.key_hash, entry.model.as_deref().unwrap_or("unknown"));
+                    let preview = if entry.response.len() > 150 { &entry.response[..150] } else { &entry.response };
+                    println!("      {}\n", preview);
+                }
+            }
+        }
+        CacheCmd::Put { prompt, response } => {
+            crate::cache::cache_response(&prompt, &response, "cli");
+            println!("Cached response for prompt: \"{}\"", prompt);
+        }
+    }
+    Ok(())
+}
+
+// --- config ---
+pub async fn config(cmd: ConfigCmd) -> Result<()> {
+    let global_cfg = crate::config::load_global().unwrap_or_default();
+    if cmd.show || (cmd.set_key.is_none() && cmd.set_val.is_none()) {
+        println!("\n  PRISM Configuration");
+        println!("  {}", "═".repeat(40));
+        println!("{}", crate::config::config_to_json(&global_cfg));
+    } else if let (Some(key), Some(val)) = (cmd.set_key, cmd.set_val) {
+        let mut cfg = global_cfg;
+        match key.as_str() {
+            "compression_ratio" => {
+                if let Ok(r) = val.parse::<f64>() {
+                    cfg.compression_ratio = Some(r);
+                }
+            }
+            "cache_enabled" => {
+                cfg.cache_enabled = val.parse::<bool>().unwrap_or(true);
+            }
+            "toon_enabled" => {
+                cfg.toon_enabled = val.parse::<bool>().unwrap_or(true);
+            }
+            "proxy_port" => {
+                cfg.proxy_port = val.parse::<u16>().ok();
+            }
+            "mcp_port" => {
+                cfg.mcp_port = val.parse::<u16>().ok();
+            }
+            "tiktoken_model" => {
+                cfg.tiktoken_model = Some(val.clone());
+            }
+            _ => {
+                println!("Unknown config key: {}. (Supported: compression_ratio, cache_enabled, toon_enabled, proxy_port, mcp_port, tiktoken_model)", key);
+                return Ok(());
+            }
+        }
+        crate::config::save_global(&cfg)?;
+        println!("Updated config: {} = {}", key, val);
+    }
+    Ok(())
 }
 
 // --- toon ---
@@ -305,19 +514,44 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Filter output through RTK-compatible filters
-    let filtered = crate::filter::filter_output(&stdout, cmd, &args[1..]);
-
-    if !output.stderr.is_empty() && !stderr.contains("error") && stderr.len() < 200 {
-        let combined = format!("{}\n{}", filtered, stderr);
-        let _ = std::io::stdout().write_all(combined.as_bytes());
+    let raw_text = if stdout.is_empty() && !stderr.is_empty() {
+        stderr.to_string()
+    } else if !stderr.is_empty() && !output.status.success() {
+        format!("{}\n{}", stdout, stderr)
     } else {
-        let _ = std::io::stdout().write_all(filtered.as_bytes());
+        stdout.clone()
+    };
+
+    // Filter output through RTK-compatible filters
+    let filtered = crate::filter::filter_output(&raw_text, cmd, &args[1..]);
+    let _ = std::io::stdout().write_all(filtered.as_bytes());
+    if !filtered.ends_with('\n') && !filtered.is_empty() {
+        let _ = std::io::stdout().write_all(b"\n");
     }
 
     // Track tokens
     if let Ok(tokens) = crate::analytics::count_tokens(&filtered, "gpt-4") {
         crate::analytics::record_command(cmd, filtered.len(), tokens).ok();
+    }
+
+    // RTK-style Failure Tee Mechanism: preserve raw output on command failure
+    if !output.status.success() {
+        let tee_dir = crate::prism_data_dir().join("tee");
+        if std::fs::create_dir_all(&tee_dir).is_ok() {
+            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let safe_cmd: String = cmd.chars().filter(|c| c.is_alphanumeric()).collect();
+            let tee_file = tee_dir.join(format!("{}_{}.log", safe_cmd, ts));
+            let raw_combined = format!(
+                "COMMAND: {} {:?}\nEXIT CODE: {}\n\n--- RAW STDOUT ---\n{}\n\n--- RAW STDERR ---\n{}",
+                cmd, &args[1..], output.status.code().unwrap_or(-1), stdout, stderr
+            );
+            let _ = std::fs::write(&tee_file, raw_combined);
+            eprintln!(
+                "[prism] Command failed (exit code {}). Raw output preserved at: {}",
+                output.status.code().unwrap_or(1),
+                tee_file.display()
+            );
+        }
     }
 
     std::process::exit(output.status.code().unwrap_or(0))

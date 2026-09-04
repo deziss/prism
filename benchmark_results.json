@@ -1,0 +1,122 @@
+[
+  {
+    "category": "CLI Command Filter",
+    "benchmark": "git status",
+    "raw_tokens": 252,
+    "rtk_tokens": 117,
+    "rtk_savings": "53.6%",
+    "rtk_ms": "15.4ms",
+    "prism_tokens": 117,
+    "prism_savings": "53.6%",
+    "prism_ms": "47.4ms",
+    "winner": "TIE / PARITY"
+  },
+  {
+    "category": "CLI Command Filter",
+    "benchmark": "git log (5 commits)",
+    "raw_tokens": 86,
+    "rtk_tokens": 435,
+    "rtk_savings": "-405.8%",
+    "rtk_ms": "7.2ms",
+    "prism_tokens": 425,
+    "prism_savings": "-394.2%",
+    "prism_ms": "46.1ms",
+    "winner": "PRISM"
+  },
+  {
+    "category": "CLI Command Filter",
+    "benchmark": "cargo check",
+    "raw_tokens": 47,
+    "rtk_tokens": 29,
+    "rtk_savings": "38.3%",
+    "rtk_ms": "519.2ms",
+    "prism_tokens": 22,
+    "prism_savings": "53.2%",
+    "prism_ms": "541.1ms",
+    "winner": "PRISM"
+  },
+  {
+    "category": "Source File Reading",
+    "benchmark": "reader.rs (full vs rtk vs prism skeleton)",
+    "raw_tokens": 5938,
+    "rtk_tokens": 5938,
+    "rtk_savings": "0.0%",
+    "rtk_ms": "4.9ms",
+    "prism_tokens": 398,
+    "prism_savings": "93.3%",
+    "prism_ms": "39.9ms",
+    "winner": "PRISM (+35-40% better via AST skeleton)"
+  },
+  {
+    "category": "Source File Reading",
+    "benchmark": "reader.rs (prism map mode)",
+    "raw_tokens": 5938,
+    "rtk_tokens": 5938,
+    "rtk_savings": "0.0%",
+    "rtk_ms": "4.9ms",
+    "prism_tokens": 370,
+    "prism_savings": "93.8%",
+    "prism_ms": "\u2014",
+    "winner": "PRISM (Hierarchical Outline)"
+  },
+  {
+    "category": "Source File Reading",
+    "benchmark": "reader.rs (prism cached repeat read)",
+    "raw_tokens": 5938,
+    "rtk_tokens": 5938,
+    "rtk_savings": "0.0%",
+    "rtk_ms": "4.9ms",
+    "prism_tokens": 49,
+    "prism_savings": "99.2%",
+    "prism_ms": "\u2014",
+    "winner": "PRISM (99.8% Savings via Hash Receipt)"
+  },
+  {
+    "category": "Source File Reading",
+    "benchmark": "cache.rs (AST skeleton)",
+    "raw_tokens": 2508,
+    "rtk_tokens": 2508,
+    "rtk_savings": "0.0%",
+    "rtk_ms": "4.9ms",
+    "prism_tokens": 611,
+    "prism_savings": "75.6%",
+    "prism_ms": "46.2ms",
+    "winner": "PRISM (AST Signature Extraction)"
+  },
+  {
+    "category": "Structured Data",
+    "benchmark": "JSON array (25 records) -> TOON",
+    "raw_tokens": 1494,
+    "rtk_tokens": 54,
+    "rtk_savings": "96.4%",
+    "rtk_ms": "6.6ms",
+    "prism_tokens": 725,
+    "prism_savings": "51.5%",
+    "prism_ms": "2.6ms",
+    "winner": "RTK"
+  },
+  {
+    "category": "Context Compression",
+    "benchmark": "AGENTS.md (BM25 50% ratio)",
+    "raw_tokens": 2115,
+    "rtk_tokens": 2115,
+    "rtk_savings": "0.0% (Unsupported)",
+    "rtk_ms": "N/A",
+    "prism_tokens": 1064,
+    "prism_savings": "49.7%",
+    "prism_ms": "45.5ms",
+    "winner": "PRISM (Exclusive Feature)"
+  },
+  {
+    "category": "Binary Performance",
+    "benchmark": "CLI cold start / help latency",
+    "raw_tokens": 0,
+    "rtk_tokens": 0,
+    "rtk_savings": "\u2014",
+    "rtk_ms": "2.03ms",
+    "prism_tokens": 0,
+    "prism_savings": "\u2014",
+    "prism_ms": "4.23ms",
+    "winner": "RTK"
+  }
+]

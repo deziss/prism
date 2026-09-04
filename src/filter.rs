@@ -109,24 +109,77 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
 
 // ─── GIT ──────────────────────────────────────────────────────────────────────
 
+fn find_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if (arg == "-C" || arg == "-c" || arg == "--git-dir" || arg == "--work-tree" || arg == "--manifest-path") && i + 1 < args.len() {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(arg);
+    }
+    None
+}
+
 fn filter_git(args: &[&str], output: &str) -> String {
-    match args.first() {
-        Some(&"status") | Some(&"-s") | Some(&"--short") => filter_git_status(output),
-        Some(&"diff")   => filter_git_diff(output),
-        Some(&"log")    => filter_git_log(output),
-        Some(&"branch") => filter_git_branch(output),
-        Some(&"remote") => filter_git_remote(output),
-        _ => output.to_string(),
+    let sub = find_subcommand(args);
+    match sub {
+        Some("status") => filter_git_status(output),
+        Some("diff")   => filter_git_diff(output),
+        Some("log")    => filter_git_log(output),
+        Some("branch") => filter_git_branch(output),
+        Some("remote") => filter_git_remote(output),
+        _ => {
+            if args.iter().any(|&a| a == "-s" || a == "--short" || a == "status") {
+                filter_git_status(output)
+            } else {
+                output.to_string()
+            }
+        }
     }
 }
 
 fn filter_git_status(output: &str) -> String {
-    output.lines().filter(|l| {
-        !l.starts_with("On branch")
-            && !l.contains("Changes not staged")
-            && !l.contains("no changes added")
-            && !l.trim().is_empty()
-    }).collect::<Vec<_>>().join("\n")
+    let mut lines = Vec::new();
+    let mut in_untracked = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("(use \"git")
+            || trimmed.starts_with("no changes added")
+            || trimmed.contains("Changes to be committed:")
+            || trimmed.contains("Changes not staged") {
+            continue;
+        }
+        if let Some(branch) = trimmed.strip_prefix("On branch ") {
+            lines.push(format!("* {}", branch));
+            continue;
+        }
+        if trimmed == "Untracked files:" {
+            in_untracked = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("modified:") {
+            lines.push(format!(" M {}", rest.trim()));
+        } else if let Some(rest) = trimmed.strip_prefix("new file:") {
+            lines.push(format!(" A {}", rest.trim()));
+        } else if let Some(rest) = trimmed.strip_prefix("deleted:") {
+            lines.push(format!(" D {}", rest.trim()));
+        } else if let Some(rest) = trimmed.strip_prefix("renamed:") {
+            lines.push(format!(" R {}", rest.trim()));
+        } else if in_untracked {
+            lines.push(format!("?? {}", trimmed));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
 }
 
 fn filter_git_diff(output: &str) -> String {
@@ -184,14 +237,14 @@ fn filter_jj(args: &[&str], output: &str) -> String {
 // ─── CARGO ────────────────────────────────────────────────────────────────────
 
 fn filter_cargo(args: &[&str], output: &str) -> String {
-    match args.first() {
-        Some(&"test")    => filter_cargo_test(output),
-        Some(&"nextest") => filter_nextest(output),
-        Some(&"build")   => filter_cargo_build(output),
-        Some(&"check")   => filter_cargo_check(output),
-        Some(&"clippy")  => filter_clippy(output),
-        Some(&"doc")     => filter_cargo_doc(output),
-        Some(&"watch")   => filter_cargo_build(output),
+    match find_subcommand(args) {
+        Some("test")    => filter_cargo_test(output),
+        Some("nextest") => filter_nextest(output),
+        Some("build")   => filter_cargo_build(output),
+        Some("check")   => filter_cargo_check(output),
+        Some("clippy")  => filter_clippy(output),
+        Some("doc")     => filter_cargo_doc(output),
+        Some("watch")   => filter_cargo_build(output),
         _ => output.to_string(),
     }
 }
@@ -199,23 +252,13 @@ fn filter_cargo(args: &[&str], output: &str) -> String {
 fn filter_cargo_test(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut out = Vec::new();
-    let mut in_failures = false;
     for line in &lines {
-        if line.contains("test result:") || line.contains("FAILED") || line.contains("passed") {
-            out.push(line.to_string());
-        } else if line.contains("failures:") {
-            in_failures = true;
-            out.push(line.to_string());
-        } else if in_failures {
-            if line.starts_with("---- ") || line.contains("assertion") || line.contains("thread") {
-                out.push(line.to_string());
-            } else if line.trim().is_empty() {
-                break;
-            }
+        if line.contains("test result:") || line.contains("FAILED") || line.contains("running ") {
+            out.push(*line);
         }
     }
     if out.is_empty() {
-        lines.iter().rev().take(5).map(|l| l.to_string()).collect::<Vec<_>>().join("\n")
+        output.lines().filter(|l| l.contains("Finished") || l.contains("test")).collect::<Vec<_>>().join("\n")
     } else {
         out.join("\n")
     }
@@ -229,16 +272,31 @@ fn filter_nextest(output: &str) -> String {
 }
 
 fn filter_cargo_build(output: &str) -> String {
-    output.lines().filter(|l| {
-        !l.contains("Compiling") && !l.contains("Finished")
-            && !l.contains("Building") && !l.trim().is_empty()
-    }).collect::<Vec<_>>().join("\n")
+    let has_issues = output.contains("error[E") || output.contains("warning:") || output.contains("error:");
+    if !has_issues {
+        output.lines()
+            .find(|l| l.contains("Finished"))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| "✓ cargo build finished".to_string())
+    } else {
+        output.lines().filter(|l| {
+            l.contains("error") || l.contains("warning") || l.starts_with("  -->") || l.contains("Finished")
+        }).collect::<Vec<_>>().join("\n")
+    }
 }
 
 fn filter_cargo_check(output: &str) -> String {
-    output.lines().filter(|l| {
-        l.contains("error") || l.contains("warning") || !l.trim().is_empty()
-    }).collect::<Vec<_>>().join("\n")
+    let has_issues = output.contains("error[E") || output.contains("warning:") || output.contains("error:");
+    if !has_issues {
+        output.lines()
+            .find(|l| l.contains("Finished"))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| "✓ cargo check passed with 0 warnings".to_string())
+    } else {
+        output.lines().filter(|l| {
+            l.contains("error") || l.contains("warning") || l.starts_with("  -->") || l.contains("Finished")
+        }).collect::<Vec<_>>().join("\n")
+    }
 }
 
 fn filter_cargo_doc(output: &str) -> String {

@@ -8,7 +8,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     pub name: String,
-    pub displayName: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
     pub version: String,
     pub description: String,
     pub publisher: String,

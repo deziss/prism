@@ -1,4 +1,4 @@
-//! PRISM — Personal Reasoning & Intelligence System for Models
+//! PRISM — Prompt Reduction, Indexing & Semantic Memory
 //! Entry point for the `prism` binary.
 
 use anyhow::Result;
@@ -11,6 +11,12 @@ enum Args {
     Init {
         #[arg(long, default_value_t = false)]
         global: bool,
+        #[arg(short, long, default_value_t = false)]
+        guide: bool,
+    },
+    Guide {
+        #[arg(value_name = "TOPIC")]
+        topic: Option<String>,
     },
     Gain {
         #[arg(long, default_value_t = false)]
@@ -63,6 +69,23 @@ enum Args {
         #[arg(short, long, default_value_t = 0.5)]
         ratio: f64,
     },
+    Read {
+        path: std::path::PathBuf,
+        #[arg(short, long, default_value = "skeleton")]
+        mode: String,
+        #[arg(long)]
+        lines: Option<String>,
+        #[arg(short = 'n', long, default_value_t = false)]
+        line_numbers: bool,
+    },
+    Cache {
+        #[command(subcommand)]
+        cmd: cli::CacheCmd,
+    },
+    Config {
+        #[command(flatten)]
+        cmd: cli::ConfigCmd,
+    },
     Vscode {
         #[arg(short, long, default_value = "prism-vscode")]
         output: std::path::PathBuf,
@@ -95,7 +118,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(matches!(args, Args::Serve { .. } | Args::Mcp { .. }));
     match args {
-        Args::Init { global } => cli::init(global).await,
+        Args::Init { global, guide } => cli::init(global, guide).await,
+        Args::Guide { topic } => cli::guide(topic).await,
         Args::Gain { history } => analytics::show_gains(history).await,
         Args::Discover => analytics::discover().await,
         Args::Proxy { cmd } => cli::proxy(cmd).await,
@@ -107,6 +131,11 @@ async fn main() -> Result<()> {
         Args::Count { string, file, model } => cli::count(string, file, model).await,
         Args::Hook { cmd } => cli::hook(cmd).await,
         Args::Compress { string, file, ratio } => cli::compress(string, file, ratio).await,
+        Args::Read { path, mode, lines, line_numbers } => {
+            cli::read(path, mode, lines, line_numbers).await
+        }
+        Args::Cache { cmd } => cli::cache(cmd).await,
+        Args::Config { cmd } => cli::config(cmd).await,
         Args::Vscode { output } => cli::vscode_gen(output).await,
         Args::Cmd { args } => cli::run_command(args).await,
     }

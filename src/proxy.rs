@@ -21,11 +21,24 @@ const AI_HOSTS: &[(&str, &str)] = &[
     ("generativelanguage.googleapis.com",   "gemini"),
     ("api.mistral.ai",                      "mistral"),
     ("api.cohere.com",                      "cohere"),
+    ("api.deepseek.com",                    "deepseek"),
+    ("api.groq.com",                        "groq"),
+    ("openrouter.ai",                       "openrouter"),
+    ("api.perplexity.ai",                   "perplexity"),
+    ("api.together.xyz",                    "together"),
+    ("api.fireworks.ai",                    "fireworks"),
+    ("api.x.ai",                            "xai"),
+    ("localhost",                           "ollama"),
+    ("127.0.0.1",                           "ollama"),
+    ("api.cerebras.ai",                     "cerebras"),
 ];
 
 fn detect_provider(host: &str) -> Option<&'static str> {
     let host_lower = host.to_lowercase();
     let bare = host_lower.split(':').next().unwrap_or(&host_lower);
+    if host_lower.contains(":11434") || bare == "localhost" || bare == "127.0.0.1" {
+        return Some("ollama");
+    }
     AI_HOSTS.iter().find(|(h, _)| bare == *h).map(|(_, p)| *p)
 }
 
@@ -350,11 +363,41 @@ fn extract_resp_tokens(body: &[u8]) -> u32 {
     best
 }
 
+fn extract_cached_tokens(body: &[u8]) -> u32 {
+    fn cached_of(j: &serde_json::Value) -> Option<u32> {
+        j.pointer("/usage/prompt_tokens_details/cached_tokens")
+            .or_else(|| j.pointer("/usage/cache_read_input_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }
+
+    if let Ok(j) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(t) = cached_of(&j) {
+            return t;
+        }
+    }
+
+    let s = String::from_utf8_lossy(body);
+    let mut best = 0u32;
+    for line in s.lines() {
+        let payload = line.strip_prefix("data:").unwrap_or(line).trim();
+        if !payload.starts_with('{') {
+            continue;
+        }
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) {
+            if let Some(t) = cached_of(&j) {
+                best = best.max(t);
+            }
+        }
+    }
+    best
+}
+
 const MAX_SNIFF_BYTES: usize = 512 * 1024;
 
 /// Copy the upstream response to the client as it arrives, flushing every chunk
-/// so SSE reaches the client token-by-token. Returns (response_tokens, upstream_wants_close).
-async fn relay_response<U, C>(upstream: &mut U, client: &mut C) -> Option<(u32, bool)>
+/// so SSE reaches the client token-by-token. Returns (response_tokens, cached_tokens, upstream_wants_close).
+async fn relay_response<U, C>(upstream: &mut U, client: &mut C) -> Option<(u32, u32, bool)>
 where
     U: tokio::io::AsyncRead + Unpin,
     C: tokio::io::AsyncWrite + Unpin,
@@ -372,7 +415,7 @@ where
     let mut tail: Vec<u8> = Vec::new();
     let mut seen = 0usize;
 
-    let mut push = |bytes: &[u8], sniff: &mut Vec<u8>, tail: &mut Vec<u8>| {
+    let push = |bytes: &[u8], sniff: &mut Vec<u8>, tail: &mut Vec<u8>| {
         if sniff.len() < MAX_SNIFF_BYTES {
             sniff.extend_from_slice(bytes);
         }
@@ -415,7 +458,7 @@ where
 
     // Chunked bodies still carry their framing; decode before parsing usage.
     let parseable = if chunked { dechunk_bytes(&sniff) } else { sniff };
-    Some((extract_resp_tokens(&parseable), close))
+    Some((extract_resp_tokens(&parseable), extract_cached_tokens(&parseable), close))
 }
 
 /// Strip chunk framing from an already-buffered chunked body.
@@ -872,7 +915,7 @@ async fn serve_session(
         }
         let _ = upstream.flush().await;
 
-        let Some((resp_tokens, upstream_close)) = relay_response(&mut upstream, &mut client).await
+        let Some((resp_tokens, cached_tokens, upstream_close)) = relay_response(&mut upstream, &mut client).await
         else {
             return;
         };
@@ -882,11 +925,12 @@ async fn serve_session(
         let provider_s = provider.to_string();
         let ip = source_ip.clone();
         let key = api_key_hash.clone();
+        let is_cache_hit = cached_tokens > 0;
 
         tokio::spawn(async move {
             crate::analytics::record_proxy_event(
                 &ip, &key, &provider_s, &model_s,
-                orig_tokens, sent_tokens, resp_tokens, latency_ms, false,
+                orig_tokens, sent_tokens, resp_tokens, latency_ms, is_cache_hit,
             );
             let saved = orig_tokens.saturating_sub(sent_tokens);
             info!(
@@ -1417,7 +1461,7 @@ mod tests {
             let _ = cli_rx.read_to_end(&mut sink).await;
         });
         producer.await.unwrap();
-        let (tokens, _) = relay.await.unwrap().expect("relay returned no result");
+        let (tokens, ..) = relay.await.unwrap().expect("relay returned no result");
         let _ = drain.await;
 
         assert_eq!(tokens, 42, "usage was not recovered from the SSE stream");

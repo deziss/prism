@@ -1,6 +1,7 @@
 //! Analytics — token counting, savings tracking, and dashboards.
 
 use anyhow::Result;
+use colored::Colorize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -188,7 +189,6 @@ fn load_proxy_summary() -> ProxySummary {
 
 /// Show token savings dashboard.
 pub async fn show_gains(history_flag: bool) -> Result<()> {
-    use colored::Colorize;
 
     let hist = load_history()?;
 
@@ -201,9 +201,10 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
     } else {
         let total: usize = hist.commands.iter().map(|e| e.output_tokens).sum();
 
-        println!("\n  {} PRISM Token Analytics {}\n", "═".repeat(50), "═".repeat(5));
-        println!("  Total commands tracked:  {}", hist.commands.len().to_string().cyan());
-        println!("  Total output tokens:      {}", total.to_string().cyan());
+        println!("\n  {}  {}", "PRISM TOKEN ANALYTICS".bold().cyan(), "v0.1.0".dimmed());
+        println!("  {}\n", "─".repeat(65).dimmed());
+        println!("  {:<30} {}", "Total commands tracked:", hist.commands.len().to_string().cyan().bold());
+        println!("  {:<30} {}", "Total output tokens:", total.to_string().cyan().bold());
 
         // Measured proxy savings — read from the event log, not estimated.
         let proxy = load_proxy_summary();
@@ -213,19 +214,21 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
             } else {
                 0.0
             };
-            println!("\n  Proxy-intercepted LLM requests: {}", proxy.requests.to_string().cyan());
-            println!("  Prompt tokens before PRISM:    {}", proxy.orig_tokens.to_string().cyan());
-            println!("  Prompt tokens actually sent:   {}", proxy.sent_tokens.to_string().cyan());
+            println!("\n  {}", "PROXY INTERCEPTION:".bold().yellow());
+            println!("    {:<28} {}", "Requests intercepted:", proxy.requests.to_string().cyan());
+            println!("    {:<28} {}", "Original prompt tokens:", proxy.orig_tokens.to_string().cyan());
+            println!("    {:<28} {}", "Sent prompt tokens:", proxy.sent_tokens.to_string().cyan());
             println!(
-                "  Measured savings:              {} ({:.1}%)",
-                proxy.saved_tokens().to_string().green(),
+                "    {:<28} {} ({:.1}%)",
+                "Measured token savings:",
+                proxy.saved_tokens().to_string().green().bold(),
                 pct
             );
-            println!("  Spend on forwarded requests:   ${:.4}", proxy.cost_usd);
+            println!("    {:<28} ${:.4}", "Spend on forwarded traffic:", proxy.cost_usd);
         } else {
             println!(
                 "\n  {}",
-                "No proxy traffic recorded yet — start it with `prism serve`.".dimmed()
+                "No proxy traffic recorded yet — start intercepting with `prism-enable`.".dimmed()
             );
         }
 
@@ -236,10 +239,11 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
         let mut top: Vec<_> = by_cmd.iter().collect();
         top.sort_by(|a, b| b.1.cmp(a.1));
 
-        println!("\n  Top commands by token usage:");
+        println!("\n  {}", "TOP COMMANDS BY TOKEN SPEND:".bold().yellow());
         for (cmd, tokens) in top.into_iter().take(10) {
-            println!("    {:>12}  {}", tokens, cmd);
+            println!("    {:<18} {:>10} tokens", cmd.cyan(), tokens.to_string().white());
         }
+        println!("  {}\n", "─".repeat(65).dimmed());
     }
 
     Ok(())
@@ -247,9 +251,9 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
 
 /// Discover missed optimization opportunities from Claude Code history.
 pub async fn discover() -> Result<()> {
-    use colored::Colorize;
 
-    println!("\n  {} PRISM Discovery {}\n", "═".repeat(50), "═".repeat(10));
+    println!("\n  {}  {}", "PRISM DISCOVERY".bold().cyan(), "v0.1.0".dimmed());
+    println!("  {}\n", "─".repeat(65).dimmed());
 
     let hist = load_history()?;
     let uncached: Vec<_> = hist.commands.iter().filter(|e| !e.is_cacheable()).collect();

@@ -1,7 +1,6 @@
 // PRISM utils.rs — shared utilities
 
 use std::path::Path;
-use std::fs;
 
 /// Get file extension as a string
 pub fn file_ext(path: &Path) -> Option<&str> {

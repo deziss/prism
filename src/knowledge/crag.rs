@@ -28,7 +28,7 @@ pub async fn corrective_retrieve(query: &str, threshold: f32) -> Result<Vec<Crag
     let initial = retrieve_from_graph(query)?;
     let relevance = evaluate_relevance(query, &initial);
 
-    if relevance >= threshold {
+    if relevance >= threshold && !initial.is_empty() {
         return Ok(initial
             .into_iter()
             .map(|content| CragResult {
@@ -40,7 +40,7 @@ pub async fn corrective_retrieve(query: &str, threshold: f32) -> Result<Vec<Crag
             .collect());
     }
 
-    // Step 2: below threshold — rewrite query + re-retrieve
+    // Step 2: below threshold or empty — rewrite query + re-retrieve
     let rewritten = corrective_rewrite(query).await;
     let mut corrected = retrieve_from_graph(&rewritten)?;
 
@@ -111,25 +111,33 @@ pub async fn corrective_rewrite(query: &str) -> String {
 }
 
 fn retrieve_from_graph(query: &str) -> Result<Vec<String>> {
-    let entities_path = super::graph_dir().join("entities.jsonl");
-    if !entities_path.exists() {
-        return Ok(Vec::new());
+    super::search_graph(query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evaluate_relevance_empty() {
+        assert_eq!(evaluate_relevance("test", &[]), 0.0);
     }
-    let content = std::fs::read_to_string(entities_path)?;
-    let query_lower = query.to_lowercase();
-    Ok(content
-        .lines()
-        .filter_map(|line| {
-            let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            let name = v["name"].as_str().unwrap_or("");
-            let desc = v["description"].as_str().unwrap_or("");
-            if name.to_lowercase().contains(&query_lower)
-                || desc.to_lowercase().contains(&query_lower)
-            {
-                Some(format!("{}: {}", name, desc))
-            } else {
-                None
-            }
-        })
-        .collect())
+
+    #[test]
+    fn test_evaluate_relevance_matching() {
+        let results = vec![
+            "fn compute_cache_hash(key: &str) -> String".to_string(),
+            "unrelated text about database".to_string(),
+        ];
+        let rel = evaluate_relevance("compute cache hash", &results);
+        assert!(rel > 0.4);
+    }
+
+    #[tokio::test]
+    async fn test_corrective_rewrite_expands_synonyms() {
+        let query = "find function in module";
+        let rewritten = corrective_rewrite(query).await;
+        assert!(rewritten.contains("method") || rewritten.contains("fn") || rewritten.contains("function"));
+        assert!(rewritten.contains("file") || rewritten.contains("path") || rewritten.contains("module"));
+    }
 }
