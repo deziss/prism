@@ -12,6 +12,7 @@
 - [tiktoken slow on large requests](#tiktoken-slow-on-large-requests)
 - [Memory Palace Empty After Restart](#memory-palace-empty-after-restart)
 - [Claude Code does not see PRISM tools](#claude-code-does-not-see-prism-tools)
+- [Anthropic 400 Error: cache_control.ttl ordering (1h after 5m)](#anthropic-400-error-cache_controlttl-ordering-1h-after-5m)
 
 ---
 
@@ -351,3 +352,38 @@ curl -s http://localhost:3003/health
 # {"status":"ok","mcp":true,"version":"2024-11-05"}
 ```
 Note `prism mcp` defaults to 3003, matching what `init` registers.
+
+---
+
+## Anthropic 400 Error: cache_control.ttl ordering (1h after 5m)
+
+### Symptom
+When running agentic workloads (Claude Code, Cursor, Windsurf, or Anthropic SDK clients) across long multi-turn sessions with tools and system prompts, the API returns:
+```text
+API Error: 400 messages.0.content.3.content.0.cache_control.ttl: a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block. Note that blocks are processed in the following order: tools, system, messages.
+```
+
+### Root Cause
+Anthropic requires prompt cache blocks to follow a non-increasing TTL order across the evaluation sequence: `tools` → `system` → `messages`. If an earlier block (e.g., in `system` or an earlier turn) uses the default 5-minute TTL (`5m` or omitted `ttl`), and a later block (e.g., in a tool result or recent message) specifies `ttl='1h'`, Anthropic rejects the entire request with an HTTP 400 error.
+
+### PRISM Solution
+PRISM transparently enforces Anthropic caching invariants inside `src/proxy.rs`:
+1. **Automatic TTL Promotion**: If any breakpoint specifies `ttl='1h'`, all preceding breakpoints (with `5m` or default TTL) are automatically upgraded to `ttl='1h'`.
+2. **Strict 4-Breakpoint Limit**: Anthropic permits at most 4 active breakpoints across the request. PRISM automatically prunes excess breakpoints from tail messages.
+3. **Client Cache Strategy Preservation**: If an upstream agent (e.g., Claude Code or Cursor) already manages its own cache breakpoints, PRISM preserves the caller's strategy without injecting redundant duplicate breakpoints.
+
+### Verification & Monitoring
+To inspect dynamic cache modifications in real time:
+```bash
+journalctl --user -u prism-proxy.service -f
+```
+Example diagnostic log output:
+```text
+WARN cache_control: promoting /system/0/cache_control from ttl=5m (default) to ttl=1h (block 0 of 2, 1h block at index 1)
+INFO cache_control: promoted 1 breakpoint(s) to ttl=1h to fix TTL ordering
+```
+
+To disable PRISM automatic cache injection while retaining request normalization:
+```bash
+export PRISM_NO_CACHE_CONTROL=1
+```

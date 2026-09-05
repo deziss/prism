@@ -20,7 +20,7 @@ With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.open
 
 - **AST Smart Code Reader (`prism read`)**: Parses source code into AST skeletons, function signatures, and imports across Rust, Python, TypeScript/JavaScript, and Go — slashing context window consumption by **55% to 93%**.
 - **Transparent MITM Proxy (`:8081`)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
-- **Prefix-Preserving Prompt Caching**: Strictly preserves system prompts and conversation prefixes to guarantee **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**. Only tail prose messages are BM25 compressed; code blocks and diffs remain byte-identical.
+- **Prefix-Preserving & Invariant-Compliant Prompt Caching**: Strictly preserves system prompts and conversation prefixes while dynamically enforcing Anthropic cache ordering invariants (auto-promotes preceding breakpoints to `1h` when later blocks use `1h` to prevent HTTP 400 errors, strictly enforces Anthropic's 4-breakpoint limit, and honors caller-defined caching strategies). Guarantees **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**.
 - **Anthropic Context Pruning**: Opts long agent runs into server-side `clear_tool_uses` context pruning, preventing stale tool results from accumulating across long agent interactions.
 - **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval.
 - **GraphRAG & Graphify Integration (`prism graph`)**: Ingests and queries codebase dependency graphs (`graphify-out/graph.json` or custom graphs) for architectural explanations, shortest path tracing, and god-node detection.
@@ -215,6 +215,7 @@ Clients / IDEs / Agents (Claude Code, Cursor, Windsurf, Aider)
          │                                         ├── Per-domain TLS cert (signed by PRISM CA)
          │                                         ├── Detect AI provider by hostname
          │                                         ├── Prefix-Preserving prompt cache protection
+         │                                         ├── Anthropic cache TTL order normalization & 4-breakpoint cap
          │                                         ├── BM25 tail-message compression (code-safe)
          │                                         ├── Anthropic clear_tool_uses beta pruning
          │                                         └── Non-AI hosts ──► Raw passthrough
