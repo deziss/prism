@@ -4,3 +4,8 @@ graphify-out/
 .blas-link/
 .prism/
 .prismrc
+
+# Local documentation & specifications
+PRISM_PLAN.md
+AGENTS.md
+.graphifyignore

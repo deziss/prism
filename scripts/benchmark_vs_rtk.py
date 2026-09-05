@@ -251,18 +251,19 @@ def benchmark_suite():
     # -------------------------------------------------------------
     # Test 7: Context Prompt / Document Compression (BM25)
     # -------------------------------------------------------------
-    agents_file = f"{repo_dir}/AGENTS.md"
-    print("[*] Benchmarking: Document context compression ...")
-    with open(agents_file) as f:
+    doc_file = f"{repo_dir}/AGENTS.md" if os.path.exists(f"{repo_dir}/AGENTS.md") else f"{repo_dir}/README.md"
+    doc_label = "AGENTS.md" if "AGENTS.md" in doc_file else "README.md"
+    print(f"[*] Benchmarking: Document context compression ({doc_label}) ...")
+    with open(doc_file) as f:
         raw_doc = f.read()
     raw_tok = count_tokens(raw_doc)
 
-    prism_comp_out, prism_comp_ms = run_cmd(['prism', 'compress', '-f', agents_file, '-r', '0.5'], 3)
+    prism_comp_out, prism_comp_ms = run_cmd(['prism', 'compress', '-f', doc_file, '-r', '0.5'], 3)
     prism_comp_tok = count_tokens(prism_comp_out)
 
     results.append({
         "category": "Context Compression",
-        "benchmark": "AGENTS.md (BM25 50% ratio)",
+        "benchmark": f"{doc_label} (BM25 50% ratio)",
         "raw_tokens": raw_tok,
         "rtk_tokens": raw_tok, # RTK has no compressor
         "rtk_savings": "0.0% (Unsupported)",
