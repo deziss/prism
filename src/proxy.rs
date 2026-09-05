@@ -1132,6 +1132,22 @@ async fn serve_session(
 
 // ── CONNECT tunnel handler ────────────────────────────────────────────────────
 
+fn is_loopback(host: &str) -> bool {
+    let h = host.trim().to_lowercase();
+    let name = if h.starts_with('[') {
+        h.trim_start_matches('[').split(']').next().unwrap_or("").trim()
+    } else if h == "::1" {
+        "::1"
+    } else {
+        h.split(':').next().unwrap_or(&h).trim()
+    };
+    name == "localhost"
+        || name == "127.0.0.1"
+        || name == "::1"
+        || name == "0.0.0.0"
+        || name.starts_with("127.")
+}
+
 async fn handle_connect(
     mut client: TcpStream,
     host: String,
@@ -1139,9 +1155,18 @@ async fn handle_connect(
     ca_key_pem: Arc<Vec<u8>>,
     client_addr: SocketAddr,
     ratio: f64,
+    proxy_port: u16,
 ) {
     let hostname = host.split(':').next().unwrap_or(&host).to_string();
     let port: u16 = host.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(443);
+
+    // Loop Guard: prevent recursive CONNECT tunnels back to our own proxy port
+    if is_loopback(&hostname) && port == proxy_port {
+        warn!("Loop guard blocked recursive CONNECT tunnel to {}:{}", hostname, port);
+        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n").await;
+        return;
+    }
+
     let provider = detect_provider(&host);
 
     if client
@@ -1218,7 +1243,7 @@ async fn handle_connect(
 
 // ── Plain HTTP pass-through ───────────────────────────────────────────────────
 
-async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>) {
+async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>, proxy_port: u16) {
     let s = String::from_utf8_lossy(&request);
     let host_line = s.split("\r\n").find(|l| l.to_lowercase().starts_with("host:"));
     let (host, port) = match host_line {
@@ -1232,6 +1257,13 @@ async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>) {
         None => return,
     };
     if host.is_empty() {
+        return;
+    }
+
+    // Loop Guard: prevent recursive connections back to our own proxy port
+    if is_loopback(&host) && port == proxy_port {
+        warn!("Loop guard blocked recursive plain HTTP connection to {}:{}", host, port);
+        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n").await;
         return;
     }
 
@@ -1283,11 +1315,26 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     );
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, addr) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                if let Some(code) = e.raw_os_error() {
+                    // EMFILE (24) or ENFILE (23): Too many open files
+                    if code == 24 || code == 23 {
+                        warn!("Too many open files (os error {}); backing off for 50ms", code);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                }
+                warn!("listener accept error: {}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+        };
         let cc = Arc::clone(&ca_cert);
         let ck = Arc::clone(&ca_key);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio).await {
+            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio, port).await {
                 warn!("connection error: {}", e);
             }
         });
@@ -1300,6 +1347,7 @@ async fn handle_connection(
     ca_cert_pem: Arc<Vec<u8>>,
     ca_key_pem: Arc<Vec<u8>>,
     ratio: f64,
+    proxy_port: u16,
 ) -> Result<()> {
     let Some((headers, body_start)) = read_headers(&mut stream, Vec::new()).await else {
         return Ok(());
@@ -1328,11 +1376,11 @@ async fn handle_connection(
             .nth(1)
             .ok_or_else(|| anyhow!("no host in CONNECT"))?
             .to_string();
-        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr, ratio).await;
+        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr, ratio, proxy_port).await;
     } else {
         let mut request = headers;
         request.extend_from_slice(&body_start);
-        handle_plain_http(stream, request).await;
+        handle_plain_http(stream, request, proxy_port).await;
     }
     Ok(())
 }
@@ -1862,6 +1910,19 @@ mod tests {
 
         let pointers = collect_cache_control_pointers(&parsed);
         assert_eq!(pointers.len(), 4);
+    }
+
+    #[test]
+    fn test_is_loopback_detection() {
+        assert!(is_loopback("localhost"));
+        assert!(is_loopback("localhost:27181"));
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.0.0.1:27181"));
+        assert!(is_loopback("::1"));
+        assert!(is_loopback("0.0.0.0"));
+        assert!(is_loopback("127.0.0.53:53"));
+        assert!(!is_loopback("api.anthropic.com"));
+        assert!(!is_loopback("api.openai.com:443"));
     }
 
 }

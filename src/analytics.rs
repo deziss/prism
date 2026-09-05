@@ -4,6 +4,9 @@ use anyhow::Result;
 use colored::Colorize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+static PROXY_EVENTS_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn prism_data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -111,8 +114,13 @@ pub fn record_proxy_event(
         "compression_ratio": if orig_tokens > 0 { sent_tokens as f32 / orig_tokens as f32 } else { 1.0 },
     });
     let path = analytics_dir().join("proxy_events.jsonl");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", event);
+    let mut line = event.to_string();
+    line.push('\n');
+    if let Ok(_guard) = PROXY_EVENTS_LOCK.lock() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
+        }
     }
     // Also fire telemetry to PRISM Hub if configured.
     if let Ok(hub_url) = std::env::var("PRISM_HUB_URL") {
@@ -172,7 +180,11 @@ impl ProxySummary {
 /// Aggregate the proxy event log written by `record_proxy_event`.
 fn load_proxy_summary() -> ProxySummary {
     let path = analytics_dir().join("proxy_events.jsonl");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    let raw = {
+        let _guard = PROXY_EVENTS_LOCK.lock().ok();
+        std::fs::read_to_string(&path).ok()
+    };
+    let Some(raw) = raw else {
         return ProxySummary::default();
     };
 

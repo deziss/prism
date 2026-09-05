@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Project Branding**: Standardized project nomenclature and expansion to *PRISM — Prompt Reduction, Indexing & Semantic Memory*.
 
 ### Fixed
+- **Recursive Proxy Loop & EMFILE Crashes**: Added loopback connection guard in `src/proxy.rs` to block recursive self-referential CONNECT tunnels and plain HTTP calls targeting the proxy port, eliminating infinite file descriptor exhaustion (`os error 24: Too many open files`).
+- **Resilient Socket Accept Backoff**: Introduced non-fatal backoff on `EMFILE`/`ENFILE` in the main TCP accept loop in `src/proxy.rs` instead of terminating the server process under temporary socket bursts.
+- **Thread-Safe Atomic Telemetry Logging**: Protected `proxy_events.jsonl` writes in `src/analytics.rs` with a synchronization mutex and single atomic buffer flushes, eliminating concurrent torn writes and JSON line corruption.
+- **Systemd File Descriptor Limits**: Increased `LimitNOFILE` to `65536` across user service units and generation templates.
 - **Anthropic 400 Error in Long Sessions**: Fixed `a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block` triggered during multi-turn agent sessions in Claude Code and VS Code.
 - **MITM Proxy Streaming & TLS Interception**: Fixed HTTP CONNECT tunnel socket polling and TLS certificate generation to prevent handshake failures and connection drops during long-lived SSE streams.
 
