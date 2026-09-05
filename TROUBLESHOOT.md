@@ -156,18 +156,18 @@ prism memory list
 ## MCP Server Not Starting
 
 ### Symptom
-`prism mcp` (default port 3003) exits immediately or prints address already in use.
+`prism mcp` (default port 27182) exits immediately or prints address already in use.
 
 ### Fix
 ```bash
 # Check if port is occupied
-ss -tlnp | grep 3003
+ss -tlnp | grep 27182
 
 # Kill existing process
-fuser -k 3003/tcp
+fuser -k 27182/tcp
 
 # Use different port
-prism mcp --port 3004
+prism mcp --port 27184
 ```
 
 ---
@@ -207,7 +207,7 @@ a keep-alive connection.
 ### Fix
 Rebuild. Confirm with a streaming request — tokens must appear incrementally:
 ```bash
-curl -N --proxy http://localhost:8080 --cacert ~/.local/share/prism/ca/ca.crt \
+curl -N --proxy http://localhost:27181 --cacert ~/.local/share/prism/ca/ca.crt \
   https://api.anthropic.com/v1/messages \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -d '{"model":"claude-3-5-haiku-20241022","max_tokens":100,"stream":true,
@@ -258,9 +258,9 @@ surfaces.
 ### Fix
 Fixed: a bare `PRISM_HUB_URL` now has `/api` appended automatically. Verify:
 ```bash
-PRISM_HUB_URL=http://localhost:3002 prism serve --port 8080
+PRISM_HUB_URL=http://localhost:27183 prism serve --port 27181
 # after one proxied request:
-curl http://localhost:3002/api/analytics/proxy-stats?hours=1
+curl http://localhost:27183/api/analytics/proxy-stats?hours=1
 ```
 The proxy also always writes `~/.local/share/prism/analytics/proxy_events.jsonl`,
 so `prism gain` reports savings even with no Hub running.
@@ -342,16 +342,16 @@ MCP servers are configured in `~/.claude.json`. An entry in
 
 ### Fix
 ```bash
-prism mcp --port 3003 &
-claude mcp add prism --transport http http://localhost:3003
+prism mcp --port 27182 &
+claude mcp add prism --transport http http://localhost:27182
 claude mcp list
 ```
 Check the server is actually up first:
 ```bash
-curl -s http://localhost:3003/health
+curl -s http://localhost:27182/health
 # {"status":"ok","mcp":true,"version":"2024-11-05"}
 ```
-Note `prism mcp` defaults to 3003, matching what `init` registers.
+Note `prism mcp` defaults to 27182, matching what `init` registers.
 
 ---
 

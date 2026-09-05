@@ -135,11 +135,11 @@ PRISM initialized ({scope}).");
     println!("  Data dir:     {}", data_dir().display());
     println!("
 Next steps:");
-    println!("  prism serve --port 8081    # start transparent LLM proxy");
-    println!("  prism mcp   --port 3003    # start MCP server for Claude Code");
+    println!("  prism serve --port 27181    # start transparent LLM proxy");
+    println!("  prism mcp   --port 27182    # start MCP server for Claude Code");
     if global {
         println!("  source ~/.bashrc           # reload shell env vars");
-        println!("  claude mcp add prism --transport http http://localhost:3003");
+        println!("  claude mcp add prism --transport http http://localhost:27182");
     }
     println!("
 Run prism gain to see token savings.");
@@ -172,10 +172,10 @@ pub async fn guide(topic: Option<String>) -> Result<()> {
 fn write_shell_env(ca_cert_path: &str) -> Result<()> {
     let block = format!(
         "\n# PRISM — transparent LLM proxy (added by `prism init --global`)\n\
-         export HTTP_PROXY=http://localhost:8080\n\
-         export HTTPS_PROXY=http://localhost:8080\n\
+         export HTTP_PROXY=http://localhost:27181\n\
+         export HTTPS_PROXY=http://localhost:27181\n\
          export NO_PROXY=localhost,127.0.0.1\n\
-         export PRISM_HUB_URL=http://localhost:3002\n\
+         export PRISM_HUB_URL=http://localhost:27183\n\
          export NODE_EXTRA_CA_CERTS={ca}\n\
          export REQUESTS_CA_BUNDLE={ca}\n\
          export SSL_CERT_FILE={ca}\n\
@@ -244,7 +244,7 @@ fn write_claude_mcp_config() -> Result<()> {
     };
     servers.insert(
         "prism".to_string(),
-        serde_json::json!({ "type": "http", "url": "http://localhost:3003" }),
+        serde_json::json!({ "type": "http", "url": "http://localhost:27182" }),
     );
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;

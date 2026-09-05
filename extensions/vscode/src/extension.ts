@@ -33,7 +33,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }),
         vscode.commands.registerCommand('prism.serve', () => {
-            const port = vscode.workspace.getConfiguration('prism').get('prism.proxyPort', 8080);
+            const port = vscode.workspace.getConfiguration('prism').get('prism.proxyPort', 27181);
             const term = vscode.window.createTerminal({ name: 'PRISM: Proxy' });
             term.sendText(`prism serve --port ${port}`);
             term.show();

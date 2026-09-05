@@ -2,7 +2,7 @@
 //! compression, caching, and token monitoring.
 //!
 //! Setup (one-time):  prism init --global
-//! Start proxy:       prism serve --port 8080
+//! Start proxy:       prism serve --port 27181
 //! All apps using HTTP_PROXY / HTTPS_PROXY will route through automatically.
 
 use anyhow::{anyhow, Result};

@@ -19,7 +19,7 @@ With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.open
 ## Key Highlights
 
 - **AST Smart Code Reader (`prism read`)**: Parses source code into AST skeletons, function signatures, and imports across Rust, Python, TypeScript/JavaScript, and Go — slashing context window consumption by **55% to 93%**.
-- **Transparent MITM Proxy (`:8081`)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
+- **Transparent MITM Proxy (`:27181`)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
 - **Prefix-Preserving & Invariant-Compliant Prompt Caching**: Strictly preserves system prompts and conversation prefixes while dynamically enforcing Anthropic cache ordering invariants (auto-promotes preceding breakpoints to `1h` when later blocks use `1h` to prevent HTTP 400 errors, strictly enforces Anthropic's 4-breakpoint limit, and honors caller-defined caching strategies). Guarantees **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**.
 - **Anthropic Context Pruning**: Opts long agent runs into server-side `clear_tool_uses` context pruning, preventing stale tool results from accumulating across long agent interactions.
 - **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval.
@@ -66,10 +66,10 @@ prism-disable    # (or alias: prism-off)
 
 ### What `prism-enable` Configures:
 1. **Systemd User Daemons**:
-   - `prism-proxy.service`: Transparent MITM Proxy active on `http://127.0.0.1:8081`
-   - `prism-mcp.service`: Model Context Protocol server active on `http://127.0.0.1:3003`
+   - `prism-proxy.service`: Transparent MITM Proxy active on `http://127.0.0.1:27181`
+   - `prism-mcp.service`: Model Context Protocol server active on `http://127.0.0.1:27182`
 2. **Environment Injection (`~/.config/environment.d/10-prism.conf` & `~/.bashrc`)**:
-   - Sets `HTTP_PROXY` and `HTTPS_PROXY` to `http://127.0.0.1:8081`
+   - Sets `HTTP_PROXY` and `HTTPS_PROXY` to `http://127.0.0.1:27181`
    - Sets `NO_PROXY=localhost,127.0.0.1,::1`
    - Injects PRISM root CA into Node.js (`NODE_EXTRA_CA_CERTS`), Python (`REQUESTS_CA_BUNDLE`), and Curl (`SSL_CERT_FILE`)
 3. **CLI Aliases**:
@@ -93,7 +93,7 @@ prism guide storage      # Complete XDG storage map & config hierarchy
 prism guide agents       # Setup for Claude Code, Cursor, Windsurf, Aider
 prism guide proxy        # MITM proxy mechanics, TLS CA, prompt caching
 prism guide commands     # AST reader modes, graph queries, cache lookup
-prism guide troubleshoot # Port resolution (:8081), SSL trust & failure tees
+prism guide troubleshoot # Port resolution (:27181), SSL trust & failure tees
 prism guide all          # Comprehensive documentation start-to-finish
 ```
 
@@ -114,11 +114,11 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
 | ↳ *Memory Palace* | `$XDG_DATA_HOME/prism/memory/`| `~/.local/share/prism/memory/` | Sled database for 7-tier associative memory |
 | ↳ *Analytics* | `$XDG_DATA_HOME/prism/analytics/`| `~/.local/share/prism/analytics/` | Token logs and `proxy_events.jsonl` |
 | **State / Tees** | `$XDG_STATE_HOME/prism/` | `~/.local/share/prism/tee/` | Raw crash and failure logs from `prism cmd` |
-| **Runtime Daemons** | Systemd User Units | `~/.config/systemd/user/` | `prism-proxy.service` (:8081) and `prism-mcp.service` (:3003) |
+| **Runtime Daemons** | Systemd User Units | `~/.config/systemd/user/` | `prism-proxy.service` (:27181) and `prism-mcp.service` (:27182) |
 
 #### Configuration Resolution Hierarchy (12-Factor App):
 ```
-[1] CLI Flags          (--port 8081, --guide)
+[1] CLI Flags          (--port 27181, --guide)
       ↓
 [2] Environment Vars   (HTTP_PROXY, PRISM_NO_CONTEXT_EDITING)
       ↓
@@ -136,7 +136,7 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
 ### 1. Claude Code (Anthropic)
 Register PRISM as an HTTP MCP server:
 ```bash
-claude mcp add prism --transport http http://localhost:3003
+claude mcp add prism --transport http http://localhost:27182
 ```
 Or manually configure in `~/.claude.json`:
 ```json
@@ -144,7 +144,7 @@ Or manually configure in `~/.claude.json`:
   "mcpServers": {
     "prism": {
       "type": "http",
-      "url": "http://localhost:3003"
+      "url": "http://localhost:27182"
     }
   }
 }
@@ -154,7 +154,7 @@ Or manually configure in `~/.claude.json`:
 Add PRISM MCP endpoint in **Cursor Settings $\to$ Features $\to$ MCP**:
 - **Name**: `prism`
 - **Type**: `HTTP / SSE`
-- **URL**: `http://localhost:3003`
+- **URL**: `http://localhost:27182`
 
 Generate native VS Code extension scaffold:
 ```bash
@@ -164,8 +164,8 @@ prism vscode --output ~/.vscode/extensions/prism
 ### 3. Python & Node.js AI SDKs (OpenAI, LangChain, LlamaIndex)
 Zero code changes required. Route traffic through environment variables:
 ```bash
-export HTTP_PROXY=http://127.0.0.1:8081
-export HTTPS_PROXY=http://127.0.0.1:8081
+export HTTP_PROXY=http://127.0.0.1:27181
+export HTTPS_PROXY=http://127.0.0.1:27181
 export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt
 export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt
 ```
@@ -211,7 +211,7 @@ prism gain --history                       # View detailed historical command lo
 ```
 Clients / IDEs / Agents (Claude Code, Cursor, Windsurf, Aider)
          │
-         ├── HTTP CONNECT tunnel (:8081) ──────► PRISM Proxy
+         ├── HTTP CONNECT tunnel (:27181) ──────► PRISM Proxy
          │                                         ├── Per-domain TLS cert (signed by PRISM CA)
          │                                         ├── Detect AI provider by hostname
          │                                         ├── Prefix-Preserving prompt cache protection
@@ -223,7 +223,7 @@ Clients / IDEs / Agents (Claude Code, Cursor, Windsurf, Aider)
          │                                                   ▼
          │                                      api.openai.com / api.anthropic.com
          │
-         ├── JSON-RPC 2.0 (:3003) ─────────────► PRISM MCP Server
+         ├── JSON-RPC 2.0 (:27182) ─────────────► PRISM MCP Server
          │                                         ├── prism_read (AST Smart Reader)
          │                                         ├── prism_graph_query (GraphRAG)
          │                                         ├── prism_memory_search (7-tier Sled KV)

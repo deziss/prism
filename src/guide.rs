@@ -75,7 +75,7 @@ fn print_quickstart() {
 
     println!("  {}", "1. Enable Laptop-Wide Default Interception:".bold().white());
     println!("     $ {}", "prism-enable".cyan().bold());
-    println!("     • Starts systemd user daemons for Proxy (:8081) and MCP (:3003)");
+    println!("     • Starts systemd user daemons for Proxy (:27181) and MCP (:27182)");
     println!("     • Injects proxy settings into environment.d and ~/.bashrc");
     println!("     • Mounts root CA certificate into Node.js, Python, and Curl trust stores\n");
 
@@ -85,8 +85,8 @@ fn print_quickstart() {
     println!("     • Strips proxy environment variables with zero residual state\n");
 
     println!("  {}", "3. Standalone Foreground Execution:".bold().white());
-    println!("     $ {:<30} {}", "prism serve --port 8081".cyan(), "# Run transparent MITM proxy".dimmed());
-    println!("     $ {:<30} {}", "prism mcp   --port 3003".cyan(), "# Run JSON-RPC 2.0 MCP server".dimmed());
+    println!("     $ {:<30} {}", "prism serve --port 27181".cyan(), "# Run transparent MITM proxy".dimmed());
+    println!("     $ {:<30} {}", "prism mcp   --port 27182".cyan(), "# Run JSON-RPC 2.0 MCP server".dimmed());
     println!("");
     println!("  {}", "4. Measured Token & Cost Savings:".bold().white());
     println!("     $ {}", "prism gain --history".cyan().bold());
@@ -97,8 +97,8 @@ fn print_architecture() {
     println!("  PRISM implements a clean decoupled Ports & Adapters architecture:\n");
 
     println!("  {}", "1. INBOUND PORTS (Gateways & Interfaces)".bold().cyan());
-    println!("     • {:<26} {}", "MITM Proxy (:8081)", "Transparent HTTP/HTTPS CONNECT interceptor");
-    println!("     • {:<26} {}", "MCP Server (:3003)", "Model Context Protocol JSON-RPC 2.0 interface");
+    println!("     • {:<26} {}", "MITM Proxy (:27181)", "Transparent HTTP/HTTPS CONNECT interceptor");
+    println!("     • {:<26} {}", "MCP Server (:27182)", "Model Context Protocol JSON-RPC 2.0 interface");
     println!("     • {:<26} {}", "CLI Runner (`prism cmd`)", "Noise-filtering process executor with failure tee");
     println!("     • {:<26} {}", "AST Reader (`prism read`)", "7-mode AST semantic file outline & reader");
     println!("     • {:<26} {}", "Lifecycle Hooks", "Repository file pre-read & post-write validation");
@@ -156,23 +156,23 @@ fn print_agent_integration() {
 
     println!("  {}", "1. Claude Code (Anthropic):".bold().white());
     println!("     Register PRISM as an MCP server:");
-    println!("     $ {}\n", "claude mcp add prism --transport http http://localhost:3003".cyan());
+    println!("     $ {}\n", "claude mcp add prism --transport http http://localhost:27182".cyan());
     println!("     Or configure directly in `~/.claude.json`:");
-    println!("     {}", "{\n       \"mcpServers\": {\n         \"prism\": { \"type\": \"http\", \"url\": \"http://localhost:3003\" }\n       }\n     }".dimmed());
+    println!("     {}", "{\n       \"mcpServers\": {\n         \"prism\": { \"type\": \"http\", \"url\": \"http://localhost:27182\" }\n       }\n     }".dimmed());
     println!("");
 
     println!("  {}", "2. Cursor IDE & Windsurf:".bold().white());
     println!("     Add PRISM endpoint in Cursor Settings -> Features -> MCP:");
     println!("     • Name:  prism");
     println!("     • Type:  HTTP / SSE");
-    println!("     • URL:   http://localhost:3003\n");
+    println!("     • URL:   http://localhost:27182\n");
     println!("     Generate native VS Code extension scaffold:");
     println!("     $ {}\n", "prism vscode --output ~/.vscode/extensions/prism".cyan());
 
     println!("  {}", "3. Python & Node.js AI SDKs (OpenAI, LangChain, LlamaIndex):".bold().white());
     println!("     Zero code changes needed. Route traffic through environment variables:");
-    println!("       export HTTP_PROXY=http://127.0.0.1:8081");
-    println!("       export HTTPS_PROXY=http://127.0.0.1:8081");
+    println!("       export HTTP_PROXY=http://127.0.0.1:27181");
+    println!("       export HTTPS_PROXY=http://127.0.0.1:27181");
     println!("       export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt");
     println!("       export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt");
 }
@@ -181,7 +181,7 @@ fn print_proxy_mechanics() {
     print_header("Transparent MITM Proxy & Prompt Caching", "Proxy");
 
     println!("  {}", "How the Transparent Proxy Operates:".bold().white());
-    println!("    1. Clients establish standard HTTP CONNECT tunnels to port 8081.");
+    println!("    1. Clients establish standard HTTP CONNECT tunnels to port 27181.");
     println!("    2. PRISM dynamically generates TLS certs on-the-fly signed by the PRISM CA.");
     println!("    3. Requests are matched against AI endpoints (OpenAI, Anthropic, Gemini).");
     println!("    4. Non-AI hosts pass through raw with zero overhead or interception.\n");
@@ -225,9 +225,9 @@ fn print_cli_reference() {
 fn print_troubleshooting() {
     print_header("Troubleshooting & Diagnostics", "Troubleshoot");
 
-    println!("  {}", "1. Port Conflicts (Port 8080 In Use):".bold().white());
-    println!("     • If port 8080 is used by Apache, Nginx, or PHP Spark, PRISM uses port {}\n", "8081".green().bold());
-    println!("     • Start manually on any custom port: `prism serve --port 8085`\n");
+    println!("  {}", "1. Custom Port Selection (Default: 27181 / 27182):".bold().white());
+    println!("     • PRISM uses port {} for Proxy and {} for MCP by default to avoid port collisions\n", "27181".green().bold(), "27182".green().bold());
+    println!("     • Start manually on any custom port: `prism serve --port 27181`\n");
 
     println!("  {}", "2. SSL/TLS Certificate Warnings:".bold().white());
     println!("     • Python:   export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt");

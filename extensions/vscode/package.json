@@ -37,7 +37,7 @@
       "properties": {
         "prism.proxyPort": {
           "type": "number",
-          "default": 8080,
+          "default": 27181,
           "description": "PRISM proxy server port"
         },
         "prism.upstreamUrl": {

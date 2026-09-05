@@ -28,13 +28,13 @@ enum Args {
         cmd: Vec<String>,
     },
     Serve {
-        #[arg(short, long, default_value_t = 8080)]
+        #[arg(short, long, default_value_t = 27181)]
         port: u16,
         #[arg(long)]
         upstream: Option<String>,
     },
     Mcp {
-        #[arg(short, long, default_value_t = 3003)]
+        #[arg(short, long, default_value_t = 27182)]
         port: u16,
     },
     Memory {

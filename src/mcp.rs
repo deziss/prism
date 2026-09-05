@@ -1,6 +1,6 @@
 //! MCP server — Model Context Protocol 2024-11-05, JSON-RPC 2.0 transport.
 //!
-//! Claude Code connects via: claude mcp add prism --transport http http://localhost:3003
+//! Claude Code connects via: claude mcp add prism --transport http http://localhost:27182
 
 use anyhow::Result;
 use axum::{

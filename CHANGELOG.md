@@ -17,11 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Client Cache Strategy Awareness**:
   - Detects if upstream clients or IDE tools (such as Claude Code, Cursor, or custom SDK clients) have already configured their own `cache_control` blocks. PRISM preserves caller strategies without injecting redundant duplicate breakpoints.
 - **Systemd User Service Integration**:
-  - Packaged and enabled `prism-proxy.service` running on `:8081` with auto-restart policies and journald logging integration.
+  - Packaged and enabled `prism-proxy.service` running on `:27181` with auto-restart policies and journald logging integration.
 - **Comprehensive Unit Test Suite**:
   - Added unit test coverage for Anthropic cache TTL promotion, caller cache preservation, and 4-breakpoint limit invariants (48 total tests passing).
 
 ### Changed
+- **Default Port Migration for Collision Avoidance**:
+  - Reallocated default networking ports to high, collision-free ranges across the entire project:
+    - Transparent MITM Proxy: `:27181` (formerly 8080/8081)
+    - MCP JSON-RPC 2.0 Server: `:27182` (formerly 3003)
+    - PRISM Hub & Telemetry Backend: `:27183` (formerly 3002)
+  - Updated CLI command flags (`serve`, `mcp`), interactive terminal guide (`prism guide`), shell activation scripts, VS Code extension configuration, and all troubleshooting documentation.
 - **Licensing**: Re-licensed the project under the GNU Affero General Public License v3.0 (`AGPL-3.0-only`), updating all metadata, Cargo manifests, and documentation.
 - **Benchmark Suite**: Updated benchmark suite runner (`scripts/benchmark.sh`) to dynamically adapt to available sample files and avoid hardcoded document path dependencies.
 - **Project Branding**: Standardized project nomenclature and expansion to *PRISM — Prompt Reduction, Indexing & Semantic Memory*.
