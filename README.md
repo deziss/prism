@@ -238,4 +238,4 @@ Clients / IDEs / Agents (Claude Code, Cursor, Windsurf, Aider)
 
 ## License
 
-MIT License. Copyright (c) 2026 PRISM Team.
+GNU Affero General Public License v3.0 (AGPL-3.0). Copyright (c) 2026 PRISM Team. See [LICENSE](LICENSE) for details.
