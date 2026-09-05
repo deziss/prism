@@ -563,8 +563,45 @@ fn compress_request_body(
         }
     }
 
+    // Count system prompt tokens for telemetry / analytics
+    if let Some(system) = json.get("system") {
+        if let Some(text) = system.as_str() {
+            let t = crate::analytics::count_tokens(text, &model).unwrap_or(0) as u32;
+            orig_total += t;
+            sent_total += t;
+        } else if let Some(blocks) = system.as_array() {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    let t = crate::analytics::count_tokens(text, &model).unwrap_or(0) as u32;
+                    orig_total += t;
+                    sent_total += t;
+                }
+            }
+        }
+    }
+
     if provider == "anthropic" {
-        apply_anthropic_caching(&mut json, &model, &mut orig_total, &mut sent_total);
+        let existing = collect_cache_control_pointers(&json);
+        let auto_cache = std::env::var("PRISM_NO_CACHE_CONTROL").is_err();
+
+        if !existing.is_empty() {
+            info!(
+                "cache_control: caller sent {} breakpoint(s), skipping PRISM auto-injection",
+                existing.len()
+            );
+        }
+
+        // Only inject PRISM automatic breakpoints if the caller did not configure
+        // any of their own. If the caller (e.g. Claude Code, Cursor, custom client)
+        // already manages prompt caching, their strategy wins.
+        if auto_cache && existing.is_empty() {
+            apply_anthropic_caching(&mut json, &model, &mut orig_total, &mut sent_total);
+        }
+
+        // Always normalize cache_control across tools, system, and messages to guarantee:
+        // 1. At most MAX_CACHE_BREAKPOINTS (4) total breakpoints.
+        // 2. TTL ordering compliance: no ttl='1h' comes after a ttl='5m' (or default ephemeral).
+        normalize_anthropic_caching(&mut json);
     }
 
     let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec());
@@ -599,18 +636,15 @@ fn maybe_compress(
 /// instead of ageing out and re-paying full price every turn.
 fn apply_anthropic_caching(
     json: &mut serde_json::Value,
-    model: &str,
-    orig_total: &mut u32,
-    sent_total: &mut u32,
+    _model: &str,
+    _orig_total: &mut u32,
+    _sent_total: &mut u32,
 ) {
     let mut breakpoints = 0usize;
 
     // 1. System prompt — always the most reusable block.
     if let Some(system) = json.get_mut("system") {
         if let Some(text) = system.as_str().map(|s| s.to_string()) {
-            let t = crate::analytics::count_tokens(&text, model).unwrap_or(0) as u32;
-            *orig_total += t;
-            *sent_total += t;
             *system = serde_json::json!([{
                 "type": "text",
                 "text": text,
@@ -672,6 +706,143 @@ fn apply_anthropic_caching(
                     );
                 }
             }
+        }
+    }
+}
+
+
+/// Collects all JSON pointers to `cache_control` objects in the exact order
+/// Anthropic processes them: `tools` -> `system` -> `messages`.
+fn collect_cache_control_pointers(json: &serde_json::Value) -> Vec<String> {
+    let mut pointers = Vec::new();
+
+    // 1. tools
+    if let Some(tools) = json.get("tools").and_then(|v| v.as_array()) {
+        for (idx, tool) in tools.iter().enumerate() {
+            if tool.get("cache_control").is_some() {
+                pointers.push(format!("/tools/{}/cache_control", idx));
+            }
+        }
+    }
+
+    // 2. system
+    if let Some(system) = json.get("system") {
+        if let Some(blocks) = system.as_array() {
+            for (idx, block) in blocks.iter().enumerate() {
+                if block.get("cache_control").is_some() {
+                    pointers.push(format!("/system/{}/cache_control", idx));
+                }
+            }
+        } else if system.get("cache_control").is_some() {
+            pointers.push("/system/cache_control".to_string());
+        }
+    }
+
+    // 3. messages
+    if let Some(messages) = json.get("messages").and_then(|v| v.as_array()) {
+        for (m_idx, msg) in messages.iter().enumerate() {
+            let base_ptr = format!("/messages/{}", m_idx);
+            if let Some(content) = msg.get("content") {
+                collect_content_cache_pointers(content, &format!("{}/content", base_ptr), &mut pointers);
+            }
+        }
+    }
+
+    pointers
+}
+
+fn collect_content_cache_pointers(
+    value: &serde_json::Value,
+    current_ptr: &str,
+    pointers: &mut Vec<String>,
+) {
+    if let Some(blocks) = value.as_array() {
+        for (idx, block) in blocks.iter().enumerate() {
+            let block_ptr = format!("{}/{}", current_ptr, idx);
+            if block.get("cache_control").is_some() {
+                pointers.push(format!("{}/cache_control", block_ptr));
+            }
+            // Check nested content (e.g. inside tool_result)
+            if let Some(nested) = block.get("content") {
+                collect_content_cache_pointers(nested, &format!("{}/content", block_ptr), pointers);
+            }
+        }
+    } else if let Some(obj) = value.as_object() {
+        if obj.get("cache_control").is_some() {
+            pointers.push(format!("{}/cache_control", current_ptr));
+        }
+        if let Some(nested) = obj.get("content") {
+            collect_content_cache_pointers(nested, &format!("{}/content", current_ptr), pointers);
+        }
+    }
+}
+
+/// Enforces Anthropic's caching invariants on the request payload:
+/// 1. At most MAX_CACHE_BREAKPOINTS (4) total breakpoints across tools, system, messages.
+/// 2. TTL non-increasing order: Anthropic requires that a ttl='1h' cache_control block
+///    must NOT come after a ttl='5m' (or default ephemeral) block in evaluation order:
+///    tools -> system -> messages.
+fn normalize_anthropic_caching(json: &mut serde_json::Value) {
+    let mut pointers = collect_cache_control_pointers(json);
+    if pointers.is_empty() {
+        return;
+    }
+
+    // 1. Enforce max breakpoints (Anthropic allows at most 4 across the request).
+    if pointers.len() > MAX_CACHE_BREAKPOINTS {
+        let excess_count = pointers.len() - MAX_CACHE_BREAKPOINTS;
+        warn!(
+            "cache_control: {} breakpoints found, stripping {} excess (max {})",
+            pointers.len(), excess_count, MAX_CACHE_BREAKPOINTS
+        );
+        for excess_ptr in &pointers[MAX_CACHE_BREAKPOINTS..] {
+            if let Some(parent_ptr) = excess_ptr.strip_suffix("/cache_control") {
+                if let Some(parent) = json.pointer_mut(parent_ptr).and_then(|v| v.as_object_mut()) {
+                    parent.remove("cache_control");
+                }
+            }
+        }
+        pointers.truncate(MAX_CACHE_BREAKPOINTS);
+    }
+
+    // 2. Enforce TTL ordering.
+    // In Anthropic API, if ttl is omitted, it defaults to 5 minutes ("5m").
+    // If ANY breakpoint has ttl='1h', then all breakpoints preceding it must also have ttl='1h'.
+    //
+    // Build a TTL map for diagnostics.
+    let ttl_map: Vec<(&str, Option<&str>)> = pointers.iter().map(|ptr| {
+        let ttl = json.pointer(ptr)
+            .and_then(|v| v.get("ttl"))
+            .and_then(|v| v.as_str());
+        (ptr.as_str(), ttl)
+    }).collect();
+
+    let last_1h_index = ttl_map.iter().rposition(|(_, ttl)| *ttl == Some("1h"));
+
+    if let Some(last_1h) = last_1h_index {
+        let mut promoted = 0usize;
+        for (i, ptr) in pointers[..last_1h].iter().enumerate() {
+            if let Some(cc) = json.pointer_mut(ptr).and_then(|v| v.as_object_mut()) {
+                let current_ttl = cc.get("ttl").and_then(|v| v.as_str());
+                if current_ttl != Some("1h") {
+                    warn!(
+                        "cache_control: promoting {} from ttl={} to ttl=1h (block {} of {}, 1h block at index {})",
+                        ptr,
+                        current_ttl.unwrap_or("5m (default)"),
+                        i,
+                        pointers.len(),
+                        last_1h
+                    );
+                    cc.insert("ttl".into(), serde_json::json!("1h"));
+                    promoted += 1;
+                }
+            }
+        }
+        if promoted > 0 {
+            info!(
+                "cache_control: promoted {} breakpoint(s) to ttl=1h to fix TTL ordering",
+                promoted
+            );
         }
     }
 }
@@ -1585,4 +1756,112 @@ mod tests {
         assert_eq!(hash, hash_api_key(h));
         assert_eq!(hash_api_key(b"POST / HTTP/1.1\r\n\r\n"), "unknown");
     }
+
+    #[test]
+    fn anthropic_caching_promotes_5m_before_1h() {
+        // Reproduces the exact Claude Code error:
+        // a ttl='1h' cache_control block must not come after a ttl='5m' cache_control block.
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "system": [{
+                "type": "text",
+                "text": "System instructions",
+                "cache_control": {"type": "ephemeral"} // implicit 5m
+            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "turn 1"},
+                        {"type": "text", "text": "turn 2"},
+                        {"type": "text", "text": "turn 3"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "result",
+                                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let raw = serde_json::to_vec(&req).unwrap();
+        let (out, ..) = compress_request_body(&raw, "anthropic", 0.5);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        // System cache_control must be upgraded to 1h so that no 1h comes after 5m!
+        let sys_cc = &parsed["system"][0]["cache_control"];
+        assert_eq!(sys_cc["ttl"], "1h");
+
+        // Tool result cache_control must stay 1h
+        let msg_cc = &parsed["messages"][0]["content"][3]["content"][0]["cache_control"];
+        assert_eq!(msg_cc["ttl"], "1h");
+    }
+
+    #[test]
+    fn anthropic_preserves_caller_cache_without_duplicate_injection() {
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "system": "Plain system text without cache",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Existing cached message",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let raw = serde_json::to_vec(&req).unwrap();
+        let (out, ..) = compress_request_body(&raw, "anthropic", 0.5);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        // System prompt was NOT modified because caller already manages caching
+        assert!(parsed["system"].is_string());
+        // Message cache_control preserved
+        assert_eq!(parsed["messages"][0]["content"][0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn anthropic_caps_breakpoints_at_four() {
+        let req = serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "tools": [
+                {"name": "tool1", "cache_control": {"type": "ephemeral"}},
+                {"name": "tool2", "cache_control": {"type": "ephemeral"}},
+            ],
+            "system": [
+                {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "msg1", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "msg2", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "msg3", "cache_control": {"type": "ephemeral"}}
+                    ]
+                }
+            ]
+        });
+
+        let raw = serde_json::to_vec(&req).unwrap();
+        let (out, ..) = compress_request_body(&raw, "anthropic", 0.5);
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        let pointers = collect_cache_control_pointers(&parsed);
+        assert_eq!(pointers.len(), 4);
+    }
+
 }
