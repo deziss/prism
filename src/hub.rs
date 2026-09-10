@@ -660,15 +660,17 @@ impl HubSender {
     }
 }
 
+// Named so `cargo test hub::contract` (the regression-guard command noted in the
+// integration plan) runs exactly this test.
 #[cfg(test)]
-mod tests {
+mod contract {
     use super::*;
 
     /// The contract regression guard: one instance of every `HubEvent` variant,
     /// serialized to the fixture the hub's own test suite parses. A field rename on
     /// either side must fail this test (or the hub's) rather than silently drift.
     #[test]
-    fn contract_fixture_matches_camel_case_shape() {
+    fn regenerates_fixture() {
         let events = vec![
             HubEvent::Proxy(ProxyEvent {
                 source_ip: "203.0.113.7".to_string(),
@@ -764,6 +766,11 @@ mod tests {
         std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
         std::fs::write(&fixture_path, &json).expect("writing tests/fixtures/hub-events.json");
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn spool_rotate_confirm_round_trip() {
