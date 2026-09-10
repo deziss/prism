@@ -2355,7 +2355,6 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "sled",
- "thiserror 2.0.18",
  "tiktoken-rs",
  "time",
  "tokio",
