@@ -77,6 +77,15 @@ prism-disable    # (or alias: prism-off)
      PRISM does not intercept still verify
    - Registers the CA in the NSS databases used by Chromium/Electron apps and Firefox
      (requires `libnss3-tools`), which ignore both the variables above and the system store
+
+   If `certutil` was missing when you ran `prism-enable`, or an app (VS Code,
+   Antigravity, Chrome, Firefox) still shows certificate errors, register it manually:
+   ```bash
+   sudo apt install libnss3-tools
+   mkdir -p ~/.pki/nssdb
+   certutil -A -d sql:$HOME/.pki/nssdb -n "PRISM Local CA" -t "C,," \
+            -i ~/.local/share/prism/ca/ca.crt
+   ```
 3. **CLI Aliases**:
    - `p` $\to$ `prism`
    - `pread` $\to$ `prism read`
