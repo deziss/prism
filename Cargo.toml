@@ -81,7 +81,7 @@ futures = "=0.3.34"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 regex = "=1.13.1"
 walkdir = "=2.5.0"
-petgraph = { version = "0.7", features = ["serde-1"] }
+petgraph = { version = "=0.8.3", features = ["serde-1"] }
 sha2 = "=0.11.0"
 
 [dev-dependencies]
