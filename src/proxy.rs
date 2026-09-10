@@ -1960,6 +1960,13 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     install_crypto_provider();
 
     let ca = ensure_ca()?;
+    // Self-heal `ca-bundle.crt` on every start: `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/
+    // `CURL_CA_BUNDLE` (written by `prism init --global`) replace the trust store, so a
+    // missing or stale bundle here breaks every client that reads those variables —
+    // and nothing else regenerates it between `init` runs.
+    if let Err(e) = ensure_ca_bundle(&ca.cert_pem) {
+        warn!("could not refresh ca-bundle.crt: {e}");
+    }
     let ca_cert = Arc::new(ca.cert_pem);
     let ca_key = Arc::new(ca.key_pem);
 
@@ -2099,7 +2106,13 @@ const SYSTEM_CA_BUNDLES: [&str; 5] = [
 
 /// Write `<ca_dir>/ca-bundle.crt` = system roots ++ PRISM CA. Returns the path.
 pub fn ensure_ca_bundle(ca_cert_pem: &[u8]) -> Result<PathBuf> {
-    let out = ca_bundle_path();
+    write_ca_bundle(ca_cert_pem, ca_bundle_path())
+}
+
+/// `ensure_ca_bundle`, but written to an arbitrary path — the real function always
+/// targets the live `ca_dir()`, so tests exercise this one against a temp dir instead
+/// of clobbering the caller's actual `~/.local/share/prism/ca/ca-bundle.crt`.
+fn write_ca_bundle(ca_cert_pem: &[u8], out: PathBuf) -> Result<PathBuf> {
     let mut bundle = Vec::new();
     let mut found_system = false;
     for path in SYSTEM_CA_BUNDLES {
@@ -3165,9 +3178,20 @@ mod tests {
     fn ca_bundle_appends_the_prism_ca_to_the_system_roots() {
         // The bundle must contain our CA *and* keep whatever the system trusted,
         // otherwise every non-intercepted host fails verification.
+        //
+        // Written to a scratch dir, never `ensure_ca_bundle`/`ca_dir()` — those target
+        // the user's real `~/.local/share/prism/ca/ca-bundle.crt`, and `cargo test`
+        // clobbering that with this fake cert is exactly what happened before.
         let ca = b"-----BEGIN CERTIFICATE-----\nPRISMTESTCA\n-----END CERTIFICATE-----\n";
-        let path = ensure_ca_bundle(ca).expect("bundle written");
+        let scratch = std::env::temp_dir().join(format!(
+            "prism-test-ca-bundle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let out = scratch.join("ca-bundle.crt");
+        let path = write_ca_bundle(ca, out).expect("bundle written");
         let written = std::fs::read_to_string(&path).expect("bundle readable");
+        std::fs::remove_dir_all(&scratch).ok();
         assert!(
             written.contains("PRISMTESTCA"),
             "prism CA missing from bundle"
