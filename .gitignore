@@ -1,7 +1,5 @@
 target/
 graphify-out/
-# BLAS symlink dir (created by build.rs, machine-local)
-.blas-link/
 .prism/
 .prismrc
 
@@ -13,5 +11,6 @@ AGENTS.md
 # bench artifacts
 bench/
 
-# local cargo config — build flags live in build.rs
+# local cargo config (unused since build.rs was removed — turbovec 1.0 has no BLAS
+# dependency — but harmless to leave ignored if it reappears locally)
 .cargo/
