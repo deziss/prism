@@ -1515,7 +1515,16 @@ async fn serve_session<C, U, F, Fut>(
 
         // Key the *original* body: prism's own rewrites (cache_control breakpoints,
         // compression) must not change which cache entry a request maps to.
-        let ck = if raw_body.is_empty() {
+        //
+        // The policy gate sits here, *before* `PRISM_CACHE_RECORD` and
+        // `PRISM_CACHE_SERVE`, and that ordering is deliberate. Those two are
+        // preferences within a cache that exists — a privacy kill switch and a replay
+        // opt-in — so neither may reach a store the configuration has not enabled;
+        // `PRISM_CACHE_SERVE=always` must not be a way to switch the feature on. With
+        // no key the serve leg has nothing to look up and the record leg nothing to
+        // write, so the store is never opened and `PRISM_CACHE_MIN_SIMILARITY` (which
+        // only ranks inside `find_similar`) is simply unreachable.
+        let ck = if raw_body.is_empty() || !crate::cache::is_enabled() {
             None
         } else {
             cache_key(&raw_body, provider)
@@ -1971,10 +1980,8 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     let ca_key = Arc::new(ca.key_pem);
 
     // Full chain: hub-enforced > project `.prismrc` > global config.yaml > defaults.
-    let ratio = crate::config::resolve()
-        .compression_ratio
-        .unwrap_or(0.75)
-        .clamp(0.1, 1.0);
+    let cfg = crate::config::resolve();
+    let ratio = cfg.compression_ratio.unwrap_or(0.75).clamp(0.1, 1.0);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
@@ -1988,6 +1995,16 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
         "PRISM MITM proxy listening on :{} (compression ratio {})",
         port, ratio
     );
+    // Said once, here, rather than leaving every relay silently uncached: an upgrade
+    // that lost the cache should be visible in the log the operator already reads.
+    if !cfg.cache_enabled() {
+        info!(
+            "semantic cache disabled — relaying without record or replay. It is a PRISM Hub \
+             feature; `prism hub enroll --url <hub> --token <join-token>` enables it. Every \
+             other optimization (compression, prompt-cache breakpoints, image rightsizing, \
+             context editing) is unaffected."
+        );
+    }
     let ca_cert_path = ca_dir().join("ca.crt");
     info!("CA cert: {}", ca_cert_path.display());
     info!(
@@ -2470,6 +2487,12 @@ mod tests {
     /// Drive the whole session loop over in-memory pipes: request in, upstream answer
     /// out, and the response recorded. This is the glue that no unit test could reach
     /// while the loop was hard-wired to TLS stream types.
+    ///
+    /// It also exercises the commercial mechanism end to end. The semantic cache now
+    /// defaults **off**, so this test switches it on the only way a real agent can — a
+    /// hub policy document in `<data>/hub-config.yaml`, the top layer of
+    /// `config::resolve()`. If policy could not enable a default-off feature, nothing
+    /// below this line would record or replay.
     #[tokio::test]
     async fn the_session_loop_relays_and_then_records() {
         let store = std::env::temp_dir().join(format!(
@@ -2482,6 +2505,12 @@ mod tests {
         ));
         // SAFETY: single-threaded env mutation scoped to this test's own temp dir name.
         unsafe { std::env::set_var("PRISM_DATA_DIR", &store) };
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("hub-config.yaml"), "cache_enabled: true\n").unwrap();
+        assert!(
+            crate::cache::is_enabled(),
+            "hub policy must be able to enable the cache; without it this test proves nothing"
+        );
 
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let (up, mut fake_upstream) = tokio::io::duplex(64 * 1024);

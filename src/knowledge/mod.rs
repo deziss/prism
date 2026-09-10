@@ -20,11 +20,77 @@ pub fn graph_dir() -> PathBuf {
         .join("graph")
 }
 
-/// Find the active codebase graph: custom path, local graphify-out/graph.json, or PRISM default
-pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
+/// Why no graph is available, when none is.
+///
+/// Two answers, never conflated. `Disabled` means GraphRAG is off for this agent;
+/// `NotFound` that it is on but nothing has been indexed here yet. Reporting the first
+/// as the second used to send the user to `prism graph index`, which would have changed
+/// nothing — the same argument [`crate::cache::open_error`] makes for the cache store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphUnavailable {
+    /// No configuration layer enables GraphRAG. It is a PRISM Hub feature.
+    Disabled,
+    /// Enabled, but the custom path, `graphify-out/graph.json` and the PRISM default
+    /// all missed.
+    NotFound,
+}
+
+impl GraphUnavailable {
+    /// The user-facing explanation, with the remedy that actually applies to each case.
+    pub fn message(self) -> String {
+        match self {
+            GraphUnavailable::Disabled => {
+                crate::config::disabled_by_policy("GraphRAG codebase intelligence")
+            }
+            GraphUnavailable::NotFound => {
+                "No graph found. Run `prism graph index` or provide `--graph <path>`.".to_string()
+            }
+        }
+    }
+}
+
+/// Whether GraphRAG is enabled, resolved through the full chain: hub policy > project
+/// `.prismrc` > global `config.yaml` > default **off**. Re-read per call, so a policy
+/// fetched by `prism hub config` applies to the next command without a restart.
+pub fn graph_enabled() -> bool {
+    crate::config::resolve().graph_enabled()
+}
+
+/// Fail with the enrolment hint when GraphRAG is off.
+///
+/// Used by the operations that never reach [`find_active_graph`] — `index`, `import`,
+/// `extract`, `export` — and once at the top of `cli::graph`, so all nine `prism graph`
+/// subcommands report the same thing and exit non-zero rather than doing half a job.
+pub fn ensure_enabled() -> Result<()> {
+    if graph_enabled() {
+        return Ok(());
+    }
+    anyhow::bail!("{}", GraphUnavailable::Disabled.message())
+}
+
+/// `Some(reason)` when a graph lookup cannot produce anything — for reporting paths that
+/// have already seen a `None` and must say *which* `None` it was.
+pub fn graph_unavailable(custom: Option<&Path>) -> Option<GraphUnavailable> {
+    active_graph_when(graph_enabled(), custom).err()
+}
+
+/// Locate the active graph for a given policy decision: custom path, local
+/// `graphify-out/graph.json`, or the PRISM default.
+///
+/// The gate is a parameter rather than a config read so that both failure modes are
+/// reachable in a test without a config file on disk, and so the one policy read per
+/// operation happens at a call site that can be seen.
+pub fn active_graph_when(
+    enabled: bool,
+    custom: Option<&Path>,
+) -> std::result::Result<(PathBuf, GraphRAG), GraphUnavailable> {
+    if !enabled {
+        return Err(GraphUnavailable::Disabled);
+    }
+
     if let Some(p) = custom {
         if let Ok(rag) = GraphRAG::load_any(p) {
-            return Some((p.to_path_buf(), rag));
+            return Ok((p.to_path_buf(), rag));
         }
     }
 
@@ -32,7 +98,7 @@ pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
     let local_graphify = PathBuf::from("graphify-out/graph.json");
     if local_graphify.exists() {
         if let Ok(rag) = GraphRAG::load_any(&local_graphify) {
-            return Some((local_graphify, rag));
+            return Ok((local_graphify, rag));
         }
     }
 
@@ -40,11 +106,23 @@ pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
     let prism_graph = graph_dir().join("codebase_graph.json");
     if prism_graph.exists() {
         if let Ok(rag) = GraphRAG::load_any(&prism_graph) {
-            return Some((prism_graph, rag));
+            return Ok((prism_graph, rag));
         }
     }
 
-    None
+    Err(GraphUnavailable::NotFound)
+}
+
+/// Find the active codebase graph: custom path, local graphify-out/graph.json, or PRISM
+/// default.
+///
+/// This is the mandatory first step of every read-side graph operation, which is why the
+/// policy gate lives here: one check covers the `prism graph` query subcommands and the
+/// `prism_graph_*` MCP tools alike. `None` therefore now means *either* "disabled" or
+/// "nothing indexed" — anything that reports to a user must ask [`graph_unavailable`]
+/// which, never assume the second.
+pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
+    active_graph_when(graph_enabled(), custom).ok()
 }
 
 /// Struct-returning graph query, shared by the CLI's `--json` mode and the MCP
@@ -61,6 +139,9 @@ pub fn query_graph_data(
 }
 
 pub async fn query_graph(query: &str, custom_path: Option<&Path>) -> Result<()> {
+    // Before the CRAG fallback below, not after: corrective retrieval is part of the
+    // same feature, so a disabled graph must not silently answer from it.
+    ensure_enabled()?;
     if let Some((path, matches)) = query_graph_data(query, 8, custom_path) {
         if !matches.is_empty() {
             println!("\n  Graph Query Results (Source: {})", path.display());
@@ -111,10 +192,9 @@ pub async fn explain_node(node_name: &str, custom_path: Option<&Path>) -> Result
     use colored::Colorize;
 
     let Some((path, exp)) = explain_node_data(node_name, custom_path) else {
-        if find_active_graph(custom_path).is_none() {
-            println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
-        } else {
-            println!("Node '{}' not found in graph.", node_name);
+        match graph_unavailable(custom_path) {
+            Some(why) => println!("{}", why.message()),
+            None => println!("Node '{}' not found in graph.", node_name),
         }
         return Ok(());
     };
@@ -177,8 +257,8 @@ pub fn shortest_path_data(
 pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
-    if find_active_graph(custom_path).is_none() {
-        println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
+    if let Some(why) = graph_unavailable(custom_path) {
+        println!("{}", why.message());
         return Ok(());
     }
 
@@ -238,7 +318,12 @@ pub async fn god_nodes(top: usize, custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
     let Some((path, hubs)) = god_nodes_data(top, custom_path) else {
-        println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
+        println!(
+            "{}",
+            graph_unavailable(custom_path)
+                .unwrap_or(GraphUnavailable::NotFound)
+                .message()
+        );
         return Ok(());
     };
 
@@ -268,6 +353,7 @@ pub async fn god_nodes(top: usize, custom_path: Option<&Path>) -> Result<()> {
 }
 
 pub async fn import_graph(path: &Path) -> Result<()> {
+    ensure_enabled()?;
     println!("Importing graph from: {}", path.display());
     let rag = GraphRAG::load_any(path)?;
     std::fs::create_dir_all(graph_dir())?;
@@ -284,6 +370,7 @@ pub async fn import_graph(path: &Path) -> Result<()> {
 }
 
 pub async fn index_codebase<P: AsRef<Path>>(dir: P) -> Result<()> {
+    ensure_enabled()?;
     let root = dir.as_ref();
     println!("Scanning and indexing codebase at: {}", root.display());
     let rag = GraphRAG::build_from_dir(root);
@@ -301,6 +388,7 @@ pub async fn index_codebase<P: AsRef<Path>>(dir: P) -> Result<()> {
 }
 
 pub async fn extract_from_source(source: &str) -> Result<()> {
+    ensure_enabled()?;
     let content = std::fs::read_to_string(source)?;
     let entities = extract_entities(&content)?;
     let relationships = extract_relationships(&content, &entities)?;
@@ -321,6 +409,7 @@ pub async fn extract_from_source(source: &str) -> Result<()> {
 }
 
 pub async fn export_to_obsidian(output_dir: &str) -> Result<()> {
+    ensure_enabled()?;
     let entities = load_all_entities()?;
     let relationships = load_all_relationships()?;
     let out = PathBuf::from(output_dir);
@@ -366,6 +455,7 @@ pub async fn export_to_obsidian(output_dir: &str) -> Result<()> {
 pub async fn graph_stats(custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
+    ensure_enabled()?;
     let entities = load_all_entities()?;
     let relationships = load_all_relationships()?;
     let reports = load_community_reports()?;
@@ -592,6 +682,9 @@ pub fn search_graph(query: &str) -> Result<Vec<String>> {
 }
 
 pub fn search_graph_with_path(query: &str, custom_path: Option<&Path>) -> Result<Vec<String>> {
+    // The entity store below is read directly, bypassing `find_active_graph`, so this
+    // path needs its own gate.
+    ensure_enabled()?;
     let mut results = Vec::new();
     let entities = load_all_entities().unwrap_or_default();
     let query_lower = query.to_lowercase();
@@ -617,4 +710,61 @@ pub fn search_graph_with_path(query: &str, custom_path: Option<&Path>) -> Result
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    /// The failure this gate had to avoid: both chokepoints return `Option`, so gating
+    /// naively makes "GraphRAG is off" look identical to "you have not indexed
+    /// anything". They are different problems with different fixes, so they are
+    /// different values.
+    #[test]
+    fn a_disabled_graph_is_not_reported_as_a_missing_one() {
+        let disabled = active_graph_when(false, None);
+        assert_eq!(
+            disabled.err(),
+            Some(GraphUnavailable::Disabled),
+            "policy off must report Disabled, whatever is on disk"
+        );
+
+        let missing = active_graph_when(true, Some(Path::new("/nonexistent/graph.json")));
+        assert_ne!(
+            missing.err(),
+            Some(GraphUnavailable::Disabled),
+            "an enabled graph that simply is not there must never read as Disabled"
+        );
+
+        // …and the two say different things to the user.
+        let off = GraphUnavailable::Disabled.message();
+        let absent = GraphUnavailable::NotFound.message();
+        assert_ne!(off, absent);
+        assert!(
+            off.contains("disabled") && off.contains("prism hub enroll"),
+            "{off}"
+        );
+        assert!(
+            absent.contains("prism graph index") && !absent.contains("hub"),
+            "the fix for an unindexed graph is indexing, not enrolling: {absent}"
+        );
+    }
+
+    /// A disabled gate must not touch the store at all — no directory probe, no load —
+    /// so `Disabled` is returned even where a perfectly good graph exists.
+    #[test]
+    fn the_gate_short_circuits_before_any_lookup() {
+        let repo_graph = Path::new("graphify-out/graph.json");
+        if repo_graph.exists() {
+            assert_eq!(
+                active_graph_when(false, Some(repo_graph)).err(),
+                Some(GraphUnavailable::Disabled),
+                "an explicit --graph path must not defeat the gate"
+            );
+            assert!(
+                active_graph_when(true, Some(repo_graph)).is_ok(),
+                "…and the same path loads fine once enabled"
+            );
+        }
+    }
 }

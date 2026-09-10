@@ -98,14 +98,10 @@ async fn graph_explain_str(
     custom_path: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
     let Some((path, exp)) = crate::knowledge::explain_node_data(node, custom_path) else {
-        return Ok(
-            if crate::knowledge::find_active_graph(custom_path).is_none() {
-                "No active graph found. Run `prism graph index` or provide a graph path."
-                    .to_string()
-            } else {
-                format!("Node '{}' not found in graph.", node)
-            },
-        );
+        return Ok(match crate::knowledge::graph_unavailable(custom_path) {
+            Some(why) => why.message(),
+            None => format!("Node '{}' not found in graph.", node),
+        });
     };
 
     let mut lines = Vec::new();
@@ -167,13 +163,10 @@ async fn graph_path_str(
             }
             Ok(lines.join("\n"))
         }
-        None if crate::knowledge::find_active_graph(custom_path).is_none() => {
-            Ok("No active graph found.".to_string())
-        }
-        None => Ok(format!(
-            "No path found between '{}' and '{}' in graph.",
-            from, to
-        )),
+        None => Ok(match crate::knowledge::graph_unavailable(custom_path) {
+            Some(why) => why.message(),
+            None => format!("No path found between '{}' and '{}' in graph.", from, to),
+        }),
     }
 }
 
@@ -182,7 +175,9 @@ async fn graph_god_nodes_str(
     custom_path: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
     let Some((path, hubs)) = crate::knowledge::god_nodes_data(top, custom_path) else {
-        return Ok("No active graph found.".to_string());
+        return Ok(crate::knowledge::graph_unavailable(custom_path)
+            .unwrap_or(crate::knowledge::GraphUnavailable::NotFound)
+            .message());
     };
 
     let mut lines = vec![format!(
@@ -368,6 +363,25 @@ fn text_err(s: impl Into<String>) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::error(vec![ContentBlock::text(s.into())]))
 }
 
+/// The MCP form of the GraphRAG policy gate.
+///
+/// `Some(_)` short-circuits the tool as an *error* carrying the enrolment hint. It has
+/// to be an error, not empty text: an agent reads "No graph results" as a fact about
+/// the codebase and moves on, whereas a disabled feature is a fact about this machine
+/// that the operator can fix.
+fn graph_gate() -> Option<Result<CallToolResult, McpError>> {
+    crate::knowledge::ensure_enabled()
+        .err()
+        .map(|e| text_err(e.to_string()))
+}
+
+/// The MCP form of the semantic-cache gate, covering both the disabled and the
+/// store-locked reason. Same argument: an agent must not read either as "nothing
+/// cached".
+fn cache_gate() -> Option<Result<CallToolResult, McpError>> {
+    crate::cache::unavailable().map(|why| text_err(why.message()))
+}
+
 #[derive(Clone)]
 pub struct PrismMcpServer {
     // Read by the #[tool_handler]-generated ServerHandler::list_tools/call_tool through
@@ -492,6 +506,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_query_str(&req.query, graph_path).await {
             Ok(s) => text_ok(s),
@@ -506,6 +523,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphExplainRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_explain_str(&req.node, graph_path).await {
             Ok(s) => text_ok(s),
@@ -520,6 +540,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphPathRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_path_str(&req.from, &req.to, graph_path).await {
             Ok(s) => text_ok(s),
@@ -534,6 +557,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphGodNodesRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_god_nodes_str(req.top, graph_path).await {
             Ok(s) => text_ok(s),
@@ -548,6 +574,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphImportRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         match crate::knowledge::import_graph(std::path::Path::new(&req.path)).await {
             Ok(_) => text_ok(format!(
                 "Successfully imported and activated graph from: {}",
@@ -564,6 +593,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<GraphIndexRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = graph_gate() {
+            return off;
+        }
         match crate::knowledge::index_codebase(std::path::Path::new(&req.path)).await {
             Ok(_) => text_ok(format!("Successfully indexed codebase at '{}'", req.path)),
             Err(e) => text_err(format!("Indexing error: {e}")),
@@ -607,6 +639,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<CacheSaveRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(off) = cache_gate() {
+            return off;
+        }
         if req.prompt.is_empty() || req.response.is_empty() {
             return text_err("prompt and response are required");
         }
@@ -624,12 +659,10 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<CacheLookupRequest>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(e) = crate::cache::open_error() {
-            // An unreachable store is not an empty one; an agent must not read a
-            // lock failure as "nothing cached".
-            return text_err(format!(
-                "Cache unavailable (store locked by another process): {e}"
-            ));
+        // Neither a disabled cache nor an unreachable one is an empty one; an agent
+        // must not read either as "nothing cached".
+        if let Some(off) = cache_gate() {
+            return off;
         }
         let results = crate::cache::lookup_similar(&req.query, req.limit);
         if results.is_empty() {
@@ -656,11 +689,26 @@ impl PrismMcpServer {
         description = "Get a summary of PRISM token savings, cost economics, and semantic cache status."
     )]
     async fn prism_analytics_summary(&self) -> Result<CallToolResult, McpError> {
-        let stats = crate::cache::get_cache_stats();
-        text_ok(format!(
-            "PRISM Analytics Summary:\n  Cache Entries: {}\n  Cache Location: {}",
-            stats.total_entries, stats.sled_path
-        ))
+        // `gain` and analytics are free, so this tool still answers — but it reports the
+        // cache's actual state rather than `Cache Entries: 0`, which would read as an
+        // empty cache when the cache is simply not enabled here.
+        let cache_line = match crate::cache::unavailable() {
+            Some(crate::cache::Unavailable::Disabled) => {
+                "  Semantic cache: disabled (a PRISM Hub feature — `prism hub enroll` enables it)"
+                    .to_string()
+            }
+            Some(crate::cache::Unavailable::Unopenable(e)) => {
+                format!("  Semantic cache: unreachable ({e})")
+            }
+            None => {
+                let stats = crate::cache::get_cache_stats();
+                format!(
+                    "  Cache Entries: {}\n  Cache Location: {}",
+                    stats.total_entries, stats.sled_path
+                )
+            }
+        };
+        text_ok(format!("PRISM Analytics Summary:\n{cache_line}"))
     }
 }
 

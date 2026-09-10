@@ -133,8 +133,20 @@ fn global_cache_result() -> &'static Result<Mutex<SemanticCache>, String> {
     })
 }
 
-/// Get or initialize the shared global SemanticCache singleton
+/// Get or initialize the shared global SemanticCache singleton.
+///
+/// This fronts every cache operation, which is why the policy gate lives here: the
+/// module-level `cache_response`/`lookup_*`/`record_keyed`/`get_cache_stats`/
+/// `clear_cache` helpers all route through it, so one check covers them all. When the
+/// cache is disabled the store is never opened — sled creates no directory and takes no
+/// lock.
+///
+/// `None` now means *either* "disabled" or "unopenable". Ask [`unavailable`] which;
+/// neither of them is "empty".
 pub fn global_cache() -> Option<&'static Mutex<SemanticCache>> {
+    if !is_enabled() {
+        return None;
+    }
     global_cache_result().as_ref().ok()
 }
 
@@ -146,6 +158,60 @@ pub fn global_cache() -> Option<&'static Mutex<SemanticCache>> {
 /// unreachable. An inaccessible store and an empty one are different answers.
 pub fn open_error() -> Option<&'static str> {
     global_cache_result().as_ref().err().map(String::as_str)
+}
+
+/// Why the semantic cache cannot be used, when it cannot.
+///
+/// The same argument [`open_error`] already made, extended by one case. There are now
+/// three distinct answers where the API only has room for `None`: the cache is *empty*,
+/// it is *unreachable*, or it is *disabled*. Collapsing the third into either of the
+/// others tells the user to stop `prism serve` or to expect entries, when the actual
+/// remedy is to enrol with a hub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unavailable {
+    /// No configuration layer enables it. The semantic cache is a PRISM Hub feature.
+    Disabled,
+    /// Enabled, but sled could not take its directory lock.
+    Unopenable(&'static str),
+}
+
+impl Unavailable {
+    /// The user-facing explanation, with the remedy that applies to each case.
+    pub fn message(self) -> String {
+        match self {
+            Unavailable::Disabled => crate::config::disabled_by_policy("The semantic cache"),
+            Unavailable::Unopenable(e) => format!(
+                "cache unavailable: {e}\n  the store is locked while `prism serve` is running — stop it, or read the cache from the proxy's own MCP endpoint."
+            ),
+        }
+    }
+}
+
+/// Whether the semantic cache is enabled, resolved through the full chain: hub policy >
+/// project `.prismrc` > global `config.yaml` > default **off**.
+///
+/// Re-read per call rather than memoized, so a policy fetched by `prism hub config`
+/// takes effect on the next request instead of on the next `prism serve` restart. The
+/// cost is three `stat`s beside a model round trip.
+pub fn is_enabled() -> bool {
+    crate::config::resolve().cache_enabled()
+}
+
+/// Availability for a given policy decision.
+///
+/// The gate is a parameter so the reporting paths are testable without a config file,
+/// and so `Disabled` provably never opens the store — [`open_error`] is only consulted
+/// on the enabled branch.
+pub fn availability(enabled: bool) -> Option<Unavailable> {
+    if !enabled {
+        return Some(Unavailable::Disabled);
+    }
+    open_error().map(Unavailable::Unopenable)
+}
+
+/// `Some(reason)` when no cache operation can succeed.
+pub fn unavailable() -> Option<Unavailable> {
+    availability(is_enabled())
 }
 
 /// Convenience global helper: save response for a prompt
@@ -692,5 +758,48 @@ mod store_tests {
             "the original defect: any query returned its top-N neighbours"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    /// Three answers, three values. The store being empty, unreachable and disabled are
+    /// different situations with different fixes, and `prism cache stats` must not print
+    /// one of them for another.
+    #[test]
+    fn a_disabled_cache_is_not_reported_as_empty_or_locked() {
+        assert_eq!(
+            availability(false),
+            Some(Unavailable::Disabled),
+            "policy off must report Disabled without consulting the store"
+        );
+
+        let off = Unavailable::Disabled.message();
+        let locked = Unavailable::Unopenable("…/cache/sled: could not acquire lock").message();
+        assert_ne!(off, locked);
+        assert!(
+            off.contains("disabled") && off.contains("prism hub enroll"),
+            "{off}"
+        );
+        assert!(
+            !off.contains("locked") && !off.contains("prism serve"),
+            "a disabled cache must not be blamed on the proxy holding a lock: {off}"
+        );
+        assert!(
+            locked.contains("locked") && !locked.contains("prism hub enroll"),
+            "a lock failure has nothing to do with enrolment: {locked}"
+        );
+    }
+
+    /// The community default. Nothing on disk enables the cache, so every module-level
+    /// helper must be a no-op — and crucially the sled directory must not be created,
+    /// which is what makes "disabled" a real gate and not just a hidden filter.
+    #[test]
+    fn the_community_default_is_off() {
+        let community = crate::config::PrismConfig::default();
+        assert!(!community.cache_enabled());
+        assert_eq!(availability(false), Some(Unavailable::Disabled));
     }
 }

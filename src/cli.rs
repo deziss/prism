@@ -430,6 +430,19 @@ pub async fn memory(cmd: MemoryCmd) -> Result<()> {
 
 // --- graph ---
 pub async fn graph(cmd: GraphCmd) -> Result<()> {
+    graph_gated(cmd, crate::knowledge::graph_enabled()).await
+}
+
+/// `graph` with the policy decision injected.
+///
+/// One gate for all nine subcommands, up front and loud: with GraphRAG off the `--json`
+/// arms below would otherwise print `null` and exit 0, which an agent or a script reads
+/// as "no results" rather than "this feature is not enabled here". Taking `enabled` as
+/// an argument keeps that gate testable without a config file on disk.
+async fn graph_gated(cmd: GraphCmd, enabled: bool) -> Result<()> {
+    if !enabled {
+        anyhow::bail!("{}", crate::knowledge::GraphUnavailable::Disabled.message());
+    }
     match cmd {
         GraphCmd::Query {
             query,
@@ -552,13 +565,18 @@ pub async fn read(
 
 // --- cache ---
 pub async fn cache(cmd: CacheCmd) -> Result<()> {
-    // sled locks its directory, so the CLI cannot read the store while `prism serve`
-    // holds it. Say so — every command below would otherwise report an empty cache,
-    // which is a different answer from an unreachable one.
-    if let Some(e) = crate::cache::open_error() {
-        anyhow::bail!(
-            "cache unavailable: {e}\n  the store is locked while `prism serve` is running — stop it, or read the cache from the proxy's own MCP endpoint."
-        );
+    cache_gated(cmd, crate::cache::unavailable()).await
+}
+
+/// `cache` with the availability decision injected.
+///
+/// Two reasons a cache command cannot run, and neither of them is an empty cache: the
+/// feature is disabled, or sled's directory lock is held by `prism serve`. Every command
+/// below would otherwise report `Total entries: 0` for both, sending the user to stop
+/// the proxy when the real fix is to enrol — or the reverse.
+async fn cache_gated(cmd: CacheCmd, unavailable: Option<crate::cache::Unavailable>) -> Result<()> {
+    if let Some(why) = unavailable {
+        anyhow::bail!("{}", why.message());
     }
     match cmd {
         CacheCmd::Stats { json } => {
@@ -1147,4 +1165,110 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
         ShimCmd::Path => println!("{}", sh::shim_dir().display()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    /// `prism cache stats` must say *disabled*, and it must not fall through to the
+    /// printer: the whole failure this gate had to avoid is a paid feature that is off
+    /// reporting `Total entries: 0`, which is indistinguishable from a cache that is
+    /// simply empty.
+    #[tokio::test]
+    async fn cache_stats_reports_disabled_rather_than_empty() {
+        let err = cache_gated(
+            CacheCmd::Stats { json: false },
+            Some(crate::cache::Unavailable::Disabled),
+        )
+        .await
+        .expect_err("a disabled cache must fail the command, not print zero entries")
+        .to_string();
+
+        assert!(err.contains("disabled"), "{err}");
+        assert!(err.contains("prism hub enroll"), "{err}");
+        assert!(
+            !err.contains("Total entries") && !err.contains("locked"),
+            "neither an empty cache nor a lock failure: {err}"
+        );
+    }
+
+    /// The other reason, still distinct. `--json` too: a script must get a non-zero
+    /// exit and a reason, not `{"total_entries": 0}`.
+    #[tokio::test]
+    async fn cache_stats_still_distinguishes_a_locked_store() {
+        let err = cache_gated(
+            CacheCmd::Stats { json: true },
+            Some(crate::cache::Unavailable::Unopenable(
+                "/tmp/x/cache/sled: could not acquire lock",
+            )),
+        )
+        .await
+        .expect_err("a locked store must fail the command")
+        .to_string();
+
+        assert!(err.contains("could not acquire lock"), "{err}");
+        assert!(err.contains("prism serve"), "{err}");
+        assert!(
+            !err.contains("prism hub enroll"),
+            "a lock has nothing to do with enrolment: {err}"
+        );
+    }
+
+    /// All nine `prism graph` subcommands share one gate, and it fires before the
+    /// `--json` arms — which would otherwise print `null` and exit 0.
+    #[tokio::test]
+    async fn every_graph_subcommand_reports_disabled() {
+        for cmd in [
+            GraphCmd::Query {
+                query: "anything".to_string(),
+                graph: None,
+                graphify: false,
+                json: true,
+            },
+            GraphCmd::Stats { graph: None },
+            GraphCmd::Index {
+                path: std::path::PathBuf::from("."),
+                from_graphify: None,
+            },
+        ] {
+            let err = graph_gated(cmd, false)
+                .await
+                .expect_err("a disabled graph command must fail")
+                .to_string();
+            assert!(err.contains("disabled"), "{err}");
+            assert!(err.contains("prism hub enroll"), "{err}");
+            assert!(
+                !err.contains("prism graph index"),
+                "indexing is not the fix when the feature is off: {err}"
+            );
+        }
+    }
+
+    /// The free set is not touched by any of this: no gate, no hub, no policy read.
+    #[tokio::test]
+    async fn the_free_set_is_unaffected_by_community_defaults() {
+        let community = crate::config::PrismConfig::default();
+        assert!(community.toon_enabled(), "TOON stays on");
+        assert!(!community.tron_enabled(), "TRON stays off, as before");
+        assert_eq!(
+            community.filters,
+            crate::config::FilterLimits::default(),
+            "the filter caps that do the actual saving are untouched"
+        );
+
+        // `prism read`, `count`, `compress` and `toon` work with nothing configured.
+        let compressed = crate::compress::compress("one two three four five six", 0.5);
+        assert!(compressed.compressed_tokens > 0);
+        assert!(
+            crate::encode::encode_json_to_toon(&serde_json::json!([{"a": 1}, {"a": 2}])).is_ok()
+        );
+        // …and the filters dispatch with no policy read at all.
+        let raw = "?? a.txt\n?? b.txt\n";
+        let filtered = crate::filter::filter_output(raw, "git", &["status".to_string()]);
+        assert!(
+            filtered.contains("a.txt"),
+            "filters need no policy to dispatch: {filtered}"
+        );
+    }
 }

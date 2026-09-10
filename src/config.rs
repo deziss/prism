@@ -166,16 +166,53 @@ impl PrismConfig {
         self.tron_enabled.unwrap_or(false)
     }
 
-    /// GraphRAG codebase intelligence. On unless a layer says otherwise.
+    /// GraphRAG codebase intelligence. **Off** unless a layer states otherwise.
+    ///
+    /// This is a hub feature: a licensed PRISM Hub distributes policy that sets
+    /// `graph_enabled: true`, which lands in `<data>/hub-config.yaml` via
+    /// [`crate::hub::fetch_config`] and is picked up here as the top layer of
+    /// [`resolve`]. "Community" is therefore just *no policy saying otherwise* —
+    /// prism honours the flag and never evaluates an entitlement, checks a licence, or
+    /// makes a network call to decide. See [`disabled_by_policy`].
     pub fn graph_enabled(&self) -> bool {
-        self.graph_enabled.unwrap_or(true)
+        self.graph_enabled.unwrap_or(false)
     }
 
-    /// Semantic cache. On unless a layer says otherwise. Note this governs the *store*;
-    /// whether the proxy may *serve* from it is separately opt-in via `PRISM_CACHE_SERVE`.
+    /// Semantic cache. **Off** unless a layer states otherwise — a hub feature, on the
+    /// same mechanism as [`Self::graph_enabled`].
+    ///
+    /// This governs the *store*. Whether the proxy may additionally *serve* a stored
+    /// response in place of a live model call stays separately opt-in via
+    /// `PRISM_CACHE_SERVE`, and `PRISM_CACHE_RECORD=0` remains the privacy kill switch
+    /// for writing. Both are preferences *within* an enabled cache: with this `false`
+    /// the proxy never keys a request at all, so neither env var can reach the store.
     pub fn cache_enabled(&self) -> bool {
-        self.cache_enabled.unwrap_or(true)
+        self.cache_enabled.unwrap_or(false)
     }
+}
+
+/// What to do about a hub feature that no configuration layer enables, and the
+/// reassurance that the rest of prism is unaffected.
+///
+/// One text, in one place, so the remedy a user is handed cannot drift between
+/// `prism graph`, `prism cache`, the MCP tools and the proxy.
+pub const HUB_FEATURE_HELP: &str = "\
+GraphRAG (`prism graph`) and the semantic cache (`prism cache`) are PRISM Hub features,
+switched on by the policy a licensed hub distributes. Enrol this agent to turn them on:
+
+    prism hub enroll --url <hub> --token <join-token>
+
+Nothing else needs a hub. `prism cmd` and its filters, the PATH shims, `read`, `count`,
+`compress`, `toon`, `memory`, `gain`, `mcp` and the local `serve` proxy are unaffected.";
+
+/// The message a disabled hub feature reports: which feature, that it is *disabled*
+/// rather than empty or broken, and [`HUB_FEATURE_HELP`].
+///
+/// Every gate routes its wording through here. The distinction matters because both
+/// chokepoints return `Option` — a naive gate makes "off" indistinguishable from "no
+/// graph indexed" or "cache unreachable", which sends the user to fix the wrong thing.
+pub fn disabled_by_policy(feature: &str) -> String {
+    format!("{feature} is disabled: no configuration layer enables it.\n\n{HUB_FEATURE_HELP}")
 }
 
 /// Every key `PrismConfig` understands on the wire, derived from the struct itself so it
@@ -416,8 +453,81 @@ mod tests {
         assert_eq!(merged.toon_enabled, None, "default states nothing");
         assert!(merged.toon_enabled(), "TOON defaults on");
         assert!(!merged.tron_enabled(), "TRON defaults off");
-        assert!(merged.graph_enabled(), "graph defaults on");
-        assert!(merged.cache_enabled(), "cache defaults on");
+        assert!(
+            !merged.graph_enabled(),
+            "GraphRAG defaults off — a hub feature"
+        );
+        assert!(
+            !merged.cache_enabled(),
+            "the semantic cache defaults off — a hub feature"
+        );
+    }
+
+    /// Community *is* the default: an unlicensed agent has no hub policy, so both paid
+    /// features resolve off with nothing on disk saying so.
+    #[test]
+    fn community_defaults_leave_both_paid_features_off() {
+        let community = PrismConfig::default();
+
+        assert!(!community.graph_enabled());
+        assert!(!community.cache_enabled());
+        // …and the two free flags are untouched by the gating change.
+        assert!(community.toon_enabled(), "TOON stays on");
+        assert!(!community.tron_enabled(), "TRON stays off");
+    }
+
+    /// The commercial mechanism, end to end through the merge: a hub layer that *states*
+    /// `true` turns on a feature whose default is off. This is the direction the old
+    /// truthiness merge could express and the `Option<bool>` merge must keep — the whole
+    /// point of `policy_push` is distributing flags that change behaviour.
+    #[test]
+    fn a_hub_layer_enables_a_default_off_feature() {
+        let local = PrismConfig::default();
+        let hub_policy: PrismConfig =
+            serde_yaml::from_str("graph_enabled: true\ncache_enabled: true\n")
+                .expect("a hub policy document must parse");
+
+        let merged = merge_config(&local, &hub_policy);
+
+        assert!(
+            merged.graph_enabled(),
+            "hub policy must be able to enable GraphRAG"
+        );
+        assert!(
+            merged.cache_enabled(),
+            "hub policy must be able to enable the semantic cache"
+        );
+        // Turning one on must not turn the other on by accident.
+        let graph_only: PrismConfig =
+            serde_yaml::from_str("graph_enabled: true\n").expect("partial policy");
+        let merged = merge_config(&local, &graph_only);
+        assert!(merged.graph_enabled());
+        assert!(
+            !merged.cache_enabled(),
+            "a feature the policy does not mention stays at its default"
+        );
+    }
+
+    /// The message a gate reports has to name the feature, say *disabled* (not empty,
+    /// not broken), carry the exact remedy, and not imply the rest of prism is crippled.
+    #[test]
+    fn the_disabled_message_names_the_feature_and_the_remedy() {
+        let msg = disabled_by_policy("GraphRAG codebase intelligence");
+
+        assert!(msg.contains("GraphRAG codebase intelligence"));
+        assert!(msg.contains("disabled"), "{msg}");
+        assert!(
+            msg.contains("prism hub enroll --url <hub> --token <join-token>"),
+            "the message must carry the command that fixes it: {msg}"
+        );
+        assert!(
+            msg.contains("prism cmd") && msg.contains("Nothing else needs a hub"),
+            "the message must say what still works: {msg}"
+        );
+        assert!(
+            msg.contains("licensed hub"),
+            "the message must name who enables it: {msg}"
+        );
     }
 
     /// The hub sends only the keys a policy actually sets. Every absent field used to be
