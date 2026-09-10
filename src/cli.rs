@@ -214,10 +214,10 @@ PRISM initialized ({scope}).");
     println!("
 Next steps:");
     println!("  prism serve --port 27181    # start transparent LLM proxy");
-    println!("  prism mcp   --port 27182    # start MCP server for Claude Code");
+    println!("  prism mcp   --stdio         # MCP server for a local agent (already");
+    println!("                                registered in ~/.claude.json if --global)");
     if global {
         println!("  source ~/.bashrc           # reload shell env vars");
-        println!("  claude mcp add prism --transport http http://localhost:27182");
     }
     println!("
 Run prism gain to see token savings.");
@@ -303,6 +303,11 @@ fn write_shell_env(ca_cert_path: &str, ca_bundle_path: &str) -> Result<()> {
 /// Claude Code reads MCP server definitions from `~/.claude.json`, not from
 /// `settings.json` — an entry written to the latter is silently ignored. The
 /// existing file is merged, never overwritten, since it holds unrelated state.
+///
+/// Prefers stdio: a local, same-machine agent gets no network surface at all, and
+/// prism's stdio transport (added alongside this rmcp rewrite) is the intended default
+/// for exactly this case. The streamable-HTTP transport remains the right choice for
+/// the hub's *remote* MCP client, but that entry is on the hub side, not written here.
 fn write_claude_mcp_config() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let config_path = home.join(".claude.json");
@@ -326,13 +331,24 @@ fn write_claude_mcp_config() -> Result<()> {
     let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
         anyhow::bail!("~/.claude.json has a non-object mcpServers field; leaving it alone");
     };
+    // Absolute path: a relative "prism" would depend on PATH at the time Claude Code
+    // itself launches the server, which is not guaranteed to be a shell that has run
+    // rc files at all (GUI-launched clients often do not).
+    let prism_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "prism".to_string());
     servers.insert(
         "prism".to_string(),
-        serde_json::json!({ "type": "http", "url": "http://localhost:27182" }),
+        serde_json::json!({
+            "type": "stdio",
+            "command": prism_bin,
+            "args": ["mcp", "--stdio"]
+        }),
     );
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
-    println!("  Claude MCP:   registered in ~/.claude.json");
+    println!("  Claude MCP:   registered in ~/.claude.json (stdio transport)");
+    println!("                alternative for a remote/hub client: {{\"type\": \"http\", \"url\": \"http://localhost:27182/mcp\"}}");
     Ok(())
 }
 

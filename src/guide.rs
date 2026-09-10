@@ -86,7 +86,8 @@ fn print_quickstart() {
 
     println!("  {}", "3. Standalone Foreground Execution:".bold().white());
     println!("     $ {:<30} {}", "prism serve --port 27181".cyan(), "# Run transparent MITM proxy".dimmed());
-    println!("     $ {:<30} {}", "prism mcp   --port 27182".cyan(), "# Run JSON-RPC 2.0 MCP server".dimmed());
+    println!("     $ {:<30} {}", "prism mcp   --stdio".cyan(), "# Run MCP server over stdio (local agent)".dimmed());
+    println!("     $ {:<30} {}", "prism mcp   --port 27182".cyan(), "# ...or streamable HTTP (remote/hub client)".dimmed());
     println!("");
     println!("  {}", "4. Measured Token & Cost Savings:".bold().white());
     println!("     $ {}", "prism gain --history".cyan().bold());
@@ -98,7 +99,7 @@ fn print_architecture() {
 
     println!("  {}", "1. INBOUND PORTS (Gateways & Interfaces)".bold().cyan());
     println!("     • {:<26} {}", "MITM Proxy (:27181)", "Transparent HTTP/HTTPS CONNECT interceptor");
-    println!("     • {:<26} {}", "MCP Server (:27182)", "Model Context Protocol JSON-RPC 2.0 interface");
+    println!("     • {:<26} {}", "MCP Server (:27182)", "Model Context Protocol — stdio + streamable HTTP (rmcp)");
     println!("     • {:<26} {}", "CLI Runner (`prism cmd`)", "Noise-filtering process executor with failure tee");
     println!("     • {:<26} {}", "AST Reader (`prism read`)", "7-mode AST semantic file outline & reader");
     println!("     • {:<26} {}", "Lifecycle Hooks", "Repository file pre-read & post-write validation");
@@ -155,11 +156,11 @@ fn print_agent_integration() {
     print_header("AI Coding Agent & SDK Integration", "Agents");
 
     println!("  {}", "1. Claude Code (Anthropic):".bold().white());
-    println!("     Register PRISM as an MCP server:");
-    println!("     $ {}\n", "claude mcp add prism --transport http http://localhost:27182".cyan());
-    println!("     Or configure directly in `~/.claude.json`:");
-    println!("     {}", "{\n       \"mcpServers\": {\n         \"prism\": { \"type\": \"http\", \"url\": \"http://localhost:27182\" }\n       }\n     }".dimmed());
-    println!("");
+    println!("     `prism init --global` registers PRISM in `~/.claude.json` automatically,");
+    println!("     over stdio (no network surface) — the preferred transport for a local agent:");
+    println!("     {}", "{\n       \"mcpServers\": {\n         \"prism\": { \"type\": \"stdio\", \"command\": \"/path/to/prism\", \"args\": [\"mcp\", \"--stdio\"] }\n       }\n     }".dimmed());
+    println!("     For a remote client (e.g. the hub), use streamable HTTP instead:");
+    println!("     $ {}\n", "claude mcp add prism --transport http http://localhost:27182/mcp".cyan());
 
     println!("  {}", "2. Cursor IDE & Windsurf:".bold().white());
     println!("     Add PRISM endpoint in Cursor Settings -> Features -> MCP:");

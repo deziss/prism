@@ -35,6 +35,10 @@ toml = "=1.1.5"
 # Async runtime
 tokio = { version = "=1.53.1", features = ["full"] }
 
+# MCP server (rmcp: official Rust SDK)
+rmcp = { version = "=3.2.0", features = ["server", "transport-streamable-http-server", "transport-io", "auth"] }
+tokio-util = "0.7"
+
 # HTTP server (proxy + MCP)
 axum = "0.8"
 tower = "0.5"

@@ -38,6 +38,18 @@ enum Args {
     Mcp {
         #[arg(short, long, default_value_t = 27182)]
         port: u16,
+        /// Serve over stdio instead of HTTP — preferred for a local Claude Code /
+        /// same-machine agent. No network surface at all.
+        #[arg(long, default_value_t = false)]
+        stdio: bool,
+        /// Address to bind the HTTP transport to. Loopback-only by default; going
+        /// wider (e.g. 0.0.0.0) requires --auth-token or a `prism hub enroll` token.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Bearer token required of HTTP callers. Defaults to the hub agent token
+        /// from `prism hub enroll` when bound off-loopback and this is not given.
+        #[arg(long)]
+        auth_token: Option<String>,
     },
     Memory {
         #[command(subcommand)]
@@ -136,7 +148,7 @@ async fn main() -> Result<()> {
         Args::Discover => analytics::discover().await,
         Args::Proxy { cmd } => cli::proxy(cmd).await,
         Args::Serve { port, upstream } => proxy::start_server(port, upstream).await,
-        Args::Mcp { port } => mcp::start_mcp_server(port).await,
+        Args::Mcp { port, stdio, bind, auth_token } => mcp::start_mcp_server(port, stdio, bind, auth_token).await,
         Args::Memory { cmd } => cli::memory(cmd).await,
         Args::Graph { cmd } => cli::graph(cmd).await,
         Args::Toon { cmd } => cli::toon(cmd).await,

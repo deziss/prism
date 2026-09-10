@@ -1,23 +1,44 @@
-//! MCP server — Model Context Protocol 2024-11-05, JSON-RPC 2.0 transport.
+//! MCP server — rewritten on `rmcp` 3.2.0 (the official Rust SDK), targeting protocol
+//! 2026-07-28.
 //!
-//! Claude Code connects via: claude mcp add prism --transport http http://localhost:27182
+//! Two transports, one implementation:
+//!   - `prism mcp --stdio` — a local Claude Code / same-machine agent should prefer
+//!     this; prism never had a stdio transport before this rewrite.
+//!   - `prism mcp --port <p>` — streamable HTTP, for the hub's remote MCP client.
+//!
+//! **Security.** The old server bound `0.0.0.0` unconditionally with zero
+//! authentication — `prism_read_file` reachable from the whole LAN by default. This
+//! rewrite binds `127.0.0.1` unless `--bind` explicitly asks for something wider, and
+//! *requires* a bearer token (the hub agent token from `prism hub enroll`, or
+//! `--auth-token`) whenever bound off-loopback; the server refuses to start otherwise.
+//!
+//! All 17 tools share their bodies with the CLI's `--json` mode through the
+//! struct-returning functions in `analytics`/`memory`/`knowledge`/`cache` (Phase 1) —
+//! the `*_str` helpers below are the one formatting layer both this file and the CLI
+//! built on top of them use.
 
-use anyhow::Result;
-use axum::{
-    body::Bytes,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{any, post},
-    Router,
+use anyhow::{Context, Result};
+use rmcp::{
+    ErrorData as McpError, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    schemars,
+    transport::{
+        io::stdio,
+        streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        },
+    },
+    tool, tool_handler, tool_router,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::net::SocketAddr;
+use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::{analytics, encode, memory};
 
-// ── Internal helpers that return String (memory::search prints to stdout) ─────
+// ── Internal helpers that return String — the shared formatting layer ─────────
 
 async fn memory_search_str(query: &str) -> anyhow::Result<String> {
     let results = memory::search_blocks(query, 10)?;
@@ -116,587 +137,468 @@ async fn graph_god_nodes_str(top: usize, custom_path: Option<&std::path::Path>) 
     Ok(lines.join("\n"))
 }
 
-// ── JSON-RPC 2.0 envelope types ──────────────────────────────────────────────
+// ── Tool request parameter shapes ──────────────────────────────────────────────
+// One struct per tool that takes arguments. `JsonSchema` (re-exported from rmcp, so
+// this always matches whatever schemars version the SDK itself was built against)
+// drives the `inputSchema` the client sees; `Deserialize` drives the actual parse.
 
-#[derive(Deserialize)]
-struct JsonRpcRequest {
-    jsonrpc: Option<String>,
-    id: Option<Value>,
-    method: String,
-    params: Option<Value>,
+fn default_model() -> String { "gpt-4".to_string() }
+fn default_read_mode() -> String { "skeleton".to_string() }
+fn default_top() -> usize { 10 }
+fn default_ratio() -> f64 { 0.7 }
+fn default_cache_model() -> String { "mcp".to_string() }
+fn default_limit() -> usize { 3 }
+fn default_index_path() -> String { ".".to_string() }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CountTokensRequest {
+    /// Text to count tokens in
+    pub text: String,
+    /// Model name (default: gpt-4)
+    #[serde(default = "default_model")]
+    pub model: String,
 }
 
-#[derive(Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: &'static str,
-    id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadFileRequest {
+    /// Path to file
+    pub path: String,
+    /// Mode: skeleton, map, clean, diff, lines, cached, full
+    #[serde(default = "default_read_mode")]
+    pub mode: String,
+    /// Line range (e.g. 10-50) for lines mode
+    #[serde(default)]
+    pub lines: Option<String>,
+    /// Include line numbers
+    #[serde(default)]
+    pub line_numbers: bool,
 }
 
-#[derive(Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FilterCmdRequest {
+    /// Original command (e.g. 'git status' or 'cargo test')
+    pub command: String,
+    /// Raw stdout/stderr output
+    pub output: String,
 }
 
-impl JsonRpcResponse {
-    fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemorySearchRequest {
+    /// Search query
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MemorySaveRequest {
+    /// Memory key or title
+    pub key: String,
+    /// Memory content
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphQueryRequest {
+    /// Graph query (entity name, relationship, function, or keyword)
+    pub query: String,
+    /// Optional path to existing graph.json (e.g. 'graphify-out/graph.json')
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphExplainRequest {
+    /// Node name, symbol, or file path to explain
+    pub node: String,
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphPathRequest {
+    /// Source node or symbol
+    pub from: String,
+    /// Target node or symbol
+    pub to: String,
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphGodNodesRequest {
+    /// Top N nodes to return (default: 10)
+    #[serde(default = "default_top")]
+    pub top: usize,
+    #[serde(default)]
+    pub graph: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphImportRequest {
+    /// Path to graph.json
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphIndexRequest {
+    /// Directory path to index (default: '.')
+    #[serde(default = "default_index_path")]
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ToonEncodeRequest {
+    /// JSON string to encode
+    pub json: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CompressRequest {
+    /// Text to compress
+    pub text: String,
+    /// Target compression ratio 0.0-1.0 (default 0.7 = keep 70%)
+    #[serde(default = "default_ratio")]
+    pub ratio: f64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CacheSaveRequest {
+    /// Prompt text to cache
+    pub prompt: String,
+    /// Response text to cache
+    pub response: String,
+    #[serde(default = "default_cache_model")]
+    pub model: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CacheLookupRequest {
+    /// Prompt or query string
+    pub query: String,
+    /// Max results to return (default: 3)
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+// ── Server ──────────────────────────────────────────────────────────────────────
+
+fn text_ok(s: impl Into<String>) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::success(vec![ContentBlock::text(s.into())]))
+}
+
+fn text_err(s: impl Into<String>) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::error(vec![ContentBlock::text(s.into())]))
+}
+
+#[derive(Clone)]
+pub struct PrismMcpServer {
+    // Read by the #[tool_handler]-generated ServerHandler::list_tools/call_tool through
+    // macro-expanded code the dead-code lint doesn't trace back to this field — verified
+    // functionally instead: a live server correctly lists and executes all 17 tools.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<PrismMcpServer>,
+}
+
+impl Default for PrismMcpServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[tool_router]
+impl PrismMcpServer {
+    pub fn new() -> Self {
+        Self { tool_router: Self::tool_router() }
     }
 
-    fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0",
-            id,
-            result: None,
-            error: Some(JsonRpcError { code, message: message.into(), data: None }),
+    #[tool(description = "Count tokens in text. Returns token count and estimated cost for common models.")]
+    async fn prism_count_tokens(&self, Parameters(req): Parameters<CountTokensRequest>) -> Result<CallToolResult, McpError> {
+        match analytics::count_tokens(&req.text, &req.model) {
+            Ok(count) => {
+                let cost = analytics::estimate_cost(&req.model, count as u32, 0);
+                text_ok(format!("{} tokens ({} model)\nEstimated input cost: ${:.6}", count, req.model, cost))
+            }
+            Err(e) => text_err(format!("Error counting tokens: {e}")),
         }
     }
 
-    fn into_response_bytes(self) -> (StatusCode, String) {
-        (StatusCode::OK, serde_json::to_string(&self).unwrap_or_default())
-    }
-}
-
-// ── Tool definitions ──────────────────────────────────────────────────────────
-
-fn tools_list() -> Value {
-    json!([
-        {
-            "name": "prism_count_tokens",
-            "description": "Count tokens in text. Returns token count and estimated cost for common models.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "text":  {"type": "string", "description": "Text to count tokens in"},
-                    "model": {"type": "string", "description": "Model name (default: gpt-4)", "default": "gpt-4"}
-                },
-                "required": ["text"]
-            }
-        },
-        {
-            "name": "prism_read_file",
-            "description": "Intelligent 7-mode file reader. Modes: 'skeleton' (AST signatures, omits bodies, 70-85% savings), 'map' (outline), 'clean' (no comments), 'diff' (git diff against HEAD), 'lines' (range N-M), 'cached' (~15 token receipt if unchanged), 'full'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to file"},
-                    "mode": {"type": "string", "description": "Mode: skeleton, map, clean, diff, lines, cached, full", "default": "skeleton"},
-                    "lines": {"type": "string", "description": "Line range (e.g. 10-50) for lines mode"},
-                    "line_numbers": {"type": "boolean", "description": "Include line numbers", "default": false}
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "prism_filter_cmd",
-            "description": "Filter raw shell/CLI command output using 65+ RTK-compatible filters (git, cargo, pytest, tsc, docker, k8s, etc.).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Original command (e.g. 'git status' or 'cargo test')"},
-                    "output":  {"type": "string", "description": "Raw stdout/stderr output"}
-                },
-                "required": ["command", "output"]
-            }
-        },
-        {
-            "name": "prism_memory_search",
-            "description": "Search PRISM Memory Palace for previously stored facts, code snippets, and context.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"}
-                },
-                "required": ["query"]
-            }
-        },
-        {
-            "name": "prism_memory_save",
-            "description": "Save a key-value fact to PRISM Memory Palace for future retrieval.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "key":   {"type": "string", "description": "Memory key or title"},
-                    "value": {"type": "string", "description": "Memory content"}
-                },
-                "required": ["key", "value"]
-            }
-        },
-        {
-            "name": "prism_memory_stats",
-            "description": "View Memory Palace statistics across Recall, Core, and Archive tiers.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        },
-        {
-            "name": "prism_graph_query",
-            "description": "Query the PRISM Knowledge Graph or any existing Graphify graph (graphify-out/graph.json) using Corrective RAG (CRAG).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Graph query (entity name, relationship, function, or keyword)"},
-                    "graph": {"type": "string", "description": "Optional path to existing graph.json (e.g. 'graphify-out/graph.json')"}
-                },
-                "required": ["query"]
-            }
-        },
-        {
-            "name": "prism_graph_explain",
-            "description": "Explain a codebase node/symbol and inspect its incoming/outgoing dependencies (compatible with Graphify and PRISM graphs).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "node": {"type": "string", "description": "Node name, symbol, or file path to explain"},
-                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
-                },
-                "required": ["node"]
-            }
-        },
-        {
-            "name": "prism_graph_path",
-            "description": "Find the shortest dependency call/import path between two nodes in the codebase graph.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "from": {"type": "string", "description": "Source node or symbol"},
-                    "to": {"type": "string", "description": "Target node or symbol"},
-                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
-                },
-                "required": ["from", "to"]
-            }
-        },
-        {
-            "name": "prism_graph_god_nodes",
-            "description": "List the most connected architectural hub nodes in the graph (degree centrality).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "top": {"type": "integer", "description": "Top N nodes to return (default: 10)", "default": 10},
-                    "graph": {"type": "string", "description": "Optional path to existing graph.json"}
-                }
-            }
-        },
-        {
-            "name": "prism_graph_import",
-            "description": "Import and activate any existing Graphify (graphify-out/graph.json) or NetworkX graph into PRISM.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path to graph.json"}
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "prism_graph_index",
-            "description": "Index a codebase directory into the PRISM GraphRAG dependency graph (extracts files, functions, types, and imports).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Directory path to index (default: '.')", "default": "."}
-                }
-            }
-        },
-        {
-            "name": "prism_toon_encode",
-            "description": "Encode a JSON array/object into TOON (Token-Oriented Object Notation) — reduces token count by 25-45%.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "json": {"type": "string", "description": "JSON string to encode"}
-                },
-                "required": ["json"]
-            }
-        },
-        {
-            "name": "prism_compress",
-            "description": "Compress a long text prompt using BM25 sentence scoring — reduces token count by 30-50% while preserving key information.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "text":  {"type": "string", "description": "Text to compress"},
-                    "ratio": {"type": "number", "description": "Target compression ratio 0.0-1.0 (default 0.7 = keep 70%)", "default": 0.7}
-                },
-                "required": ["text"]
-            }
-        },
-        {
-            "name": "prism_cache_save",
-            "description": "Store a prompt-response pair into the PRISM Semantic Cache and TurboVec ANN vector index.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "prompt": {"type": "string", "description": "Prompt text to cache"},
-                    "response": {"type": "string", "description": "Response text to cache"},
-                    "model": {"type": "string", "description": "Model name (default: gpt-4)", "default": "gpt-4"}
-                },
-                "required": ["prompt", "response"]
-            }
-        },
-        {
-            "name": "prism_cache_lookup",
-            "description": "Query the PRISM Semantic Cache using TurboVec ANN search for similar past prompts and responses.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Prompt or query string"},
-                    "limit": {"type": "integer", "description": "Max results to return (default: 3)", "default": 3}
-                },
-                "required": ["query"]
-            }
-        },
-        {
-            "name": "prism_analytics_summary",
-            "description": "Get a summary of PRISM token savings, cost economics, and semantic cache status.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    ])
-}
-
-// ── Tool execution ────────────────────────────────────────────────────────────
-
-async fn call_tool(name: &str, arguments: &Value) -> (Value, bool) {
-    let text_content = |s: String| json!([{"type": "text", "text": s}]);
-
-    match name {
-        "prism_count_tokens" => {
-            let text = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4");
-            match analytics::count_tokens(text, model) {
-                Ok(count) => {
-                    let cost_estimate = analytics::estimate_cost(model, count as u32, 0);
-                    (text_content(format!(
-                        "{} tokens ({} model)\nEstimated input cost: ${:.6}",
-                        count, model, cost_estimate
-                    )), false)
-                }
-                Err(e) => (text_content(format!("Error counting tokens: {}", e)), true),
-            }
-        }
-
-        "prism_memory_search" => {
-            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            match memory_search_str(query).await {
-                Ok(results) => (text_content(results), false),
-                Err(e) => (text_content(format!("Memory search error: {}", e)), true),
-            }
-        }
-
-        "prism_memory_save" => {
-            let key = arguments.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            let value = arguments.get("value").and_then(|v| v.as_str()).unwrap_or("");
-            match memory_save_str(key, value).await {
-                Ok(msg) => (text_content(msg), false),
-                Err(e) => (text_content(format!("Memory save error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_query" => {
-            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
-            match graph_query_str(query, graph_path).await {
-                Ok(result) => (text_content(result), false),
-                Err(e) => (text_content(format!("Graph query error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_explain" => {
-            let node = arguments.get("node").and_then(|v| v.as_str()).unwrap_or("");
-            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
-            match graph_explain_str(node, graph_path).await {
-                Ok(result) => (text_content(result), false),
-                Err(e) => (text_content(format!("Graph explain error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_path" => {
-            let from = arguments.get("from").and_then(|v| v.as_str()).unwrap_or("");
-            let to = arguments.get("to").and_then(|v| v.as_str()).unwrap_or("");
-            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
-            match graph_path_str(from, to, graph_path).await {
-                Ok(result) => (text_content(result), false),
-                Err(e) => (text_content(format!("Graph path error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_god_nodes" => {
-            let top = arguments.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            let graph_path = arguments.get("graph").and_then(|v| v.as_str()).map(std::path::Path::new);
-            match graph_god_nodes_str(top, graph_path).await {
-                Ok(result) => (text_content(result), false),
-                Err(e) => (text_content(format!("Graph god nodes error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_import" => {
-            let path_str = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let path = std::path::Path::new(path_str);
-            match crate::knowledge::import_graph(path).await {
-                Ok(_) => (text_content(format!("Successfully imported and activated graph from: {}", path_str)), false),
-                Err(e) => (text_content(format!("Graph import error: {}", e)), true),
-            }
-        }
-
-        "prism_toon_encode" => {
-            let json_str = arguments.get("json").and_then(|v| v.as_str()).unwrap_or("");
-            match serde_json::from_str::<Value>(json_str) {
-                Ok(v) => match encode::encode_json_to_toon(&v) {
-                    Ok(toon) => (text_content(toon), false),
-                    Err(e) => (text_content(format!("TOON encode error: {}", e)), true),
-                },
-                Err(e) => (text_content(format!("Invalid JSON: {}", e)), true),
-            }
-        }
-
-        "prism_compress" => {
-            let text = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let ratio = arguments.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.7);
-            let result = crate::compress::compress(text, ratio);
-            (text_content(format!(
-                "Compressed: {} → {} tokens ({:.0}% reduction)\n\n{}",
-                result.original_tokens,
-                result.compressed_tokens,
-                result.savings_pct,
-                result.compressed
-            )), false)
-        }
-
-        "prism_read_file" => {
-            let path_str = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let mode_str = arguments.get("mode").and_then(|v| v.as_str()).unwrap_or("skeleton");
-            let lines_opt = arguments.get("lines").and_then(|v| v.as_str());
-            let line_numbers = arguments.get("line_numbers").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            let mode = if let Some(range) = lines_opt {
-                crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
-            } else {
-                mode_str.parse::<crate::reader::ReadMode>().unwrap_or(crate::reader::ReadMode::Skeleton)
-            };
-
-            match crate::reader::read_file(std::path::Path::new(path_str), mode, line_numbers) {
-                Ok(out) => {
-                    let header = format!(
-                        "// Mode: {} | Tokens: {} -> {} ({:.1}% saved)\n\n",
-                        out.mode_used, out.original_tokens, out.returned_tokens, out.savings_pct
-                    );
-                    (text_content(format!("{}{}", header, out.content)), false)
-                }
-                Err(e) => (text_content(format!("Read error: {}", e)), true),
-            }
-        }
-
-        "prism_filter_cmd" => {
-            let cmd_str = arguments.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let output_str = arguments.get("output").and_then(|v| v.as_str()).unwrap_or("");
-            let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-            let cmd = parts.first().copied().unwrap_or("");
-            let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
-            let filtered = crate::filter::filter_output(output_str, cmd, &args);
-            (text_content(filtered.into_owned()), false)
-        }
-
-        "prism_memory_stats" => {
-            match memory::stats_data() {
-                Ok(stats) => {
-                    let stats_str = format!(
-                        "Memory Palace Statistics:\n  Recall:  {} blocks\n  Core:    {} blocks\n  Archive: {} blocks",
-                        stats.recall, stats.core, stats.archive,
-                    );
-                    (text_content(stats_str), false)
-                }
-                Err(e) => (text_content(format!("Memory stats error: {}", e)), true),
-            }
-        }
-
-        "prism_graph_index" => {
-            let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            match crate::knowledge::index_codebase(std::path::Path::new(path)).await {
-                Ok(_) => (text_content(format!("Successfully indexed codebase at '{}'", path)), false),
-                Err(e) => (text_content(format!("Indexing error: {}", e)), true),
-            }
-        }
-
-        "prism_cache_save" => {
-            let prompt = arguments.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            let response = arguments.get("response").and_then(|v| v.as_str()).unwrap_or("");
-            let model = arguments.get("model").and_then(|v| v.as_str()).unwrap_or("mcp");
-            if prompt.is_empty() || response.is_empty() {
-                (text_content("prompt and response are required".to_string()), true)
-            } else {
-                crate::cache::cache_response(prompt, response, model);
-                (text_content(format!("Cached response in TurboVec for prompt: {}", prompt)), false)
-            }
-        }
-
-        "prism_cache_lookup" => {
-            let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
-            if let Some(e) = crate::cache::open_error() {
-                // An unreachable store is not an empty one; an agent must not read a
-                // lock failure as "nothing cached".
-                return (
-                    text_content(format!("Cache unavailable (store locked by another process): {}", e)),
-                    true,
+    #[tool(description = "Intelligent 7-mode file reader. Modes: 'skeleton' (AST signatures, omits bodies, 70-85% savings), 'map' (outline), 'clean' (no comments), 'diff' (git diff against HEAD), 'lines' (range N-M), 'cached' (~15 token receipt if unchanged), 'full'.")]
+    async fn prism_read_file(&self, Parameters(req): Parameters<ReadFileRequest>) -> Result<CallToolResult, McpError> {
+        let mode = if let Some(range) = &req.lines {
+            crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
+        } else {
+            req.mode.parse::<crate::reader::ReadMode>().unwrap_or(crate::reader::ReadMode::Skeleton)
+        };
+        match crate::reader::read_file(std::path::Path::new(&req.path), mode, req.line_numbers) {
+            Ok(out) => {
+                let header = format!(
+                    "// Mode: {} | Tokens: {} -> {} ({:.1}% saved)\n\n",
+                    out.mode_used, out.original_tokens, out.returned_tokens, out.savings_pct
                 );
+                text_ok(format!("{header}{}", out.content))
             }
-            let results = crate::cache::lookup_similar(query, limit);
-            if results.is_empty() {
-                (text_content(format!("No cached entries found for: {}", query)), false)
-            } else {
-                let formatted = results.iter().map(|hit| {
-                    format!(
-                        "[Cache: {} | {:.0}% match | model: {}] {}",
-                        hit.entry.key_hash,
-                        hit.score * 100.0,
-                        hit.entry.model.as_deref().unwrap_or("unknown"),
-                        hit.entry.response
-                    )
-                }).collect::<Vec<_>>().join("\n---\n");
-                (text_content(formatted), false)
-            }
-        }
-
-        "prism_analytics_summary" => {
-            let stats = crate::cache::get_cache_stats();
-            let report = format!(
-                "PRISM Analytics Summary:\n  Cache Entries: {}\n  Cache Location: {}",
-                stats.total_entries, stats.sled_path
-            );
-            (text_content(report), false)
-        }
-
-        _ => (text_content(format!("Unknown tool: {}", name)), true),
-    }
-}
-
-// ── JSON-RPC 2.0 dispatcher ───────────────────────────────────────────────────
-
-async fn handle_jsonrpc(_headers: HeaderMap, body: Bytes) -> Response {
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "Invalid UTF-8 body").into_response();
-        }
-    };
-
-    let req: JsonRpcRequest = match serde_json::from_str(body_str) {
-        Ok(r) => r,
-        Err(e) => {
-            let resp = JsonRpcResponse::err(Value::Null, -32700, format!("Parse error: {}", e));
-            let (status, body) = resp.into_response_bytes();
-            return (status, body).into_response();
-        }
-    };
-
-    if let Some(ver) = &req.jsonrpc {
-        if ver != "2.0" {
-            let resp = JsonRpcResponse::err(
-                req.id.clone().unwrap_or(Value::Null),
-                -32600,
-                "Invalid Request: jsonrpc must be '2.0'",
-            );
-            let (status, body) = resp.into_response_bytes();
-            return (status, body).into_response();
+            Err(e) => text_err(format!("Read error: {e}")),
         }
     }
 
-    let id = req.id.clone().unwrap_or(Value::Null);
+    #[tool(description = "Filter raw shell/CLI command output using 65+ RTK-compatible filters (git, cargo, pytest, tsc, docker, k8s, etc.).")]
+    async fn prism_filter_cmd(&self, Parameters(req): Parameters<FilterCmdRequest>) -> Result<CallToolResult, McpError> {
+        let parts: Vec<&str> = req.command.split_whitespace().collect();
+        let cmd = parts.first().copied().unwrap_or("");
+        let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+        let filtered = crate::filter::filter_output(&req.output, cmd, &args);
+        text_ok(filtered.into_owned())
+    }
 
-    let (status, body) = match req.method.as_str() {
-        "initialize" => {
-            let result = json!({
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "prism",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "tools": {}
-                },
-                "instructions": "PRISM — token optimizer. Use prism_count_tokens to estimate cost before expensive operations. Use prism_compress to shrink large prompts. Use prism_memory_save/search for cross-session context."
-            });
-            JsonRpcResponse::ok(id, result).into_response_bytes()
+    #[tool(description = "Search PRISM Memory Palace for previously stored facts, code snippets, and context.")]
+    async fn prism_memory_search(&self, Parameters(req): Parameters<MemorySearchRequest>) -> Result<CallToolResult, McpError> {
+        match memory_search_str(&req.query).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Memory search error: {e}")),
         }
+    }
 
-        "notifications/initialized" => {
-            // Acknowledgement — return empty result
-            JsonRpcResponse::ok(id, json!({})).into_response_bytes()
+    #[tool(description = "Save a key-value fact to PRISM Memory Palace for future retrieval.")]
+    async fn prism_memory_save(&self, Parameters(req): Parameters<MemorySaveRequest>) -> Result<CallToolResult, McpError> {
+        match memory_save_str(&req.key, &req.value).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Memory save error: {e}")),
         }
+    }
 
-        "tools/list" => {
-            let result = json!({ "tools": tools_list() });
-            JsonRpcResponse::ok(id, result).into_response_bytes()
+    #[tool(description = "View Memory Palace statistics across Recall, Core, and Archive tiers.")]
+    async fn prism_memory_stats(&self) -> Result<CallToolResult, McpError> {
+        match memory::stats_data() {
+            Ok(stats) => text_ok(format!(
+                "Memory Palace Statistics:\n  Recall:  {} blocks\n  Core:    {} blocks\n  Archive: {} blocks",
+                stats.recall, stats.core, stats.archive
+            )),
+            Err(e) => text_err(format!("Memory stats error: {e}")),
         }
+    }
 
-        "tools/call" => {
-            let params = req.params.as_ref().and_then(|p| p.as_object());
-            let tool_name = params
-                .and_then(|p| p.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let arguments = params
-                .and_then(|p| p.get("arguments"))
-                .cloned()
-                .unwrap_or(json!({}));
-
-            if tool_name.is_empty() {
-                JsonRpcResponse::err(id, -32602, "Invalid params: 'name' required").into_response_bytes()
-            } else {
-                let (content, is_error) = call_tool(tool_name, &arguments).await;
-                let result = json!({
-                    "content": content,
-                    "isError": is_error
-                });
-                JsonRpcResponse::ok(id, result).into_response_bytes()
-            }
+    #[tool(description = "Query the PRISM Knowledge Graph or any existing Graphify graph (graphify-out/graph.json) using Corrective RAG (CRAG).")]
+    async fn prism_graph_query(&self, Parameters(req): Parameters<GraphQueryRequest>) -> Result<CallToolResult, McpError> {
+        let graph_path = req.graph.as_deref().map(std::path::Path::new);
+        match graph_query_str(&req.query, graph_path).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Graph query error: {e}")),
         }
+    }
 
-        "ping" => {
-            JsonRpcResponse::ok(id, json!({})).into_response_bytes()
+    #[tool(description = "Explain a codebase node/symbol and inspect its incoming/outgoing dependencies (compatible with Graphify and PRISM graphs).")]
+    async fn prism_graph_explain(&self, Parameters(req): Parameters<GraphExplainRequest>) -> Result<CallToolResult, McpError> {
+        let graph_path = req.graph.as_deref().map(std::path::Path::new);
+        match graph_explain_str(&req.node, graph_path).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Graph explain error: {e}")),
         }
+    }
 
-        other => {
-            JsonRpcResponse::err(id, -32601, format!("Method not found: {}", other))
-                .into_response_bytes()
+    #[tool(description = "Find the shortest dependency call/import path between two nodes in the codebase graph.")]
+    async fn prism_graph_path(&self, Parameters(req): Parameters<GraphPathRequest>) -> Result<CallToolResult, McpError> {
+        let graph_path = req.graph.as_deref().map(std::path::Path::new);
+        match graph_path_str(&req.from, &req.to, graph_path).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Graph path error: {e}")),
         }
-    };
+    }
 
-    // Return with Content-Type: application/json
-    axum::response::Response::builder()
-        .status(status)
-        .header("Content-Type", "application/json")
-        .body(axum::body::Body::from(body))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "").into_response())
+    #[tool(description = "List the most connected architectural hub nodes in the graph (degree centrality).")]
+    async fn prism_graph_god_nodes(&self, Parameters(req): Parameters<GraphGodNodesRequest>) -> Result<CallToolResult, McpError> {
+        let graph_path = req.graph.as_deref().map(std::path::Path::new);
+        match graph_god_nodes_str(req.top, graph_path).await {
+            Ok(s) => text_ok(s),
+            Err(e) => text_err(format!("Graph god nodes error: {e}")),
+        }
+    }
+
+    #[tool(description = "Import and activate any existing Graphify (graphify-out/graph.json) or NetworkX graph into PRISM.")]
+    async fn prism_graph_import(&self, Parameters(req): Parameters<GraphImportRequest>) -> Result<CallToolResult, McpError> {
+        match crate::knowledge::import_graph(std::path::Path::new(&req.path)).await {
+            Ok(_) => text_ok(format!("Successfully imported and activated graph from: {}", req.path)),
+            Err(e) => text_err(format!("Graph import error: {e}")),
+        }
+    }
+
+    #[tool(description = "Index a codebase directory into the PRISM GraphRAG dependency graph (extracts files, functions, types, and imports).")]
+    async fn prism_graph_index(&self, Parameters(req): Parameters<GraphIndexRequest>) -> Result<CallToolResult, McpError> {
+        match crate::knowledge::index_codebase(std::path::Path::new(&req.path)).await {
+            Ok(_) => text_ok(format!("Successfully indexed codebase at '{}'", req.path)),
+            Err(e) => text_err(format!("Indexing error: {e}")),
+        }
+    }
+
+    #[tool(description = "Encode a JSON array/object into TOON (Token-Oriented Object Notation) — reduces token count by 25-45%.")]
+    async fn prism_toon_encode(&self, Parameters(req): Parameters<ToonEncodeRequest>) -> Result<CallToolResult, McpError> {
+        match serde_json::from_str::<serde_json::Value>(&req.json) {
+            Ok(v) => match encode::encode_json_to_toon(&v) {
+                Ok(toon) => text_ok(toon),
+                Err(e) => text_err(format!("TOON encode error: {e}")),
+            },
+            Err(e) => text_err(format!("Invalid JSON: {e}")),
+        }
+    }
+
+    #[tool(description = "Compress a long text prompt using BM25 sentence scoring — reduces token count by 30-50% while preserving key information.")]
+    async fn prism_compress(&self, Parameters(req): Parameters<CompressRequest>) -> Result<CallToolResult, McpError> {
+        let result = crate::compress::compress(&req.text, req.ratio);
+        text_ok(format!(
+            "Compressed: {} → {} tokens ({:.0}% reduction)\n\n{}",
+            result.original_tokens, result.compressed_tokens, result.savings_pct, result.compressed
+        ))
+    }
+
+    #[tool(description = "Store a prompt-response pair into the PRISM Semantic Cache and TurboVec ANN vector index.")]
+    async fn prism_cache_save(&self, Parameters(req): Parameters<CacheSaveRequest>) -> Result<CallToolResult, McpError> {
+        if req.prompt.is_empty() || req.response.is_empty() {
+            return text_err("prompt and response are required");
+        }
+        crate::cache::cache_response(&req.prompt, &req.response, &req.model);
+        text_ok(format!("Cached response in TurboVec for prompt: {}", req.prompt))
+    }
+
+    #[tool(description = "Query the PRISM Semantic Cache using TurboVec ANN search for similar past prompts and responses.")]
+    async fn prism_cache_lookup(&self, Parameters(req): Parameters<CacheLookupRequest>) -> Result<CallToolResult, McpError> {
+        if let Some(e) = crate::cache::open_error() {
+            // An unreachable store is not an empty one; an agent must not read a
+            // lock failure as "nothing cached".
+            return text_err(format!("Cache unavailable (store locked by another process): {e}"));
+        }
+        let results = crate::cache::lookup_similar(&req.query, req.limit);
+        if results.is_empty() {
+            text_ok(format!("No cached entries found for: {}", req.query))
+        } else {
+            let formatted = results.iter().map(|hit| {
+                format!(
+                    "[Cache: {} | {:.0}% match | model: {}] {}",
+                    hit.entry.key_hash, hit.score * 100.0, hit.entry.model.as_deref().unwrap_or("unknown"), hit.entry.response
+                )
+            }).collect::<Vec<_>>().join("\n---\n");
+            text_ok(formatted)
+        }
+    }
+
+    #[tool(description = "Get a summary of PRISM token savings, cost economics, and semantic cache status.")]
+    async fn prism_analytics_summary(&self) -> Result<CallToolResult, McpError> {
+        let stats = crate::cache::get_cache_stats();
+        text_ok(format!(
+            "PRISM Analytics Summary:\n  Cache Entries: {}\n  Cache Location: {}",
+            stats.total_entries, stats.sled_path
+        ))
+    }
 }
 
-async fn health() -> (StatusCode, &'static str) {
-    (StatusCode::OK, r#"{"status":"ok","mcp":true,"version":"2024-11-05"}"#)
+#[tool_handler]
+impl ServerHandler for PrismMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        // NOT Implementation::from_build_env(): that helper's env!() calls are baked in
+        // where it's *defined* (inside the rmcp crate itself), so it always reports
+        // "rmcp"/rmcp's own version rather than ours. env!("CARGO_PKG_VERSION") here,
+        // in prism's own source, resolves against prism's Cargo.toml instead.
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("prism", env!("CARGO_PKG_VERSION")))
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
+            .with_instructions(
+                "PRISM — token optimizer. Use prism_count_tokens to estimate cost before \
+                 expensive operations. Use prism_compress to shrink large prompts. Use \
+                 prism_memory_save/search for cross-session context."
+                    .to_string(),
+            )
+    }
 }
 
-// ── Server entrypoint ─────────────────────────────────────────────────────────
+// ── Auth middleware (required off-loopback, optional on it) ───────────────────
 
-pub async fn start_mcp_server(port: u16) -> Result<()> {
-    let app = Router::new()
-        .route("/", post(handle_jsonrpc))
-        .route("/mcp", post(handle_jsonrpc))
-        .route("/health", any(health));
+async fn require_bearer(
+    axum::extract::State(expected): axum::extract::State<Arc<str>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let ok = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|got| got == expected.as_ref());
+    if ok {
+        next.run(req).await
+    } else {
+        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized — missing or invalid bearer token").into_response()
+    }
+}
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!("PRISM MCP server (JSON-RPC 2.0) on http://{}", addr);
-    info!("Add to Claude Code: claude mcp add prism --transport http http://localhost:{}", port);
+async fn health() -> (axum::http::StatusCode, &'static str) {
+    (axum::http::StatusCode::OK, r#"{"status":"ok","mcp":true,"transport":"streamable-http"}"#)
+}
+
+// ── Server entrypoints ────────────────────────────────────────────────────────
+
+/// `prism mcp --stdio` — the transport a local Claude Code / same-machine agent
+/// should prefer. No network surface at all.
+async fn serve_stdio() -> Result<()> {
+    info!("PRISM MCP server on stdio");
+    let service = PrismMcpServer::new().serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+/// `prism mcp --port <p> [--bind <addr>] [--auth-token <token>]` — streamable HTTP,
+/// for the hub's remote MCP client. Loopback by default; going wider requires an
+/// explicit `--bind` and a bearer token (`--auth-token`, or the hub agent token from
+/// `prism hub enroll`) — the server refuses to start otherwise.
+async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result<()> {
+    let bind_ip: IpAddr = bind.parse().with_context(|| format!("invalid --bind address: {bind}"))?;
+    let off_loopback = !bind_ip.is_loopback();
+
+    let token = auth_token.or_else(|| crate::hub::load_credentials().map(|c| c.agent_token));
+    if off_loopback && token.is_none() {
+        anyhow::bail!(
+            "refusing to bind {bind} (not loopback) without a bearer token — pass \
+             --auth-token <token>, or run `prism hub enroll` first. An unauthenticated \
+             tool server (prism_read_file included) must not be reachable on the LAN."
+        );
+    }
+
+    let ct = tokio_util::sync::CancellationToken::new();
+    let service = StreamableHttpService::new(
+        || Ok(PrismMcpServer::new()),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+    );
+
+    let mut router = axum::Router::new().nest_service("/mcp", service);
+    if let Some(token) = token {
+        let state: Arc<str> = Arc::from(token.as_str());
+        router = router.layer(axum::middleware::from_fn_with_state(state, require_bearer));
+        info!("PRISM MCP server: bearer auth required on /mcp");
+    } else {
+        info!("PRISM MCP server: no auth token configured (loopback-only bind, so this is not a LAN exposure)");
+    }
+    router = router.route("/health", axum::routing::any(health));
+
+    let addr = SocketAddr::new(bind_ip, port);
+    info!("PRISM MCP server (streamable HTTP, protocol 2026-07-28) on http://{addr}");
+    if off_loopback {
+        info!("Add to the hub: a remote MCP client pointed at http://{addr}/mcp with the bearer token above");
+    } else {
+        info!("Add to Claude Code: claude mcp add prism --transport http http://{addr}/mcp");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            ct.cancel();
+        })
+        .await?;
     Ok(())
+}
+
+pub async fn start_mcp_server(port: u16, stdio: bool, bind: String, auth_token: Option<String>) -> Result<()> {
+    if stdio {
+        serve_stdio().await
+    } else {
+        serve_http(port, &bind, auth_token).await
+    }
 }
