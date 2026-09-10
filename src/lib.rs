@@ -8,6 +8,7 @@ pub mod filter;
 pub mod guide;
 pub mod hook;
 pub mod hooks;
+pub mod hub;
 pub mod image;
 pub mod knowledge;
 pub mod mcp;

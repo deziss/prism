@@ -1,0 +1,50 @@
+[
+  {
+    "type": "proxy",
+    "sourceIp": "203.0.113.7",
+    "apiKeyHash": "a1b2c3d4",
+    "provider": "anthropic",
+    "model": "claude-3-5-sonnet",
+    "origTokens": 4000,
+    "sentTokens": 2200,
+    "respTokens": 512,
+    "costUsd": 0.0123,
+    "latencyMs": 842,
+    "cacheHit": true,
+    "compressionRatio": 0.55,
+    "cacheServed": false,
+    "imageSavedTokens": 300,
+    "promptCacheReadTokens": 1800,
+    "promptCacheWriteTokens": 0,
+    "status": 200,
+    "ts": "2026-09-10T00:00:00Z"
+  },
+  {
+    "type": "command",
+    "tool": "git",
+    "subcommand": "status",
+    "exitCode": 0,
+    "durationMs": 37,
+    "inputBytes": 4096,
+    "outputBytes": 512,
+    "filteredBytes": 3584,
+    "truncated": true,
+    "viaShim": true,
+    "ts": "2026-09-10T00:00:00Z"
+  },
+  {
+    "type": "cache",
+    "event": "hit",
+    "similarity": 0.91,
+    "keyHash": "e5f6a7b8",
+    "ts": "2026-09-10T00:00:00Z"
+  },
+  {
+    "type": "session",
+    "event": "start",
+    "client": "claude-code",
+    "project": "prism",
+    "cwdHash": "0123456789abcdef",
+    "ts": "2026-09-10T00:00:00Z"
+  }
+]

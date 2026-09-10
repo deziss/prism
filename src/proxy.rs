@@ -406,6 +406,37 @@ fn extract_cached_tokens(body: &[u8]) -> u32 {
     best
 }
 
+/// Anthropic-only: tokens spent *writing* a new prompt-cache entry
+/// (`usage/cache_creation_input_tokens`). The read side is [`extract_cached_tokens`].
+fn extract_cache_write_tokens(body: &[u8]) -> u32 {
+    fn written_of(j: &serde_json::Value) -> Option<u32> {
+        j.pointer("/usage/cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    }
+
+    if let Ok(j) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(t) = written_of(&j) {
+            return t;
+        }
+    }
+
+    let s = String::from_utf8_lossy(body);
+    let mut best = 0u32;
+    for line in s.lines() {
+        let payload = line.strip_prefix("data:").unwrap_or(line).trim();
+        if !payload.starts_with('{') {
+            continue;
+        }
+        if let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) {
+            if let Some(t) = written_of(&j) {
+                best = best.max(t);
+            }
+        }
+    }
+    best
+}
+
 const MAX_SNIFF_BYTES: usize = 512 * 1024;
 
 /// Copy the upstream response to the client as it arrives, flushing every chunk
@@ -414,6 +445,9 @@ const MAX_SNIFF_BYTES: usize = 512 * 1024;
 struct Relayed {
     resp_tokens: u32,
     cached_tokens: u32,
+    /// Anthropic prompt-cache *write* tokens (`cache_creation_input_tokens`). See
+    /// [`extract_cache_write_tokens`].
+    cache_write_tokens: u32,
     close: bool,
     status: u16,
     content_type: String,
@@ -500,6 +534,7 @@ where
     Some(Relayed {
         resp_tokens: extract_resp_tokens(&parseable),
         cached_tokens: extract_cached_tokens(&parseable),
+        cache_write_tokens: extract_cache_write_tokens(&parseable),
         close,
         status: status_of(&headers),
         content_type: header_value(&headers, "content-type").unwrap_or_default(),
@@ -549,14 +584,14 @@ const MAX_CACHE_BREAKPOINTS: usize = 4;
 /// of input on Anthropic, so rewriting that prefix to shave 25% off it is a net
 /// loss. We leave the prefix untouched and add cache breakpoints instead.
 ///
-/// Returns (modified_body, orig_tokens, sent_tokens, model, is_stream).
+/// Returns (modified_body, orig_tokens, sent_tokens, model, is_stream, image_saved_tokens).
 fn compress_request_body(
     body: &[u8],
     provider: &str,
     ratio: f64,
-) -> (Vec<u8>, u32, u32, String, bool) {
+) -> (Vec<u8>, u32, u32, String, bool, u32) {
     let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (body.to_vec(), 0, 0, String::new(), false);
+        return (body.to_vec(), 0, 0, String::new(), false, 0);
     };
 
     let model = json
@@ -654,10 +689,11 @@ fn compress_request_body(
     // Images last: they are priced separately from text and must not disturb the
     // cache_control pointers computed above (rightsizing rewrites base64 in place and
     // never adds or removes a content block).
-    rightsize_images(&mut json, provider, &mut orig_total, &mut sent_total);
+    let mut image_saved = 0u32;
+    rightsize_images(&mut json, provider, &mut orig_total, &mut sent_total, &mut image_saved);
 
     let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec());
-    (modified, orig_total, sent_total, model, is_stream)
+    (modified, orig_total, sent_total, model, is_stream, image_saved)
 }
 
 /// Longest image edge to allow through, and whether we may go below the provider's own
@@ -682,6 +718,7 @@ fn rightsize_images(
     provider: &str,
     orig_total: &mut u32,
     sent_total: &mut u32,
+    image_saved: &mut u32,
 ) {
     let Some(edge) = image_edge() else { return };
     let reports = crate::image::rightsize_value(json, edge, provider);
@@ -691,6 +728,7 @@ fn rightsize_images(
     for r in &reports {
         *orig_total = orig_total.saturating_add(r.tokens_before);
         *sent_total = sent_total.saturating_add(r.tokens_after);
+        *image_saved = image_saved.saturating_add(r.tokens_before.saturating_sub(r.tokens_after));
         if r.rewritten {
             info!(
                 "image rightsized: {}x{} -> {}x{} ({}), {} -> {} tok, {} -> {} bytes",
@@ -1255,6 +1293,9 @@ struct Prepared {
     model: String,
     is_stream: bool,
     extra_headers: Vec<(String, String)>,
+    /// Tokens saved by image rightsizing alone — a subset of `orig_tokens - sent_tokens`,
+    /// broken out because the hub tracks it as its own line item.
+    image_saved_tokens: u32,
 }
 
 impl Prepared {
@@ -1267,6 +1308,7 @@ impl Prepared {
             model: String::new(),
             is_stream: false,
             extra_headers: Vec::new(),
+            image_saved_tokens: 0,
         }
     }
 }
@@ -1277,7 +1319,7 @@ fn prepare_request(raw: &[u8], headers: &[u8], provider: &str, ratio: f64) -> Pr
     // Escape hatch: context editing changes what the model can see, so it must
     // be possible to turn off without rebuilding.
     let context_editing = std::env::var("PRISM_NO_CONTEXT_EDITING").is_err();
-    let (mut body, orig_tokens, sent_tokens, model, is_stream) =
+    let (mut body, orig_tokens, sent_tokens, model, is_stream, image_saved_tokens) =
         compress_request_body(raw, provider, ratio);
     let mut extra_headers = Vec::new();
 
@@ -1292,7 +1334,7 @@ fn prepare_request(raw: &[u8], headers: &[u8], provider: &str, ratio: f64) -> Pr
         }
     }
 
-    Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers }
+    Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers, image_saved_tokens }
 }
 
 // ── Privacy-safe API key hash ─────────────────────────────────────────────────
@@ -1359,6 +1401,7 @@ async fn serve_session<C, U, F, Fut>(
     source_ip: String,
     ratio: f64,
     carry_in: Vec<u8>,
+    hub: Arc<crate::hub::HubSender>,
     mut reconnect: F,
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -1398,7 +1441,7 @@ async fn serve_session<C, U, F, Fut>(
         } else {
             prepare_request(&raw_body, &req_headers, provider, ratio)
         };
-        let Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers } = prepared;
+        let Prepared { body, orig_tokens, sent_tokens, model, is_stream, extra_headers, image_saved_tokens } = prepared;
 
         // Replay before opening the request, when the user has opted in and the entry
         // is safe to reuse.
@@ -1418,14 +1461,41 @@ async fn serve_session<C, U, F, Fut>(
                         "{} {} cache hit — {} in, {} out served locally, upstream skipped",
                         provider, model, orig_tokens, served
                     );
+                    let model_s = if model.is_empty() { "unknown".to_string() } else { model };
                     let ip = source_ip.clone();
                     let key = api_key_hash.clone();
                     let provider_s = provider.to_string();
-                    let model_s = if model.is_empty() { "unknown".to_string() } else { model };
+                    let key_hash = ck.key.clone();
+                    let hub_hit = Arc::clone(&hub);
                     tokio::spawn(async move {
-                        crate::analytics::record_proxy_event(
-                            &ip, &key, &provider_s, &model_s, orig_tokens, 0, served, 0, true,
-                        );
+                        let cost_usd = crate::analytics::estimate_cost(&model_s, 0, served);
+                        let ev = crate::hub::ProxyEvent {
+                            source_ip: ip,
+                            api_key_hash: key,
+                            provider: provider_s,
+                            model: model_s,
+                            orig_tokens,
+                            sent_tokens: 0,
+                            resp_tokens: served,
+                            cost_usd,
+                            latency_ms: 0,
+                            cache_hit: true,
+                            compression_ratio: crate::hub::compression_ratio(orig_tokens, 0),
+                            cache_served: true,
+                            image_saved_tokens,
+                            prompt_cache_read_tokens: 0,
+                            prompt_cache_write_tokens: 0,
+                            status: 200,
+                            ts: crate::hub::now(),
+                        };
+                        crate::analytics::record_proxy_event(&ev);
+                        hub_hit.send(crate::hub::HubEvent::Cache(crate::hub::CacheEvent {
+                            event: crate::hub::CacheEventKind::Hit,
+                            similarity: 1.0,
+                            key_hash,
+                            ts: crate::hub::now(),
+                        }));
+                        hub_hit.send(crate::hub::HubEvent::Proxy(ev));
                     });
                     if client_close {
                         return;
@@ -1433,6 +1503,17 @@ async fn serve_session<C, U, F, Fut>(
                     continue;
                 }
             }
+        }
+
+        if let Some(ck) = &ck {
+            // A key was computed but nothing above served it — a real miss, not just
+            // "no cache key for this request".
+            hub.send(crate::hub::HubEvent::Cache(crate::hub::CacheEvent {
+                event: crate::hub::CacheEventKind::Miss,
+                similarity: 0.0,
+                key_hash: ck.key.clone(),
+                ts: crate::hub::now(),
+            }));
         }
 
         let forward = rebuild_request(&req_headers, &body, &extra_headers);
@@ -1455,7 +1536,7 @@ async fn serve_session<C, U, F, Fut>(
         let Some(relayed) = relay_response(&mut upstream, &mut client).await else {
             return;
         };
-        let Relayed { resp_tokens, cached_tokens, close: upstream_close, .. } = relayed;
+        let Relayed { resp_tokens, cached_tokens, cache_write_tokens, status, close: upstream_close, .. } = relayed;
         let latency_ms = t0.elapsed().as_millis() as u64;
 
         let model_s = if model.is_empty() { "unknown".to_string() } else { model };
@@ -1469,8 +1550,16 @@ async fn serve_session<C, U, F, Fut>(
                     let (key, prompt) = (ck.key, ck.prompt);
                     let m = model_s.clone();
                     let ct = relayed.content_type;
+                    let hub_record = Arc::clone(&hub);
+                    let key_for_event = key.clone();
                     tokio::task::spawn_blocking(move || {
                         crate::cache::record_keyed(&key, &prompt, &text, &m, &ct, is_stream);
+                        hub_record.send(crate::hub::HubEvent::Cache(crate::hub::CacheEvent {
+                            event: crate::hub::CacheEventKind::Record,
+                            similarity: 1.0,
+                            key_hash: key_for_event,
+                            ts: crate::hub::now(),
+                        }));
                     });
                 }
             }
@@ -1479,12 +1568,32 @@ async fn serve_session<C, U, F, Fut>(
         let ip = source_ip.clone();
         let key = api_key_hash.clone();
         let is_cache_hit = cached_tokens > 0;
+        let hub_report = Arc::clone(&hub);
 
         tokio::spawn(async move {
-            crate::analytics::record_proxy_event(
-                &ip, &key, &provider_s, &model_s,
-                orig_tokens, sent_tokens, resp_tokens, latency_ms, is_cache_hit,
-            );
+            let cost_usd = crate::analytics::estimate_cost(&model_s, sent_tokens, resp_tokens);
+            let ev = crate::hub::ProxyEvent {
+                source_ip: ip,
+                api_key_hash: key,
+                provider: provider_s.clone(),
+                model: model_s.clone(),
+                orig_tokens,
+                sent_tokens,
+                resp_tokens,
+                cost_usd,
+                latency_ms,
+                cache_hit: is_cache_hit,
+                compression_ratio: crate::hub::compression_ratio(orig_tokens, sent_tokens),
+                cache_served: false,
+                image_saved_tokens,
+                prompt_cache_read_tokens: cached_tokens,
+                prompt_cache_write_tokens: cache_write_tokens,
+                status,
+                ts: crate::hub::now(),
+            };
+            crate::analytics::record_proxy_event(&ev);
+            hub_report.send(crate::hub::HubEvent::Proxy(ev));
+
             let saved = orig_tokens.saturating_sub(sent_tokens);
             info!(
                 "{} {} {}in {}out{} {}ms{}",
@@ -1530,6 +1639,7 @@ fn is_loopback(host: &str) -> bool {
         || name.starts_with("127.")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connect(
     mut client: TcpStream,
     host: String,
@@ -1538,6 +1648,7 @@ async fn handle_connect(
     client_addr: SocketAddr,
     ratio: f64,
     proxy_port: u16,
+    hub: Arc<crate::hub::HubSender>,
 ) {
     let hostname = host.split(':').next().unwrap_or(&host).to_string();
     let port: u16 = host.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(443);
@@ -1620,6 +1731,7 @@ async fn handle_connect(
         client_addr.ip().to_string(),
         ratio,
         Vec::new(),
+        hub,
         move || {
             let h = up_host.clone();
             async move { connect_upstream(&h, port).await }
@@ -1630,7 +1742,7 @@ async fn handle_connect(
 
 // ── Plain HTTP pass-through ───────────────────────────────────────────────────
 
-async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>, proxy_port: u16) {
+async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>, proxy_port: u16, hub: Arc<crate::hub::HubSender>) {
     let s = String::from_utf8_lossy(&request);
     let host_line = s.split("\r\n").find(|l| l.to_lowercase().starts_with("host:"));
     let (host, port) = match host_line {
@@ -1662,8 +1774,8 @@ async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>, proxy_port: 
             .peer_addr()
             .map(|a| a.ip().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
-        let ratio = crate::config::load_global()
-            .and_then(|c| c.compression_ratio)
+        let ratio = crate::config::resolve()
+            .compression_ratio
             .unwrap_or(0.55);
         let (h, p) = (host.clone(), port);
         serve_session(
@@ -1673,6 +1785,7 @@ async fn handle_plain_http(mut client: TcpStream, request: Vec<u8>, proxy_port: 
             peer,
             ratio,
             request,
+            hub,
             move || {
                 let h = h.clone();
                 async move { Ok(TcpStream::connect(format!("{}:{}", h, p)).await?) }
@@ -1713,14 +1826,19 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     let ca_cert = Arc::new(ca.cert_pem);
     let ca_key = Arc::new(ca.key_pem);
 
-    // compression_ratio is Option<f64> inside an Option<PrismConfig>.
-    let ratio = crate::config::load_global()
-        .and_then(|c| c.compression_ratio)
+    // Full chain: hub-enforced > project `.prismrc` > global config.yaml > defaults.
+    let ratio = crate::config::resolve()
+        .compression_ratio
         .unwrap_or(0.75)
         .clamp(0.1, 1.0);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await?;
+
+    // Owns the batching background task that ships telemetry to the hub, when this
+    // agent is enrolled (`prism hub enroll`). Cloned (cheaply — it's a channel handle)
+    // into every connection task below.
+    let hub = Arc::new(crate::hub::HubSender::spawn());
 
     info!("PRISM MITM proxy listening on :{} (compression ratio {})", port, ratio);
     info!("CA cert: {}", ca_dir().join("ca.crt").display());
@@ -1748,8 +1866,9 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
         };
         let cc = Arc::clone(&ca_cert);
         let ck = Arc::clone(&ca_key);
+        let hub = Arc::clone(&hub);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio, port).await {
+            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio, port, hub).await {
                 warn!("connection error: {}", e);
             }
         });
@@ -1763,6 +1882,7 @@ async fn handle_connection(
     ca_key_pem: Arc<Vec<u8>>,
     ratio: f64,
     proxy_port: u16,
+    hub: Arc<crate::hub::HubSender>,
 ) -> Result<()> {
     let Some((headers, body_start)) = read_headers(&mut stream, Vec::new()).await else {
         return Ok(());
@@ -1791,11 +1911,11 @@ async fn handle_connection(
             .nth(1)
             .ok_or_else(|| anyhow!("no host in CONNECT"))?
             .to_string();
-        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr, ratio, proxy_port).await;
+        handle_connect(stream, host, ca_cert_pem, ca_key_pem, client_addr, ratio, proxy_port, hub).await;
     } else {
         let mut request = headers;
         request.extend_from_slice(&body_start);
-        handle_plain_http(stream, request, proxy_port).await;
+        handle_plain_http(stream, request, proxy_port, hub).await;
     }
     Ok(())
 }
@@ -2085,6 +2205,7 @@ mod tests {
         Relayed {
             resp_tokens: 0,
             cached_tokens: 0,
+            cache_write_tokens: 0,
             close: false,
             status,
             content_type: "application/json".into(),
@@ -2159,6 +2280,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 0.55,
                 Vec::new(),
+                Arc::new(crate::hub::HubSender::inert()),
                 move || {
                     let slot = slot.clone();
                     async move {
@@ -2261,6 +2383,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 0.55,
                 Vec::new(),
+                Arc::new(crate::hub::HubSender::inert()),
                 move || {
                     let slot2 = slot2.clone();
                     async move {
@@ -2428,7 +2551,7 @@ mod tests {
             "messages": [{"role": "user", "content": long_prose(200)}],
         });
 
-        let (out, _, _, _, _) =
+        let (out, _, _, _, _, _) =
             compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.5);
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
 
@@ -2448,7 +2571,7 @@ mod tests {
             ],
         });
 
-        let (out, orig, sent, model, _) =
+        let (out, orig, sent, model, _, _) =
             compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.5);
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
 
@@ -2498,7 +2621,7 @@ mod tests {
             "stream": true,
             "messages": [{"role": "user", "content": "hi"}],
         });
-        let (.., is_stream) =
+        let (.., is_stream, _) =
             compress_request_body(&serde_json::to_vec(&req).unwrap(), "openai", 0.75);
         assert!(is_stream);
     }
@@ -2711,9 +2834,13 @@ mod tests {
         let raw = serde_json::to_vec(&body).unwrap();
 
         // default: trims to the provider cap, so the prompt is unchanged in token terms
-        let (out, orig, sent, _, _) = compress_request_body(&raw, "anthropic", 0.5);
+        let (out, orig, sent, _, _, image_saved) = compress_request_body(&raw, "anthropic", 0.5);
         assert!(out.len() < raw.len(), "payload did not shrink: {} -> {}", raw.len(), out.len());
         assert!(orig >= sent, "sent more than we started with: {} -> {}", orig, sent);
+        // Default mode trims to the provider's own cap (see the comment above): bytes
+        // shrink, but the token estimate does not — so the only claim that must always
+        // hold is that `image_saved` never accounts for more than the measured delta.
+        assert_eq!(image_saved, orig - sent, "image_saved must equal the whole orig-sent delta here");
         let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // the prose survives untouched and the block structure is preserved
         assert_eq!(parsed["messages"][0]["content"][0]["text"], "what does this screenshot show?");

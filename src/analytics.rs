@@ -69,70 +69,22 @@ pub fn estimate_cost(model: &str, input_tokens: u32, output_tokens: u32) -> f64 
     (input_tokens as f64 / 1000.0) * 0.005 + (output_tokens as f64 / 1000.0) * 0.015
 }
 
-/// Log a proxy event (fire-and-forget, errors silently ignored).
-/// Normalise a PRISM Hub base URL to the API root.
-///
-/// The NestJS backend mounts everything under a global `/api` prefix, so a bare
-/// host must have it appended — while a URL that already ends in `/api` must not
-/// get it twice.
-fn hub_base(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/api") {
-        trimmed.to_string()
-    } else {
-        format!("{}/api", trimmed)
-    }
-}
-
-pub fn record_proxy_event(
-    source_ip: &str,
-    api_key_hash: &str,
-    provider: &str,
-    model: &str,
-    orig_tokens: u32,
-    sent_tokens: u32,
-    resp_tokens: u32,
-    latency_ms: u64,
-    cache_hit: bool,
-) {
+/// Record one proxied request/response to the local analytics log (`prism gain`'s data
+/// source). This is local bookkeeping only and knows nothing about the hub — callers in
+/// `proxy.rs` build a [`crate::hub::ProxyEvent`] once and separately hand it to
+/// `crate::hub::HubSender` for telemetry. The two used to be the same badly-shaped
+/// `serde_json::json!` literal (snake_case, silently ignored by the hub's camelCase
+/// reader); they are now one typed struct serialized twice, for two different readers.
+pub fn record_proxy_event(event: &crate::hub::ProxyEvent) {
     use std::io::Write;
-    let cost = estimate_cost(model, sent_tokens, resp_tokens);
-    let event = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "source_ip": source_ip,
-        "api_key_hash": api_key_hash,
-        "provider": provider,
-        "model": model,
-        "orig_tokens": orig_tokens,
-        "sent_tokens": sent_tokens,
-        "resp_tokens": resp_tokens,
-        "cost_usd": cost,
-        "latency_ms": latency_ms,
-        "cache_hit": cache_hit,
-        "compression_ratio": if orig_tokens > 0 { sent_tokens as f32 / orig_tokens as f32 } else { 1.0 },
-    });
     let path = analytics_dir().join("proxy_events.jsonl");
-    let mut line = event.to_string();
+    let mut line = serde_json::to_string(event).unwrap_or_default();
     line.push('\n');
     if let Ok(_guard) = PROXY_EVENTS_LOCK.lock() {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             let _ = f.write_all(line.as_bytes());
             let _ = f.flush();
         }
-    }
-    // Also fire telemetry to PRISM Hub if configured.
-    if let Ok(hub_url) = std::env::var("PRISM_HUB_URL") {
-        let url = format!("{}/analytics/proxy-event", hub_base(&hub_url));
-        let body = event.to_string();
-        tokio::spawn(async move {
-            let _ = reqwest::Client::new()
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await;
-        });
     }
 }
 
@@ -195,40 +147,128 @@ fn load_proxy_summary() -> ProxySummary {
     for line in raw.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         sum.requests += 1;
-        sum.orig_tokens += v.get("orig_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-        sum.sent_tokens += v.get("sent_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-        sum.cost_usd += v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        sum.orig_tokens += v.get("origTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        sum.sent_tokens += v.get("sentTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        sum.cost_usd += v.get("costUsd").and_then(|x| x.as_f64()).unwrap_or(0.0);
     }
     sum
 }
 
-/// Show token savings dashboard.
-pub async fn show_gains(history_flag: bool) -> Result<()> {
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GainHistoryEntry {
+    pub timestamp: String,
+    pub tokens: usize,
+    pub command: String,
+}
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GainProxySummary {
+    pub requests: usize,
+    pub orig_tokens: u64,
+    pub sent_tokens: u64,
+    pub saved_tokens: u64,
+    pub saved_pct: f64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GainTopCommand {
+    pub command: String,
+    pub tokens: usize,
+}
+
+/// Everything `prism gain` can show, computed once and shared by the human printer and
+/// `--json`. `history` is only populated when `--history` was requested.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GainReport {
+    pub total_commands: usize,
+    pub total_output_tokens: usize,
+    pub proxy: Option<GainProxySummary>,
+    pub top_commands: Vec<GainTopCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<Vec<GainHistoryEntry>>,
+}
+
+/// Compute the gains report. Shared by the CLI's human printer and its `--json` mode —
+/// there is exactly one place that reads `history.json` and the proxy event log.
+pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
     let hist = load_history()?;
+    let total_output_tokens: usize = hist.commands.iter().map(|e| e.tokens()).sum();
 
-    if history_flag {
+    let proxy_summary = load_proxy_summary();
+    let proxy = (proxy_summary.requests > 0).then(|| {
+        let saved = proxy_summary.saved_tokens();
+        let pct = if proxy_summary.orig_tokens > 0 {
+            (saved as f64 / proxy_summary.orig_tokens as f64) * 100.0
+        } else {
+            0.0
+        };
+        GainProxySummary {
+            requests: proxy_summary.requests,
+            orig_tokens: proxy_summary.orig_tokens,
+            sent_tokens: proxy_summary.sent_tokens,
+            saved_tokens: saved,
+            saved_pct: pct,
+            cost_usd: proxy_summary.cost_usd,
+        }
+    });
+
+    let mut by_cmd: HashMap<&str, usize> = HashMap::new();
+    for e in &hist.commands {
+        *by_cmd.entry(&e.command).or_default() += e.tokens();
+    }
+    let mut top: Vec<_> = by_cmd.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    let top_commands = top
+        .into_iter()
+        .take(10)
+        .map(|(command, tokens)| GainTopCommand { command: command.to_string(), tokens })
+        .collect();
+
+    let history = history_flag.then(|| {
+        hist.commands
+            .iter()
+            .rev()
+            .take(50)
+            .map(|e| GainHistoryEntry {
+                timestamp: e.timestamp.format("%m-%d %H:%M").to_string(),
+                tokens: e.tokens(),
+                command: e.command.clone(),
+            })
+            .collect()
+    });
+
+    Ok(GainReport {
+        total_commands: hist.commands.len(),
+        total_output_tokens,
+        proxy,
+        top_commands,
+        history,
+    })
+}
+
+/// Show token savings dashboard.
+pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
+    let report = compute_gains(history_flag)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if let Some(history) = &report.history {
         println!("\n  PRISM Command History\n{}", "─".repeat(50));
-        for entry in hist.commands.iter().rev().take(50) {
-            let ts = entry.timestamp.format("%m-%d %H:%M");
-            println!("  {}  {:>12} tokens  {}", ts, entry.tokens(), entry.command);
+        for entry in history {
+            println!("  {}  {:>12} tokens  {}", entry.timestamp, entry.tokens, entry.command);
         }
     } else {
-        let total: usize = hist.commands.iter().map(|e| e.tokens()).sum();
-
         println!("\n  {}  {}", "PRISM TOKEN ANALYTICS".bold().cyan(), "v0.1.0".dimmed());
         println!("  {}\n", "─".repeat(65).dimmed());
-        println!("  {:<30} {}", "Total commands tracked:", hist.commands.len().to_string().cyan().bold());
-        println!("  {:<30} {}", "Total output tokens:", total.to_string().cyan().bold());
+        println!("  {:<30} {}", "Total commands tracked:", report.total_commands.to_string().cyan().bold());
+        println!("  {:<30} {}", "Total output tokens:", report.total_output_tokens.to_string().cyan().bold());
 
         // Measured proxy savings — read from the event log, not estimated.
-        let proxy = load_proxy_summary();
-        if proxy.requests > 0 {
-            let pct = if proxy.orig_tokens > 0 {
-                (proxy.saved_tokens() as f64 / proxy.orig_tokens as f64) * 100.0
-            } else {
-                0.0
-            };
+        if let Some(proxy) = &report.proxy {
             println!("\n  {}", "PROXY INTERCEPTION:".bold().yellow());
             println!("    {:<28} {}", "Requests intercepted:", proxy.requests.to_string().cyan());
             println!("    {:<28} {}", "Original prompt tokens:", proxy.orig_tokens.to_string().cyan());
@@ -236,8 +276,8 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
             println!(
                 "    {:<28} {} ({:.1}%)",
                 "Measured token savings:",
-                proxy.saved_tokens().to_string().green().bold(),
-                pct
+                proxy.saved_tokens.to_string().green().bold(),
+                proxy.saved_pct
             );
             println!("    {:<28} ${:.4}", "Spend on forwarded traffic:", proxy.cost_usd);
         } else {
@@ -247,16 +287,9 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
             );
         }
 
-        let mut by_cmd: HashMap<&str, usize> = HashMap::new();
-        for e in &hist.commands {
-            *by_cmd.entry(&e.command).or_default() += e.tokens();
-        }
-        let mut top: Vec<_> = by_cmd.iter().collect();
-        top.sort_by(|a, b| b.1.cmp(a.1));
-
         println!("\n  {}", "TOP COMMANDS BY TOKEN SPEND:".bold().yellow());
-        for (cmd, tokens) in top.into_iter().take(10) {
-            println!("    {:<18} {:>10} tokens", cmd.cyan(), tokens.to_string().white());
+        for top in &report.top_commands {
+            println!("    {:<18} {:>10} tokens", top.command.cyan(), top.tokens.to_string().white());
         }
         println!("  {}\n", "─".repeat(65).dimmed());
     }
