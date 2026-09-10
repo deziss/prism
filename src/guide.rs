@@ -77,7 +77,11 @@ fn print_header(title: &str, category: &str) {
 }
 
 fn print_menu() {
-    println!("\n  {}  {}", "PRISM".bold().cyan(), "v0.1.0".dimmed());
+    println!(
+        "\n  {}  {}",
+        "PRISM".bold().cyan(),
+        concat!("v", env!("CARGO_PKG_VERSION")).dimmed()
+    );
     println!(
         "  {}",
         "Prompt Reduction, Indexing & Semantic Memory"

@@ -711,7 +711,11 @@ async fn require_bearer(
 async fn health() -> (axum::http::StatusCode, &'static str) {
     (
         axum::http::StatusCode::OK,
-        r#"{"status":"ok","mcp":true,"transport":"streamable-http"}"#,
+        concat!(
+            r#"{"status":"ok","mcp":true,"transport":"streamable-http","version":""#,
+            env!("CARGO_PKG_VERSION"),
+            r#""}"#
+        ),
     )
 }
 

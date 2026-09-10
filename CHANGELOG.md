@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-10
+
+This release contains **breaking changes**. Pre-1.0, so the minor version carries them:
+
+- **MCP protocol `2024-11-05` → `2026-07-28`**, server rewritten on the official
+  `rmcp` SDK. Clients pinned to the old revision must be updated.
+- **`prism mcp` now binds `127.0.0.1` by default** instead of `0.0.0.0`. Reaching it
+  from another host requires an explicit `--bind` *and* a bearer token; previously the
+  tool server — including `prism_read_file` — was reachable unauthenticated from the
+  whole LAN.
+- **Telemetry contract replaced.** `POST /analytics/proxy-event` (single event,
+  snake_case keys) → `POST /api/ingest/events` (batched, camelCase, bearer-authed,
+  disk-spooled). The old body silently landed as all-default rows on the hub.
+- **MSRV / edition:** now edition 2024, `rust-version = 1.85`.
+- **Removed:** the `graphrag` and `candle` Cargo features (GraphRAG community
+  detection is now unconditional rather than feature-gated), the unused `thiserror`
+  dependency, and `build.rs` (turbovec 1.0 dropped its BLAS requirement, leaving the
+  CBLAS-locating shim dead).
+
+### Added
+- **Single source of truth for the version.** `Cargo.toml`'s `package.version` is now
+  the only place the version is written; every runtime string derives from it via
+  `env!("CARGO_PKG_VERSION")` — the guide banner, both `prism gain`/`discover`
+  dashboard headers, the generated VS Code extension manifest, the MCP `serverInfo`,
+  the `prism hub enroll` payload's `prismVersion` (which the hub's Fleet view uses to
+  flag version skew, so a stale literal there would have silently defeated the
+  feature), and the `/health` probes on both the proxy and MCP ports, which now report
+  `"version"` so a running daemon self-identifies. Two tests pin the invariant: one
+  asserts the generated manifest tracks the crate version, the other scans `src/` and
+  fails on any hard-coded occurrence. Filter and reader fixtures are exempt — their
+  version strings are captured `cargo`/`npm` output used as parser input, i.e. test
+  data rather than this crate's identity.
+
 ### Added
 - **PRISM Hub wire contract, fixed.** `record_proxy_event` built the outbound telemetry
   body as a hand-written `serde_json::json!` literal with snake_case keys

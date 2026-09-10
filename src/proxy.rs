@@ -2039,7 +2039,12 @@ async fn handle_connection(
 
     // Liveness probe on the proxy port itself — must not be tunnelled anywhere.
     if line.starts_with("GET /health") || line.starts_with("HEAD /health") {
-        let body = b"{\"status\":\"ok\",\"service\":\"prism-proxy\"}";
+        let body = concat!(
+            r#"{"status":"ok","service":"prism-proxy","version":""#,
+            env!("CARGO_PKG_VERSION"),
+            r#""}"#
+        )
+        .as_bytes();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()

@@ -277,7 +277,7 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
         println!(
             "\n  {}  {}",
             "PRISM TOKEN ANALYTICS".bold().cyan(),
-            "v0.1.0".dimmed()
+            concat!("v", env!("CARGO_PKG_VERSION")).dimmed()
         );
         println!("  {}\n", "─".repeat(65).dimmed());
         println!(
@@ -345,7 +345,7 @@ pub async fn discover() -> Result<()> {
     println!(
         "\n  {}  {}",
         "PRISM DISCOVERY".bold().cyan(),
-        "v0.1.0".dimmed()
+        concat!("v", env!("CARGO_PKG_VERSION")).dimmed()
     );
     println!("  {}\n", "─".repeat(65).dimmed());
 

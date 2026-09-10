@@ -33,7 +33,7 @@ impl ExtensionManifest {
             "name": "prism-cli",
             "displayName": "PRISM CLI — Token Optimizer Hub",
             "description": "PRISM CLI extension: TOON/TRON encoding, auto-filtering, semantic cache, Memory Palace, GraphRAG",
-            "version": "0.1.0",
+            "version": env!("CARGO_PKG_VERSION"),
             "publisher": "prism-team",
             "engines": {
                 "vscode": "^1.85.0"
@@ -195,5 +195,79 @@ function deactivate() {}
 module.exports = { activate, deactivate };
 "#
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExtensionManifest;
+
+    /// `Cargo.toml`'s `package.version` is the single source of truth for the
+    /// crate version. Every runtime version string must derive from it via
+    /// `env!("CARGO_PKG_VERSION")` rather than repeating a literal, so a
+    /// `cargo release`-style bump cannot leave a stale number behind in a
+    /// generated manifest, a banner, or a health probe.
+    ///
+    /// This is the same failure mode as the snake_case/camelCase telemetry
+    /// mismatch this release fixes: a value duplicated by hand drifts silently.
+    /// Pinning it in a test is what makes the invariant hold.
+    #[test]
+    fn generated_manifest_version_tracks_crate_version() {
+        let manifest: serde_json::Value = serde_json::from_str(&ExtensionManifest::generate())
+            .expect("manifest must be valid JSON");
+
+        assert_eq!(
+            manifest["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the generated VS Code manifest must report the crate version, not a hard-coded literal"
+        );
+    }
+
+    /// The human-facing banners and both `/health` probes are the other places a
+    /// literal used to live. Guard the whole set at once: no source file outside
+    /// the filter/reader test fixtures may contain a bare `v?<version>` string.
+    ///
+    /// Fixtures are excluded deliberately — they are captured `cargo`/`npm`
+    /// output used as parser input, so their version numbers are data, not this
+    /// crate's identity, and must stay literal.
+    #[test]
+    fn no_source_file_hardcodes_the_crate_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        let mut offenders = Vec::new();
+
+        for entry in walkdir::WalkDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+        {
+            let path = entry.path();
+            // Captured tool output used as parser input — version numbers here
+            // are test data, not our own version.
+            let rel = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(path);
+            let rel = rel.to_string_lossy();
+            if rel.contains("filter/") || rel.ends_with("reader.rs") {
+                continue;
+            }
+
+            let src = std::fs::read_to_string(path).unwrap_or_default();
+            for (i, line) in src.lines().enumerate() {
+                // Skip the assertion lines in this very test.
+                if line.contains("CARGO_PKG_VERSION") {
+                    continue;
+                }
+                if line.contains(&format!("\"{version}\"")) || line.contains(&format!("v{version}"))
+                {
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these lines hard-code the crate version instead of using \
+             env!(\"CARGO_PKG_VERSION\"): {offenders:?}"
+        );
     }
 }
