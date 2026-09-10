@@ -69,9 +69,11 @@ pub fn ca_dir() -> PathBuf {
     crate::prism_data_dir().join("ca")
 }
 
-/// Generate or load the PRISM CA certificate (rcgen 0.12 API).
+/// Generate or load the PRISM CA certificate (rcgen 0.14 API: `CertificateParams` is
+/// built the same way, but issuance goes through `self_signed(&key_pair)` /
+/// `signed_by(&key_pair, &issuer)` instead of the removed `Certificate::from_params`).
 pub fn ensure_ca() -> Result<CaBundle> {
-    use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType};
+    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 
     let dir = ca_dir();
     std::fs::create_dir_all(&dir)?;
@@ -102,9 +104,10 @@ pub fn ensure_ca() -> Result<CaBundle> {
         rcgen::KeyUsagePurpose::CrlSign,
     ];
 
-    let cert = Certificate::from_params(params)?;
-    let cert_pem = cert.serialize_pem()?.into_bytes();
-    let key_pem  = cert.serialize_private_key_pem().into_bytes();
+    let key_pair = KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+    let cert_pem = cert.pem().into_bytes();
+    let key_pem  = key_pair.serialize_pem().into_bytes();
 
     std::fs::write(&cert_path, &cert_pem)?;
     std::fs::write(&key_path,  &key_pem)?;
@@ -113,12 +116,13 @@ pub fn ensure_ca() -> Result<CaBundle> {
     Ok(CaBundle { cert_pem, key_pem })
 }
 
-/// Generate per-domain cert signed by PRISM CA (rcgen 0.12 API).
-/// Reconstructs CA Certificate from stored private key + fixed params (same DN → correct issuer chain).
+/// Generate per-domain cert signed by PRISM CA (rcgen 0.14 API).
+/// Reconstructs the CA's `Issuer` from its stored private key + fixed params (same DN →
+/// correct issuer chain) — rcgen no longer keeps a signing `Certificate` around for this.
 fn make_domain_cert(hostname: &str, _ca_cert_pem: &[u8], ca_key_pem: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-    use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, KeyPair, SanType};
+    use rcgen::{CertificateParams, DistinguishedName, DnType, Issuer, KeyPair, SanType};
 
-    // Reconstruct CA Certificate from stored key so we can sign domain certs
+    // Reconstruct the CA's Issuer from its stored key so we can sign domain certs.
     let ca_key_pair = KeyPair::from_pem(std::str::from_utf8(ca_key_pem)?)?;
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -132,21 +136,21 @@ fn make_domain_cert(hostname: &str, _ca_cert_pem: &[u8], ca_key_pem: &[u8]) -> R
         rcgen::KeyUsagePurpose::KeyCertSign,
         rcgen::KeyUsagePurpose::CrlSign,
     ];
-    ca_params.key_pair = Some(ca_key_pair);
-    let ca_cert = Certificate::from_params(ca_params)?;
+    let issuer = Issuer::new(ca_params, ca_key_pair);
 
-    // Create domain cert signed by CA
+    // Create domain cert signed by the CA.
     let mut params = CertificateParams::default();
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, hostname);
     params.distinguished_name = dn;
-    params.subject_alt_names = vec![SanType::DnsName(hostname.to_string())];
+    params.subject_alt_names = vec![SanType::DnsName(hostname.try_into()?)];
     params.not_before = rcgen::date_time_ymd(2024, 1, 1);
     params.not_after  = rcgen::date_time_ymd(2027, 1, 1);
 
-    let domain_cert = Certificate::from_params(params)?;
-    let cert_pem = domain_cert.serialize_pem_with_signer(&ca_cert)?.into_bytes();
-    let key_pem  = domain_cert.serialize_private_key_pem().into_bytes();
+    let domain_key_pair = KeyPair::generate()?;
+    let domain_cert = params.signed_by(&domain_key_pair, &issuer)?;
+    let cert_pem = domain_cert.pem().into_bytes();
+    let key_pem  = domain_key_pair.serialize_pem().into_bytes();
 
     Ok((cert_pem, key_pem))
 }

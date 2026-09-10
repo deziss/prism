@@ -46,7 +46,7 @@ hyper-util = { version = "=0.1.20", features = ["full"] }
 http-body-util = "0.1"
 
 # TLS for MITM proxy
-rcgen = "0.12"
+rcgen = "=0.14.10"
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2.1"
@@ -68,8 +68,6 @@ tracing-appender = "=0.2.5"
 
 # Date/time
 chrono = { version = "=0.4.45", features = ["serde"] }
-# Pin time to avoid rcgen/time 0.3.48 From trait coherence conflict (E0119)
-time = "=0.3.36"
 
 # Image rightsizing (PNG codec: inflate/deflate + CRC32) — already in the tree
 flate2 = "=1.1.10"
