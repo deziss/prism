@@ -21,6 +21,8 @@ enum Args {
     Gain {
         #[arg(long, default_value_t = false)]
         history: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Discover,
     Proxy {
@@ -60,6 +62,11 @@ enum Args {
     Hook {
         #[command(subcommand)]
         cmd: cli::HookCmd,
+    },
+    /// Enroll with, and exchange telemetry/policy with, a PRISM Hub
+    Hub {
+        #[command(subcommand)]
+        cmd: cli::HubCmd,
     },
     /// Install PATH shims so every agent's shell commands run through prism
     Shim {
@@ -125,7 +132,7 @@ async fn main() -> Result<()> {
     match args {
         Args::Init { global, guide } => cli::init(global, guide).await,
         Args::Guide { topic } => cli::guide(topic).await,
-        Args::Gain { history } => analytics::show_gains(history).await,
+        Args::Gain { history, json } => analytics::show_gains(history, json).await,
         Args::Discover => analytics::discover().await,
         Args::Proxy { cmd } => cli::proxy(cmd).await,
         Args::Serve { port, upstream } => proxy::start_server(port, upstream).await,
@@ -135,6 +142,7 @@ async fn main() -> Result<()> {
         Args::Toon { cmd } => cli::toon(cmd).await,
         Args::Count { string, file, model } => cli::count(string, file, model).await,
         Args::Hook { cmd } => cli::hook(cmd).await,
+        Args::Hub { cmd } => cli::hub(cmd).await,
         Args::Shim { cmd } => cli::shim(cmd).await,
         Args::Compress { string, file, ratio } => cli::compress(string, file, ratio).await,
         Args::Read { path, mode, lines, line_numbers } => {

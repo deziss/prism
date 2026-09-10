@@ -7,10 +7,17 @@ use std::process::Command;
 // Re-export command types so main.rs can use them
 #[derive(Parser, Debug)]
 pub enum MemoryCmd {
-    Search { query: String },
+    Search {
+        query: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Save { key: String, value: String },
     List,
-    Stats,
+    Stats {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Compact,
 }
 
@@ -22,23 +29,31 @@ pub enum GraphCmd {
         graph: Option<std::path::PathBuf>,
         #[arg(long, default_value_t = false)]
         graphify: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Explain {
         node: String,
         #[arg(short, long)]
         graph: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Path {
         from: String,
         to: String,
         #[arg(short, long)]
         graph: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     GodNodes {
         #[arg(short, long, default_value_t = 10)]
         top: usize,
         #[arg(short, long)]
         graph: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Import {
         path: std::path::PathBuf,
@@ -59,7 +74,10 @@ pub enum GraphCmd {
 
 #[derive(Parser, Debug)]
 pub enum CacheCmd {
-    Stats,
+    Stats {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Clear,
     Query { query: String },
     Put {
@@ -107,6 +125,35 @@ pub enum HookCmd {
     Install,
     Validate,
     Audit,
+}
+
+#[derive(Parser, Debug)]
+pub enum HubCmd {
+    /// Exchange a team join token for a durable agent token
+    Enroll {
+        /// Hub base URL, e.g. http://localhost:27183
+        #[arg(long)]
+        url: String,
+        /// Short-lived team join token
+        #[arg(long)]
+        token: String,
+    },
+    /// Show enrollment state and spool depth
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Force an immediate drain-and-send of the on-disk spool
+    Flush,
+    /// Fetch hub-enforced policy into `<data>/hub-config.yaml`
+    Config,
+    /// Send one synthetic event and report success/failure
+    Test {
+        /// Send to this URL instead of the enrolled hub — point it at
+        /// `python3 -m http.server` or `nc -l` to inspect the raw request body.
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 fn data_dir() -> std::path::PathBuf {
@@ -303,10 +350,26 @@ pub async fn proxy(cmd: Vec<String>) -> Result<()> {
 // --- memory ---
 pub async fn memory(cmd: MemoryCmd) -> Result<()> {
     match cmd {
-        MemoryCmd::Search { query } => crate::memory::search(&query).await,
+        MemoryCmd::Search { query, json } => {
+            if json {
+                let blocks = crate::memory::search_blocks(&query, 10)?;
+                println!("{}", serde_json::to_string_pretty(&blocks)?);
+                Ok(())
+            } else {
+                crate::memory::search(&query).await
+            }
+        }
         MemoryCmd::Save { key, value } => crate::memory::save(&key, &value).await,
         MemoryCmd::List => crate::memory::list().await,
-        MemoryCmd::Stats => crate::memory::stats().await,
+        MemoryCmd::Stats { json } => {
+            if json {
+                let stats = crate::memory::stats_data()?;
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+                Ok(())
+            } else {
+                crate::memory::stats().await
+            }
+        }
         MemoryCmd::Compact => crate::memory::compact().await,
     }
 }
@@ -314,21 +377,57 @@ pub async fn memory(cmd: MemoryCmd) -> Result<()> {
 // --- graph ---
 pub async fn graph(cmd: GraphCmd) -> Result<()> {
     match cmd {
-        GraphCmd::Query { query, graph, graphify } => {
-            if graphify {
+        GraphCmd::Query { query, graph, graphify, json } => {
+            if json {
+                let data = crate::knowledge::query_graph_data(&query, 8, graph.as_deref());
+                println!("{}", serde_json::to_string_pretty(&data.map(|(p, n)| serde_json::json!({
+                    "source": p.display().to_string(),
+                    "nodes": n,
+                })))?);
+                Ok(())
+            } else if graphify {
                 crate::knowledge::explain_node(&query, graph.as_deref()).await
             } else {
                 crate::knowledge::query_graph(&query, graph.as_deref()).await
             }
         }
-        GraphCmd::Explain { node, graph } => {
-            crate::knowledge::explain_node(&node, graph.as_deref()).await
+        GraphCmd::Explain { node, graph, json } => {
+            if json {
+                let data = crate::knowledge::explain_node_data(&node, graph.as_deref());
+                println!("{}", serde_json::to_string_pretty(&data.map(|(p, exp)| serde_json::json!({
+                    "source": p.display().to_string(),
+                    "node": exp.node,
+                    "outgoing": exp.outgoing,
+                    "incoming": exp.incoming,
+                })))?);
+                Ok(())
+            } else {
+                crate::knowledge::explain_node(&node, graph.as_deref()).await
+            }
         }
-        GraphCmd::Path { from, to, graph } => {
-            crate::knowledge::shortest_path(&from, &to, graph.as_deref()).await
+        GraphCmd::Path { from, to, graph, json } => {
+            if json {
+                let data = crate::knowledge::shortest_path_data(&from, &to, graph.as_deref());
+                println!("{}", serde_json::to_string_pretty(&data.map(|(p, steps)| serde_json::json!({
+                    "source": p.display().to_string(),
+                    "steps": steps,
+                })))?);
+                Ok(())
+            } else {
+                crate::knowledge::shortest_path(&from, &to, graph.as_deref()).await
+            }
         }
-        GraphCmd::GodNodes { top, graph } => {
-            crate::knowledge::god_nodes(top, graph.as_deref()).await
+        GraphCmd::GodNodes { top, graph, json } => {
+            if json {
+                let data = crate::knowledge::god_nodes_data(top, graph.as_deref());
+                println!("{}", serde_json::to_string_pretty(&data.map(|(p, nodes)| serde_json::json!({
+                    "source": p.display().to_string(),
+                    "nodes": nodes,
+                })))?);
+                Ok(())
+            } else {
+                crate::knowledge::god_nodes(top, graph.as_deref()).await
+            }
         }
         GraphCmd::Import { path } => {
             crate::knowledge::import_graph(&path).await
@@ -381,12 +480,16 @@ pub async fn cache(cmd: CacheCmd) -> Result<()> {
         );
     }
     match cmd {
-        CacheCmd::Stats => {
+        CacheCmd::Stats { json } => {
             let stats = crate::cache::get_cache_stats();
-            println!("\n  PRISM Semantic Cache Statistics");
-            println!("  {}", "═".repeat(40));
-            println!("  Total entries: {}", stats.total_entries);
-            println!("  Storage path:  {}", stats.sled_path);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                println!("\n  PRISM Semantic Cache Statistics");
+                println!("  {}", "═".repeat(40));
+                println!("  Total entries: {}", stats.total_entries);
+                println!("  Storage path:  {}", stats.sled_path);
+            }
         }
         CacheCmd::Clear => {
             let cleared = crate::cache::clear_cache()?;
@@ -416,14 +519,16 @@ pub async fn cache(cmd: CacheCmd) -> Result<()> {
 
 // --- config ---
 pub async fn config(cmd: ConfigCmd) -> Result<()> {
-    let global_cfg = crate::config::load_global().unwrap_or_default();
     if cmd.show || (cmd.set_key.is_none() && cmd.set_val.is_none()) {
+        // The *effective* config: hub-enforced > project `.prismrc` > global > defaults —
+        // what a command actually sees, not just what `config.yaml` says.
+        let effective = crate::config::resolve();
         println!("\n  PRISM Configuration");
         println!("  {}", "═".repeat(40));
-        println!("{}", crate::config::config_to_json(&global_cfg));
+        println!("{}", crate::config::config_to_json(&effective));
         print_filter_rules();
     } else if let (Some(key), Some(val)) = (cmd.set_key, cmd.set_val) {
-        let mut cfg = global_cfg;
+        let mut cfg = crate::config::load_global().unwrap_or_default();
         match key.as_str() {
             "compression_ratio" => {
                 if let Ok(r) = val.parse::<f64>() {
@@ -505,6 +610,64 @@ pub async fn hook(cmd: HookCmd) -> Result<()> {
     Ok(())
 }
 
+// --- hub (PRISM Hub enrollment, telemetry spool, and policy) ---
+pub async fn hub(cmd: HubCmd) -> Result<()> {
+    match cmd {
+        HubCmd::Enroll { url, token } => {
+            let creds = crate::hub::enroll(&url, &token).await?;
+            println!("Enrolled with hub: {}", creds.hub_url);
+            println!("  Agent ID: {}", creds.agent_id);
+            println!("  Credentials written under the global config dir.");
+        }
+        HubCmd::Status { json } => {
+            let status = crate::hub::status();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("\n  PRISM Hub Status");
+                println!("  {}", "═".repeat(40));
+                println!("  Enrolled:      {}", status.enrolled);
+                println!("  Hub URL:       {}", status.hub_url.as_deref().unwrap_or("(none)"));
+                println!("  Agent ID:      {}", status.agent_id.as_deref().unwrap_or("(none)"));
+                println!("  Spool events:  {}", status.spool_events);
+                println!("  Spool bytes:   {}", status.spool_bytes);
+                if !status.enrolled {
+                    println!("\n  Not enrolled — run `prism hub enroll --url <hub> --token <join-token>`.");
+                }
+            }
+        }
+        HubCmd::Flush => {
+            let creds = crate::hub::load_credentials()
+                .ok_or_else(|| anyhow::anyhow!("not enrolled — run `prism hub enroll` first"))?;
+            let outcome = crate::hub::flush(&creds).await;
+            println!(
+                "Flushed {} event(s) in {} batch(es){}",
+                outcome.sent,
+                outcome.batches,
+                if outcome.failed { " — hub unreachable; spool restored for a later retry" } else { "" }
+            );
+        }
+        HubCmd::Config => {
+            let creds = crate::hub::load_credentials()
+                .ok_or_else(|| anyhow::anyhow!("not enrolled — run `prism hub enroll` first"))?;
+            crate::hub::fetch_config(&creds).await?;
+            println!(
+                "Hub policy written to {}",
+                crate::prism_data_dir().join("hub-config.yaml").display()
+            );
+        }
+        HubCmd::Test { url } => {
+            let targeted = url.is_some();
+            crate::hub::send_test_event(url).await?;
+            println!(
+                "Test event accepted{}.",
+                if targeted { "" } else { " by the enrolled hub" }
+            );
+        }
+    }
+    Ok(())
+}
+
 // --- compress (LLMLingua-style context compression) ---
 pub async fn compress(
     string: Option<String>,
@@ -572,6 +735,7 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
 
     // Capture, but leave stdin connected: `echo '{}' | prism cmd jq .` must still work,
     // and `Command::output()` would silently hand the child an empty stdin.
+    let cmd_started = std::time::Instant::now();
     let mut c = child_command(cmd, &args[1..]);
     c.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::piped())
@@ -580,6 +744,7 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
         Ok(o) => o,
         Err(e) => anyhow::bail!("prism cmd: failed to run `{}`: {}", cmd, e),
     };
+    let duration_ms = cmd_started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -624,6 +789,23 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
     // of every command, and loading the cl100k table to fill in a dashboard statistic
     // measured 0.54s per invocation. `prism gain` approximates at report time.
     crate::analytics::record_command(cmd, raw_text.len(), out.len()).ok();
+
+    // Hub telemetry: append-only, disk-only (see `hub` module docs) — this must never
+    // become a network call on this path. `via_shim` is a proxy for "shims are
+    // installed and on PATH right now", not proof this exact invocation went through
+    // one; there is no cheaper signal available once we are already inside `prism cmd`.
+    let _ = crate::hub::spool_event(&crate::hub::HubEvent::Command(crate::hub::CommandEvent {
+        tool: cmd.clone(),
+        subcommand: args.get(1).cloned().unwrap_or_default(),
+        exit_code: output.status.code().unwrap_or(-1),
+        duration_ms,
+        input_bytes: raw_text.len(),
+        output_bytes: out.len(),
+        filtered_bytes: raw_text.len().saturating_sub(out.len()),
+        truncated,
+        via_shim: crate::shim::status().active,
+        ts: crate::hub::now(),
+    }));
 
     // One terse line, and only when it points at something: a bare exit code is
     // already visible to the caller through the process status.
