@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Toolchain moved to Rust 1.98.1 and pinned.** The build machine's `rustup stable`
+  had been left on 1.92.0 (2025-12-08) while upstream stable was 1.98.1 (2026-09-01),
+  and neither the repo nor CI pinned anything — so a GitHub runner used current stable
+  while local builds used 1.92, and a clippy lint introduced after 1.92 would fail CI
+  while passing locally. `rust-toolchain.toml` now pins `channel = "stable"` with
+  `rustfmt` and `clippy`, so both resolve identically; CI's manual `rustup component
+  add` step became redundant and was dropped. `rust-version = "1.85"` is unchanged and
+  unrelated — it is the MSRV floor (edition 2024's minimum), not the toolchain in use.
+- Clippy 1.98 surfaced 8 lints its 1.92 counterpart did not, which is exactly the skew
+  the pin prevents. Six `unnecessary_sort_by` became `sort_by_key` + `Reverse` after
+  confirming every sort key is a `Copy` numeric, so no clone is introduced. The two
+  `manual_checked_ops` findings (a lint new in 1.98) were annotated rather than
+  rewritten: in `filter/vcs.rs` the `bar == 0` arm is a distinct rendering branch
+  ("git drew no bar, so the split is unknown → ±N") rather than a division guard, and
+  in `image.rs` a single `n > 0` branch guards four channel divisions in a box-filter
+  inner loop, where `checked_div` would add four `Option` checks per destination pixel
+  and obscure that an unsampled pixel is meant to stay at its zero default.
+
+### Removed
+- **12 dependencies with no reference anywhere in `src/`**, verified by scanning every
+  `.rs` file for `<crate>::` and `use <crate>`: `indicatif`, `toml`, `tower`,
+  `tower-http`, `hyper`, `hyper-util`, `http-body-util`, `tracing-appender`, `home`,
+  `futures`, `uuid`, and the `criterion` dev-dependency (no `benches/` directory and no
+  `[[bench]]` target exist). `tower-http` had `cors`/`compression-gzip`/`trace`
+  features enabled but was never referenced, so no layer was ever applied and no
+  runtime behaviour changes. `[dev-dependencies]` is now empty and gone.
+- Cargo.lock: **440 → 374 packages**.
+
+### Fixed
+- The 7 dependency specs still on loose carets (`anyhow`, `tokio-util`, `axum`,
+  `rustls`, `tokio-rustls`, `rustls-pemfile`, `sled`) are now pinned exactly, matching
+  the `=` style used for the rest. All 28 remaining dependencies are at latest stable.
+- **Docs corrected against the code.** `TROUBLESHOOT.md`'s BLAS / `cblas_sgemm`
+  section described a subsystem that no longer exists — turbovec 1.0 dropped its
+  BLAS/CBLAS dependency, which made `build.rs` dead and removed the only native link
+  step — and its telemetry section still described the pre-0.2.0
+  `/analytics/proxy-event` endpoint; both were rewritten. `COMPARISON.md` still
+  advertised `build.rs` BLAS auto-detection and 19 subcommands (now 20, with `hub`).
+  `README.md` documented neither `prism hub` nor the MCP stdio transport nor the
+  loopback-bind change.
+
+
 ## [0.2.0] - 2026-09-10
 
 This release contains **breaking changes**. Pre-1.0, so the minor version carries them:

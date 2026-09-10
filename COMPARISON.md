@@ -53,7 +53,7 @@ editing — not the retrieval stack.
 | **Semantic cache** | HashMap + cosine distance | sled + TurboVec ANN scaffolding — **never populated**, see status table |
 | **Retrieval** | Basic graph keyword search | CRAG implemented in `crag.rs` but **not reachable** — no caller |
 | **Auth (prism-hub)** | bcrypt | **argon2** (`@node-rs/argon2`) — faster, more secure, no native compile deps |
-| **Build portability** | Hardcoded BLAS path | `build.rs` auto-detects BLAS (pkg-config → libgslcblas fallback → install hint) |
+| **Build portability** | Hardcoded BLAS path | No native link step at all — turbovec 1.0 dropped CBLAS, so `build.rs` was removed |
 | **Docs** | None | README.md + TROUBLESHOOT.md added |
 
 ---
@@ -66,7 +66,7 @@ editing — not the retrieval stack.
 |-----------|-----------|----------------|-------|
 | **Primary Role** | CLI output proxy | Cognitive context layer | Enterprise token optimizer |
 | **Language** | Rust | Rust | Rust |
-| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 19 subcommands + MCP 17 tools + MITM proxy + Memory Palace |
+| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 20 subcommands + MCP 17 tools + MITM proxy + Memory Palace |
 | **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) |
 | **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 65+ commands |
 | **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive + sled + TurboVec ANN) |
@@ -111,7 +111,7 @@ editing — not the retrieval stack.
 
 5. **prism-hub Backend** — Fleet control plane over three channels: batched telemetry ingest (proxy/command/cache/session events), policy distribution (PrismConfig/FilterLimits/YAML rules per agent, ETag-polled), and MCP-interactive access to prism's own memory/graph/toon/compress tools (NestJS, PostgreSQL, BullMQ, Prisma, argon2 auth, JWT). No competitor offers a shared-session analytics + team policy + live MCP fleet store.
 
-6. **BLAS-Accelerated Matrix Ops** — TurboVec uses OpenBLAS for `cblas_sgemm` in vector quantization. build.rs auto-detects BLAS (portable: pkg-config → gslcblas fallback).
+6. **No native toolchain requirement** — vector quantization runs on turbovec 1.0, which dropped its BLAS/CBLAS dependency, so there is no OpenBLAS to locate, no `build.rs`, and `cargo install` works on a bare machine.
 
 ### Where Competitors Beat PRISM
 
@@ -132,7 +132,7 @@ editing — not the retrieval stack.
 
 ```
 prism/
-├── CLI (19 subcommands)
+├── CLI (20 subcommands)
 │   ├── filter.rs     — 65+ RTK-compatible output filters
 │   ├── cli.rs        — subcommand dispatch
 │   └── hook.rs       — shell hook install/uninstall

@@ -139,21 +139,40 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
 ## AI Agent & IDE Integration
 
 ### 1. Claude Code (Anthropic)
-Register PRISM as an HTTP MCP server:
+
+PRISM's MCP server is built on `rmcp` (the official Rust SDK) at protocol revision
+**2026-07-28**, and offers two transports. For a same-machine agent prefer **stdio** —
+no port, no listener, no certificate:
+
 ```bash
-claude mcp add prism --transport http http://localhost:27182
+claude mcp add prism -- prism mcp --stdio
 ```
-Or manually configure in `~/.claude.json`:
+Or manually in `~/.claude.json`:
 ```json
 {
   "mcpServers": {
     "prism": {
-      "type": "http",
-      "url": "http://localhost:27182"
+      "command": "prism",
+      "args": ["mcp", "--stdio"]
     }
   }
 }
 ```
+
+Streamable HTTP remains available for a remote consumer such as PRISM Hub:
+```bash
+prism mcp --port 27182                          # 127.0.0.1 only
+claude mcp add prism --transport http http://localhost:27182
+```
+
+> **The HTTP transport binds `127.0.0.1` by default.** Serving it on other interfaces
+> requires both `--bind` and a bearer token, because the tool surface includes
+> `prism_read_file`:
+> ```bash
+> prism mcp --bind 0.0.0.0 --auth-token "$(openssl rand -hex 32)"
+> ```
+> `--bind` without a token is refused outright rather than starting an unauthenticated
+> file-reading server on the LAN.
 
 ### 2. Cursor IDE & Windsurf
 Add PRISM MCP endpoint in **Cursor Settings $\to$ Features $\to$ MCP**:
@@ -328,6 +347,41 @@ non-200 response, and a body that outran the sniff buffer. Similarity hits are o
 *shown* — `prism cache query` and the `prism_cache_lookup` MCP tool — never auto-served;
 the serving path takes exact key matches only, where the key covers provider, model,
 system prompt, full message list, tools and sampling.
+
+### Fleet Telemetry & Policy (`prism hub`)
+
+`prism hub` connects an agent to [PRISM Hub](https://github.com/deziss/prism-hub), the
+fleet control plane: telemetry out, policy in.
+
+```bash
+prism hub enroll --url http://localhost:27183 --token <join-token>
+prism hub status                           # spool depth, last flush, agent id
+prism hub config                           # pull team policy into <data>/hub-config.yaml
+prism hub flush                            # drain the spool now
+prism hub test                             # post one synthetic event and report the result
+```
+
+Four event kinds ship: `proxy` (tokens, cost, cache and image savings, prompt-cache
+hits), `command` (every filtered `prism cmd`/shim invocation), `cache`, and `session`.
+The `command` stream is the one that compounds — a 40k tool result cut to 4k is saved
+again on every later turn that re-sends the conversation.
+
+**`prism cmd` never makes a network call.** It appends one line to
+`<data>/analytics/hub_spool.jsonl`; the `serve` daemon batches and ships it. This is
+deliberate: a tokenizer on that path once cost 0.57s per command, and a PATH shim fronts
+every `git`, `ls` and `find` you run. The spool is truncated only after a 2xx, so a hub
+outage loses nothing, and each event carries its own `ts` so a late-flushed backlog is
+filed under when it happened.
+
+Hub policy (`PrismConfig`, `FilterLimits`, YAML filter rules) merges as the top layer of
+the [configuration hierarchy](#configuration-resolution-hierarchy-12-factor-app):
+hub-enforced → project `.prismrc` → global `config.yaml` → defaults.
+
+Events are typed structs with `#[serde(rename_all = "camelCase")]` rather than
+hand-written JSON, and the shape is pinned by `tests/fixtures/hub-events.json`, which the
+hub's own test suite validates against. That fixture exists because the previous
+hand-built body used snake_case keys the hub read as camelCase: every field missed, every
+stored row was zeros, and nothing errored for three months.
 
 ---
 

@@ -1,7 +1,7 @@
 # PRISM Troubleshooting Guide
 
 ## Table of Contents
-- [BLAS / cblas_sgemm Linker Error](#blas--cblas_sgemm-linker-error)
+- [BLAS / cblas_sgemm Linker Error (obsolete since 0.2.0)](#blas--cblas_sgemm-linker-error)
 - [OpenSSL Not Found](#openssl-not-found)
 - [Sled Database Corruption](#sled-database-corruption)
 - [MCP Server Not Starting](#mcp-server-not-starting)
@@ -18,95 +18,14 @@
 
 ## BLAS / cblas_sgemm Linker Error
 
-### Symptom
-```
-error: linking with `cc` failed: exit status: 1
-  = note: rust-lld: error: undefined symbol: cblas_sgemm
-```
-or
-```
-  = note: rust-lld: error: unable to find library -lopenblas
-```
+**No longer applicable as of 0.2.0.** `turbovec` 1.0 dropped its BLAS/CBLAS
+dependency, which in turn made `build.rs` — whose only job was locating a system
+`libopenblas`/`libcblas`/`libgslcblas` — dead code. Both are gone, so there is no
+CBLAS symbol to fail to link and nothing to install.
 
-### Root Cause
-`turbovec` (TurboQuant vector index) depends on `ndarray` with BLAS acceleration on Linux.
-BLAS provides `cblas_sgemm` (matrix multiplication). Without a CBLAS-compatible library,
-the linker fails.
-
-### Fix — Option 1 (Recommended): Install libopenblas-dev
-
-**Ubuntu / Debian:**
-```bash
-sudo apt-get install libopenblas-dev
-```
-
-**Fedora / RHEL / AlmaLinux:**
-```bash
-sudo dnf install openblas-devel
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S openblas
-```
-
-**macOS:**
-```bash
-brew install openblas
-export LDFLAGS="-L$(brew --prefix openblas)/lib"
-export PKG_CONFIG_PATH="$(brew --prefix openblas)/lib/pkgconfig"
-```
-
-Then rebuild:
-```bash
-cargo clean && cargo build
-```
-
-### Fix — Option 2: Use libgsl-dev (lighter, no tuning)
-
-If you can't install openblas, GSL (GNU Scientific Library) ships `libgslcblas` which
-implements the CBLAS interface. PRISM's `build.rs` auto-detects and uses it.
-
-**Ubuntu / Debian:**
-```bash
-sudo apt-get install libgsl-dev
-cargo build    # build.rs creates .blas-link/libopenblas.so -> libgslcblas.so.0 automatically
-```
-
-### Fix — Option 3: Manual Symlink (no sudo required)
-
-If you have `libgslcblas.so.0` already installed at runtime but not the dev headers:
-
-```bash
-mkdir -p /home/anshukushwaha/95095/Backup/Desktop/learn/prism/.blas-link
-ln -sf /usr/lib/x86_64-linux-gnu/libgslcblas.so.0 \
-       /home/anshukushwaha/95095/Backup/Desktop/learn/prism/.blas-link/libopenblas.so
-cargo build
-```
-
-> **Note:** Replace the path with the actual location of `libgslcblas.so.0` on your system.
-> Find it with: `find /usr -name "libgslcblas*" 2>/dev/null`
-
-### How build.rs Auto-Detects
-
-PRISM's `build.rs` tries in order:
-1. `pkg-config openblas` — works if `libopenblas-dev` is installed
-2. `pkg-config cblas` — works on some distros
-3. Searches common paths for `libgslcblas.so.0` / `libblas.so.3` and creates symlink
-4. Prints install instructions if nothing found
-
-The `.blas-link/` directory is machine-local and gitignored. Each developer/server
-gets its own symlink created at first `cargo build`.
-
-### Verifying BLAS is Found
-
-Check build.rs output after `cargo build`:
-```bash
-cat target/debug/build/prism-*/output
-# Should show:
-# cargo:rustc-link-search=native=/path/to/.blas-link
-# cargo:rustc-link-lib=openblas
-```
+If you hit `undefined symbol: cblas_sgemm` or `unable to find library -lopenblas`,
+you are building a pre-0.2.0 checkout. Update, or `cargo clean` first — a stale
+`.blas-link/` directory and its cached link flags can survive the upgrade.
 
 ---
 
@@ -322,22 +241,47 @@ upstream.
 ## Telemetry never reaches PRISM Hub
 
 ### Symptom
-`SELECT count(*) FROM "ProxyEvent"` stays 0 while the proxy logs traffic.
+`SELECT count(*) FROM "ProxyEvent"` stays 0 while the proxy logs traffic — or rows
+arrive but every numeric column is 0 and `apiKeyHash` is `unknown`.
 
 ### Cause
-The backend mounts its API under a global `/api` prefix. Posting to
-`/analytics/proxy-event` 404s silently — telemetry is fire-and-forget, so nothing
-surfaces.
+The all-zeros case was the contract bug fixed in 0.2.0: prism built the body as a
+hand-written JSON literal with snake_case keys (`orig_tokens`, `api_key_hash`)
+while the hub read camelCase behind `?? 0` / `?? 'unknown'` fallbacks. Every field
+missed and nothing errored. Events are now typed structs with
+`#[serde(rename_all = "camelCase")]`, and both repos pin the shape with a shared
+fixture (`tests/fixtures/hub-events.json`), so this cannot silently recur.
+
+For zero rows, the usual causes are, in order:
+
+1. **The agent was never enrolled.** Ingest requires a bearer token; an
+   unauthenticated POST is rejected, not silently accepted.
+2. **`PRISM_HUB_URL` is unset**, so the shipper never starts. Events still land in
+   the local spool and JSONL.
+3. **Only `prism cmd` ran.** By design it never touches the network — it appends to
+   the spool and a `serve` daemon (or `prism hub flush`) drains it. This keeps the
+   shim's per-command overhead at ~0.05s instead of the 0.57s a tokenizer cost.
 
 ### Fix
-Fixed: a bare `PRISM_HUB_URL` now has `/api` appended automatically. Verify:
 ```bash
-PRISM_HUB_URL=http://localhost:27183 prism serve --port 27181
-# after one proxied request:
-curl http://localhost:27183/api/analytics/proxy-stats?hours=1
+prism hub enroll --url http://localhost:27183 --token <join-token>   # once per machine
+prism hub status                                                     # spool depth, last flush
+prism hub test                                                       # send one synthetic event
+prism hub flush                                                      # force a drain now
 ```
-The proxy also always writes `~/.local/share/prism/analytics/proxy_events.jsonl`,
-so `prism gain` reports savings even with no Hub running.
+Then, after one proxied request:
+```bash
+curl 'http://localhost:27183/api/analytics/proxy-stats?hours=1'
+```
+Non-zero `origTokens`/`sentTokens`/`costUsd` and a real provider and model mean the
+pipe is healthy.
+
+Nothing is lost while the hub is down: the shipper spools to
+`~/.local/share/prism/analytics/hub_spool.jsonl` and truncates it only after a 2xx.
+Each event carries its own `ts`, so a backlog flushed after an outage is filed
+under when it happened rather than when it arrived. The proxy also always writes
+`~/.local/share/prism/analytics/proxy_events.jsonl`, so `prism gain` reports
+savings with no hub at all.
 
 ---
 
