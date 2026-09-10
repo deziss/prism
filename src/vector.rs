@@ -19,7 +19,12 @@ pub struct TurboVecIndex {
 impl TurboVecIndex {
     pub fn new() -> Self {
         Self {
-            inner: IdMapIndex::new(TURBO_DIM, BIT_WIDTH),
+            // turbovec 1.0's `new` returns Result (dim must be a positive multiple of 8,
+            // bit_width in {2,3,4}) -- TURBO_DIM=16 and BIT_WIDTH=2 are compile-time
+            // constants that always satisfy both, so a failure here would mean the
+            // constants themselves are wrong, worth panicking on rather than masking.
+            inner: IdMapIndex::new(TURBO_DIM, BIT_WIDTH)
+                .expect("TURBO_DIM/BIT_WIDTH are valid turbovec constants"),
             id_to_u64: HashMap::new(),
             u64_to_id: HashMap::new(),
             next_id: 0,
@@ -36,7 +41,16 @@ impl TurboVecIndex {
         self.next_id += 1;
         self.id_to_u64.insert(id.to_string(), uid);
         self.u64_to_id.insert(uid, id.to_string());
-        self.inner.add_with_ids(embedding, &[uid]);
+        // turbovec 1.0's add_with_ids can fail on a duplicate id (ruled out above -- uid
+        // is freshly minted) or a non-finite coordinate (every embedding reaching this
+        // module comes from a bounded hash projection, never NaN/inf). Both maps are
+        // rolled back on the (should-never-happen) error path so `contains`/`remove`
+        // cannot disagree with what `inner` actually holds.
+        if let Err(e) = self.inner.add_with_ids(embedding, &[uid]) {
+            self.id_to_u64.remove(id);
+            self.u64_to_id.remove(&uid);
+            eprintln!("prism: turbovec rejected an embedding for {id}: {e}");
+        }
     }
 
     /// Top-k nearest string IDs for query embedding.

@@ -53,7 +53,7 @@ rustls-pemfile = "2.1"
 webpki-roots = "=1.0.9"
 
 # Vector index (TurboQuant — 10M docs/4GB, AVX-512BW SIMD)
-turbovec = "0.2"
+turbovec = "=1.0.0"
 
 # Token counting
 tiktoken-rs = "=0.12.0"
