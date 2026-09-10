@@ -5,15 +5,29 @@ use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::path::PathBuf;
 
-/// PRISM configuration
+/// PRISM configuration.
+///
+/// **Why the feature flags are `Option<bool>` and not `bool`.** `merge_config` layers
+/// default -> global -> project -> hub, and with a plain `bool` an unset field and an
+/// explicit `false` are indistinguishable, so the merge could only ever turn a feature
+/// *on*: `if project.x { project.x } else { global.x }` can never propagate a `false`.
+/// That made hub-distributed policy one-way, which is useless for a control plane whose
+/// job includes switching things off. `None` now means "not stated at this layer", and
+/// the `*_enabled()` accessors resolve to the documented default.
+///
+/// The container is `#[serde(default)]` so a *partial* document parses — the hub sends
+/// only the keys a policy actually sets, and previously every absent field was a hard
+/// deserialization error, which is why `prism hub config` could never ingest a real
+/// response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PrismConfig {
     pub data_dir: PathBuf,
-    pub toon_enabled: bool,
-    pub tron_enabled: bool,
-    pub graph_enabled: bool,
+    pub toon_enabled: Option<bool>,
+    pub tron_enabled: Option<bool>,
+    pub graph_enabled: Option<bool>,
     pub compression_ratio: Option<f64>,
-    pub cache_enabled: bool,
+    pub cache_enabled: Option<bool>,
     pub cache_dir: Option<PathBuf>,
     pub proxy_port: Option<u16>,
     pub mcp_port: Option<u16>,
@@ -121,11 +135,13 @@ impl Default for PrismConfig {
     fn default() -> Self {
         PrismConfig {
             data_dir: PathBuf::new(),
-            toon_enabled: true,
-            tron_enabled: false,
-            graph_enabled: true,
+            // None = "not stated"; the documented defaults live in the accessors below
+            // so that `Default` can still round-trip through the merge chain.
+            toon_enabled: None,
+            tron_enabled: None,
+            graph_enabled: None,
             compression_ratio: Some(0.55),
-            cache_enabled: true,
+            cache_enabled: None,
             cache_dir: None,
             proxy_port: None,
             mcp_port: None,
@@ -135,6 +151,43 @@ impl Default for PrismConfig {
             log_level: Some("info".to_string()),
             filters: FilterLimits::default(),
         }
+    }
+}
+
+impl PrismConfig {
+    /// TOON array encoding. On unless a layer says otherwise.
+    pub fn toon_enabled(&self) -> bool {
+        self.toon_enabled.unwrap_or(true)
+    }
+
+    /// TRON box-drawing table rendering. Off by default — it costs more tokens than TOON
+    /// and exists for human-readable output.
+    pub fn tron_enabled(&self) -> bool {
+        self.tron_enabled.unwrap_or(false)
+    }
+
+    /// GraphRAG codebase intelligence. On unless a layer says otherwise.
+    pub fn graph_enabled(&self) -> bool {
+        self.graph_enabled.unwrap_or(true)
+    }
+
+    /// Semantic cache. On unless a layer says otherwise. Note this governs the *store*;
+    /// whether the proxy may *serve* from it is separately opt-in via `PRISM_CACHE_SERVE`.
+    pub fn cache_enabled(&self) -> bool {
+        self.cache_enabled.unwrap_or(true)
+    }
+}
+
+/// Every key `PrismConfig` understands on the wire, derived from the struct itself so it
+/// cannot drift from the field list.
+///
+/// Used to reject a hub policy that names keys we would otherwise ignore in silence:
+/// `#[serde(default)]` means an unrecognised key deserializes to the default instead of
+/// erroring, so a camelCase or misspelled policy field would quietly do nothing.
+pub fn known_field_names() -> std::collections::BTreeSet<String> {
+    match serde_json::to_value(PrismConfig::default()) {
+        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        _ => std::collections::BTreeSet::new(),
     }
 }
 
@@ -234,27 +287,14 @@ pub fn merge_config(global: &PrismConfig, project: &PrismConfig) -> PrismConfig 
         } else {
             project.data_dir.clone()
         },
-        toon_enabled: if project.toon_enabled {
-            project.toon_enabled
-        } else {
-            global.toon_enabled
-        },
-        tron_enabled: if project.tron_enabled {
-            project.tron_enabled
-        } else {
-            global.tron_enabled
-        },
-        graph_enabled: if project.graph_enabled {
-            project.graph_enabled
-        } else {
-            global.graph_enabled
-        },
+        // `.or()`, not a truthiness test: the higher layer wins whenever it states a
+        // value, including an explicit `false`. This is what lets hub policy disable a
+        // feature rather than only enable one.
+        toon_enabled: project.toon_enabled.or(global.toon_enabled),
+        tron_enabled: project.tron_enabled.or(global.tron_enabled),
+        graph_enabled: project.graph_enabled.or(global.graph_enabled),
         compression_ratio: project.compression_ratio.or(global.compression_ratio),
-        cache_enabled: if project.cache_enabled {
-            project.cache_enabled
-        } else {
-            global.cache_enabled
-        },
+        cache_enabled: project.cache_enabled.or(global.cache_enabled),
         cache_dir: project.cache_dir.clone().or(global.cache_dir.clone()),
         proxy_port: project.proxy_port.or(global.proxy_port),
         mcp_port: project.mcp_port.or(global.mcp_port),
@@ -332,4 +372,84 @@ pub fn config_to_json(cfg: &PrismConfig) -> String {
 /// Deserialize config from JSON
 pub fn config_from_json(s: &str) -> Option<PrismConfig> {
     serde_json::from_str(s).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The merge had to be able to express *off*, not just *on*.
+    ///
+    /// With plain `bool` fields the old merge read `if project.x { project.x } else
+    /// { global.x }`, so an explicit `false` at a higher layer was indistinguishable from
+    /// an unset field and could never override a lower `true`. Hub-distributed policy was
+    /// therefore one-way — fine for enabling a feature, useless for a control plane whose
+    /// job includes switching one off.
+    #[test]
+    fn a_higher_layer_can_turn_a_feature_off() {
+        let global = PrismConfig {
+            graph_enabled: Some(true),
+            cache_enabled: Some(true),
+            ..PrismConfig::default()
+        };
+        let hub = PrismConfig {
+            graph_enabled: Some(false),
+            ..PrismConfig::default()
+        };
+
+        let merged = merge_config(&global, &hub);
+
+        assert!(
+            !merged.graph_enabled(),
+            "hub `false` must win over global `true`"
+        );
+        assert!(
+            merged.cache_enabled(),
+            "a field the hub does not mention must keep the lower layer's value"
+        );
+    }
+
+    #[test]
+    fn unset_falls_through_to_the_documented_default() {
+        let merged = merge_config(&PrismConfig::default(), &PrismConfig::default());
+
+        assert_eq!(merged.toon_enabled, None, "default states nothing");
+        assert!(merged.toon_enabled(), "TOON defaults on");
+        assert!(!merged.tron_enabled(), "TRON defaults off");
+        assert!(merged.graph_enabled(), "graph defaults on");
+        assert!(merged.cache_enabled(), "cache defaults on");
+    }
+
+    /// The hub sends only the keys a policy actually sets. Every absent field used to be
+    /// a hard deserialization error, which is the second half of why `prism hub config`
+    /// could never ingest a real response.
+    #[test]
+    fn a_partial_policy_document_parses() {
+        let cfg: PrismConfig = serde_json::from_str(r#"{"graph_enabled":false}"#)
+            .expect("a one-key policy must parse");
+
+        assert_eq!(cfg.graph_enabled, Some(false));
+        assert!(cfg.toon_enabled(), "unmentioned fields keep their defaults");
+    }
+
+    /// `PrismConfig` is snake_case on the wire, matching the `config.yaml` and `.prismrc`
+    /// files users already have on disk. The hub's *envelope* is camelCase, so it is easy
+    /// to assume the payload is too — and because `#[serde(default)]` ignores unknown
+    /// keys, a camelCase policy key would be silently dropped rather than rejected. That
+    /// is precisely the failure mode that hid the snake_case/camelCase telemetry bug for
+    /// three months, so `known_field_names` exists to make it loud instead.
+    #[test]
+    fn camel_case_policy_keys_are_not_silently_accepted() {
+        let cfg: PrismConfig =
+            serde_json::from_str(r#"{"graphEnabled":false}"#).expect("unknown keys are ignored");
+        assert_eq!(
+            cfg.graph_enabled, None,
+            "camelCase is NOT understood — which is why the hub path must reject it loudly"
+        );
+
+        let known = known_field_names();
+        assert!(known.contains("graph_enabled"));
+        assert!(!known.contains("graphEnabled"));
+        assert!(known.contains("filters"), "the FilterLimits nesting key");
+    }
 }

@@ -112,7 +112,11 @@ pub struct Rules {
     pub errors: Vec<String>,
 }
 
-fn rules_dir() -> Option<PathBuf> {
+/// Where `*.yaml` filter rules are read from: `PRISM_FILTER_RULES_DIR` when set and
+/// non-empty, else `<config>/prism/filters`. Public so `hub::fetch_config` can drop
+/// hub-distributed rules into the very directory this loader scans, rather than
+/// duplicating the path logic and drifting from it.
+pub fn rules_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("PRISM_FILTER_RULES_DIR") {
         let d = d.trim();
         if d.is_empty() {

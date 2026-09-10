@@ -146,6 +146,15 @@ pub enum HubCmd {
         /// Short-lived team join token
         #[arg(long)]
         token: String,
+        /// How this agent appears in the hub's Fleet list. Defaults to the hostname.
+        #[arg(long)]
+        name: Option<String>,
+        /// Advertise where this agent's MCP Streamable HTTP server is reachable, so the
+        /// hub can drive its memory/graph tools. Omit for a local-only install.
+        #[arg(long, requires = "mcp_port")]
+        mcp_host: Option<String>,
+        #[arg(long, requires = "mcp_host")]
+        mcp_port: Option<u16>,
     },
     /// Show enrollment state and spool depth
     Status {
@@ -618,10 +627,10 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
                 }
             }
             "cache_enabled" => {
-                cfg.cache_enabled = val.parse::<bool>().unwrap_or(true);
+                cfg.cache_enabled = Some(val.parse::<bool>().unwrap_or(true));
             }
             "toon_enabled" => {
-                cfg.toon_enabled = val.parse::<bool>().unwrap_or(true);
+                cfg.toon_enabled = Some(val.parse::<bool>().unwrap_or(true));
             }
             "proxy_port" => {
                 cfg.proxy_port = val.parse::<u16>().ok();
@@ -698,10 +707,24 @@ pub async fn hook(cmd: HookCmd) -> Result<()> {
 // --- hub (PRISM Hub enrollment, telemetry spool, and policy) ---
 pub async fn hub(cmd: HubCmd) -> Result<()> {
     match cmd {
-        HubCmd::Enroll { url, token } => {
-            let creds = crate::hub::enroll(&url, &token).await?;
+        HubCmd::Enroll {
+            url,
+            token,
+            name,
+            mcp_host,
+            mcp_port,
+        } => {
+            let mcp = match (mcp_host.as_deref(), mcp_port) {
+                (Some(h), Some(p)) => Some((h, p)),
+                _ => None,
+            };
+            let creds = crate::hub::enroll(&url, &token, name.as_deref(), mcp).await?;
             println!("Enrolled with hub: {}", creds.hub_url);
             println!("  Agent ID: {}", creds.agent_id);
+            println!(
+                "  Name:     {}",
+                name.unwrap_or_else(crate::hub::default_agent_name)
+            );
             println!("  Credentials written under the global config dir.");
         }
         HubCmd::Status { json } => {

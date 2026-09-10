@@ -287,6 +287,50 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Turn a hub refusal into something a fleet operator can act on.
+///
+/// The hub gates its REST surface on a licencia entitlement and answers **402 Payment
+/// Required** when the licence is missing, expired, or out of seats — the same 402
+/// convention used elsewhere in this workspace. A bare "hub returned 402" tells the
+/// operator nothing, so pull the machine-readable `reason` out of the body when present.
+///
+/// Note what is deliberately absent: prism itself never checks a licence. It is AGPL,
+/// so an in-binary gate would be both removable and pointless. This function only
+/// *reports* a decision the hub already made server-side.
+pub(crate) fn explain_hub_refusal(action: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let reason = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("reason")
+                .or_else(|| v.pointer("/message/reason"))
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
+        });
+
+    if status.as_u16() == 402 {
+        let detail = match reason.as_deref() {
+            Some("seat_limit_reached") => {
+                "the hub's licence has no free agent seats. Revoke an agent you no longer \
+                 use, or raise the seat count on the licence."
+            }
+            Some("licence_expired") | Some("license_expired") => {
+                "the hub's licence has expired. Renew it, then retry."
+            }
+            Some("unlicensed") | Some("no_licence") | Some("no_license") => {
+                "the hub has no valid licence installed, so its API is closed."
+            }
+            _ => "the hub refused this on licensing grounds.",
+        };
+        return format!(
+            "{action} refused: {detail}\n\
+             prism itself keeps working — `prism cmd`, filters, shims, read, memory, graph \
+             and the local proxy need no licence and no hub."
+        );
+    }
+
+    format!("{action} failed: hub returned {status}: {body}")
+}
+
 fn hostname_string() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -393,32 +437,65 @@ pub struct FlushOutcome {
 
 // ============================== enroll / config / test ==============================
 
+/// Body of `POST /api/agents/enroll`.
+///
+/// `name` is REQUIRED by the hub (`agents.schema.ts` EnrollSchema: trimmed, 1..=200) and
+/// omitting it is a 400. `mcp_host`/`mcp_port` are optional and advertise where this
+/// agent's MCP Streamable HTTP server can be reached, which is what lets the hub drive
+/// Channel 3; a purely local install leaves them unset and the hub falls back to
+/// spawning the binary itself.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EnrollRequest<'a> {
     join_token: &'a str,
+    name: &'a str,
     hostname: String,
     os: &'static str,
     prism_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_host: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_port: Option<u16>,
 }
 
+/// Response of `POST /api/agents/enroll`.
+///
+/// The hub returns `{ agentId, token }` — note `token`, NOT `agentToken`. This struct
+/// previously named the field `agent_token`, which `rename_all = "camelCase"` turned into
+/// `agentToken`, so every enrollment failed to deserialize. `enroll_response_matches_hub`
+/// below pins the real wire names.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnrollResponse {
     agent_id: String,
-    agent_token: String,
+    token: String,
+}
+
+/// What this agent calls itself to the hub. Falls back to the hostname, which is what a
+/// fleet operator recognises in the Fleet list.
+pub fn default_agent_name() -> String {
+    hostname_string()
 }
 
 /// Exchange a short-lived team join token for a durable agent token, and persist both
 /// alongside the agent id under the global config dir.
-pub async fn enroll(hub_url: &str, join_token: &str) -> Result<AgentCredentials> {
+pub async fn enroll(
+    hub_url: &str,
+    join_token: &str,
+    name: Option<&str>,
+    mcp: Option<(&str, u16)>,
+) -> Result<AgentCredentials> {
     let client = http_client();
     let url = format!("{}/agents/enroll", api_base(hub_url));
+    let fallback_name = default_agent_name();
     let req = EnrollRequest {
         join_token,
+        name: name.unwrap_or(&fallback_name),
         hostname: hostname_string(),
         os: std::env::consts::OS,
         prism_version: env!("CARGO_PKG_VERSION"),
+        mcp_host: mcp.map(|(h, _)| h),
+        mcp_port: mcp.map(|(_, p)| p),
     };
     let resp = client
         .post(&url)
@@ -429,20 +506,42 @@ pub async fn enroll(hub_url: &str, join_token: &str) -> Result<AgentCredentials>
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("enroll failed: hub returned {status}: {text}");
+        anyhow::bail!("{}", explain_hub_refusal("enroll", status, &text));
     }
     let parsed: EnrollResponse = resp.json().await.context("parsing enroll response")?;
     let creds = AgentCredentials {
         hub_url: hub_url.trim_end_matches('/').to_string(),
         agent_id: parsed.agent_id,
-        agent_token: parsed.agent_token,
+        agent_token: parsed.token,
     };
     save_credentials(&creds)?;
     Ok(creds)
 }
 
+/// The real body of `GET /api/agents/:id/config`.
+///
+/// The hub answers with an *envelope* — `{config, filterLimits, rules, revision}` (see
+/// `agents.service.ts` getMergedConfig) — not with a bare `PrismConfig`. This module used
+/// to parse the response directly as `PrismConfig`, which could never succeed against a
+/// real hub, so `prism hub config` was dead on arrival. Keeping the envelope as its own
+/// type means a hub-side field rename is a parse error here rather than silence.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HubPolicy {
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    filter_limits: serde_json::Value,
+    /// Hub-distributed YAML filter rules. Landed in the directory `filter::rules` already
+    /// watches so they take effect without any new loader.
+    #[serde(default)]
+    rules: serde_json::Value,
+    #[serde(default)]
+    revision: i64,
+}
+
 /// Fetch hub-enforced policy for this agent and write it to `<data>/hub-config.yaml`,
-/// where `config::merge_all` picks it up as the highest-precedence layer.
+/// where `config::resolve` picks it up as the highest-precedence file layer.
 pub async fn fetch_config(creds: &AgentCredentials) -> Result<crate::config::PrismConfig> {
     let client = http_client();
     let url = format!(
@@ -459,18 +558,103 @@ pub async fn fetch_config(creds: &AgentCredentials) -> Result<crate::config::Pri
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("fetch config failed: hub returned {status}: {text}");
+        anyhow::bail!("{}", explain_hub_refusal("fetch config", status, &text));
     }
     let text = resp.text().await.context("reading hub config response")?;
-    // The hub side is a different repo/agent; be lenient about whether it answers with
-    // the YAML we persist locally or a JSON encoding of the same shape.
-    let cfg: crate::config::PrismConfig = serde_yaml::from_str(&text)
-        .or_else(|_| serde_json::from_str(&text))
-        .context("hub policy did not parse as PrismConfig (YAML or JSON)")?;
+    let policy: HubPolicy = serde_json::from_str(&text)
+        .or_else(|_| serde_yaml::from_str(&text))
+        .context(
+            "hub policy envelope did not parse (expected {config, filterLimits, rules, revision})",
+        )?;
+
+    // `config` and `filterLimits` are separate keys on the wire but one struct locally:
+    // FilterLimits lives at PrismConfig::filters. Splice them together before
+    // deserializing so the hub does not have to know that layout.
+    let mut merged = match policy.config {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => anyhow::bail!("hub policy `config` must be an object, got {other}"),
+    };
+    if !policy.filter_limits.is_null() {
+        merged.insert("filters".to_string(), policy.filter_limits);
+    }
+
+    // Reject keys PrismConfig does not understand, rather than letting
+    // `#[serde(default)]` drop them in silence. The envelope around this payload is
+    // camelCase, so `graphEnabled` is the natural mistake to make, and it would
+    // otherwise be a policy that appears to apply and does nothing — the same silent
+    // failure mode as the telemetry contract bug this module was written to fix.
+    let known = crate::config::known_field_names();
+    let unknown: Vec<&str> = merged
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known.contains(*k))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "hub policy names {} key(s) prism does not understand: {}.\n\
+             Policy keys are snake_case, matching config.yaml — e.g. `graph_enabled`, not \
+             `graphEnabled`. Known keys: {}",
+            unknown.len(),
+            unknown.join(", "),
+            known.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let cfg: crate::config::PrismConfig = serde_json::from_value(serde_json::Value::Object(merged))
+        .context("hub policy `config`/`filterLimits` did not parse as PrismConfig")?;
+
     let path = crate::prism_data_dir().join("hub-config.yaml");
     std::fs::write(&path, serde_yaml::to_string(&cfg).unwrap_or_default())
         .with_context(|| format!("writing {}", path.display()))?;
+
+    write_hub_rules(&policy.rules)
+        .with_context(|| "persisting hub-distributed filter rules".to_string())?;
+
+    tracing::info!(revision = policy.revision, "applied hub policy");
     Ok(cfg)
+}
+
+/// Persist hub-distributed filter rules into the directory `filter::rules` already scans,
+/// so a hub-pushed rule needs no new loading path. Written under a `hub-` prefix and
+/// cleaned each time, so a rule the hub stops sending stops applying instead of lingering.
+fn write_hub_rules(rules: &serde_json::Value) -> Result<()> {
+    let entries = match rules {
+        serde_json::Value::Array(v) => v,
+        serde_json::Value::Null => return Ok(()),
+        other => anyhow::bail!("hub policy `rules` must be an array, got {other}"),
+    };
+
+    let Some(dir) = crate::filter::rules_dir() else {
+        tracing::warn!("no filter-rules directory resolvable; skipping hub-pushed rules");
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    for existing in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = existing.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("hub-") && name.ends_with(".yaml") {
+            let _ = std::fs::remove_file(existing.path());
+        }
+    }
+
+    for (i, rule) in entries.iter().enumerate() {
+        let tool = rule
+            .get("tool")
+            .and_then(|t| t.as_str())
+            .filter(|t| {
+                !t.is_empty()
+                    && t.chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            })
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("rule{i}"));
+        let path = dir.join(format!("hub-{tool}.yaml"));
+        let yaml = serde_yaml::to_string(rule).context("re-encoding a hub rule as YAML")?;
+        std::fs::write(&path, yaml).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Send one synthetic event and report success/failure. With `hub_url_override` set this
@@ -770,6 +954,90 @@ mod contract {
 
 #[cfg(test)]
 mod tests {
+
+    /// The hub answers enroll with `{ agentId, token }`. This struct once named that
+    /// second field `agent_token`, which `rename_all = "camelCase"` rendered as
+    /// `agentToken` — so every enrollment failed to deserialize, silently, for months.
+    /// Pin both directions of the handshake against the hub's actual schema
+    /// (`agents.schema.ts` / `agents.service.ts`) so a rename on either side fails here.
+    #[test]
+    fn enroll_contract_matches_hub() {
+        // Response: exactly the keys the hub sends, and nothing more.
+        let parsed: EnrollResponse =
+            serde_json::from_str(r#"{"agentId":"agt_123","token":"deadbeef"}"#)
+                .expect("must parse the hub's real enroll response");
+        assert_eq!(parsed.agent_id, "agt_123");
+        assert_eq!(parsed.token, "deadbeef");
+
+        // Request: `name` is required by EnrollSchema; omitting it is a 400.
+        let body = serde_json::to_value(EnrollRequest {
+            join_token: "jt",
+            name: "workstation",
+            hostname: "workstation".to_string(),
+            os: "linux",
+            prism_version: env!("CARGO_PKG_VERSION"),
+            mcp_host: Some("10.0.0.4"),
+            mcp_port: Some(27182),
+        })
+        .expect("request must serialize");
+
+        for key in [
+            "joinToken",
+            "name",
+            "hostname",
+            "os",
+            "prismVersion",
+            "mcpHost",
+            "mcpPort",
+        ] {
+            assert!(body.get(key).is_some(), "missing wire key {key}: {body}");
+        }
+
+        // The optional reachability pair must vanish entirely when unset, rather than
+        // serializing as null — the hub validates with `.optional()`, not `.nullable()`.
+        let local = serde_json::to_value(EnrollRequest {
+            join_token: "jt",
+            name: "laptop",
+            hostname: "laptop".to_string(),
+            os: "linux",
+            prism_version: env!("CARGO_PKG_VERSION"),
+            mcp_host: None,
+            mcp_port: None,
+        })
+        .expect("request must serialize");
+        assert!(
+            local.get("mcpHost").is_none(),
+            "mcpHost must be omitted: {local}"
+        );
+        assert!(
+            local.get("mcpPort").is_none(),
+            "mcpPort must be omitted: {local}"
+        );
+    }
+
+    /// A 402 is a licensing decision the hub made, and the operator needs to know which
+    /// one. Also asserts the message says prism itself still works — the whole point of
+    /// gating at the hub rather than in an AGPL binary.
+    #[test]
+    fn explains_a_licensing_refusal() {
+        let msg = explain_hub_refusal(
+            "enroll",
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            r#"{"reason":"seat_limit_reached"}"#,
+        );
+        assert!(msg.contains("no free agent seats"), "{msg}");
+        assert!(msg.contains("prism itself keeps working"), "{msg}");
+
+        // An unrecognised reason must still be attributed to licensing, not swallowed.
+        let vague = explain_hub_refusal("enroll", reqwest::StatusCode::PAYMENT_REQUIRED, "{}");
+        assert!(vague.contains("licensing"), "{vague}");
+
+        // Anything else keeps the raw status and body for debugging.
+        let other =
+            explain_hub_refusal("enroll", reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(other.contains("500"), "{other}");
+        assert!(other.contains("boom"), "{other}");
+    }
     use super::*;
 
     #[test]

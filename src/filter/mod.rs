@@ -20,7 +20,7 @@ mod security;
 mod vcs;
 
 pub use common::{has_truncation, limits};
-pub use rules::{Rules, loaded as loaded_rules};
+pub use rules::{Rules, loaded as loaded_rules, rules_dir};
 
 use cloud::*;
 use common::*;
