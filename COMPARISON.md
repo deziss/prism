@@ -77,7 +77,7 @@ editing — not the retrieval stack.
 | **MCP Server** | ❌ | 67 MCP tools | 5 MCP tools (memory_search, memory_save, graph_query, toon_encode, count_tokens) |
 | **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | **MITM CONNECT proxy** — per-domain TLS, keep-alive, SSE relay, code-safe compression, Anthropic cache breakpoints + context editing |
 | **Extensions** | None | VS Code, Cursor, Claude Code, Copilot, Windsurf, Codex, Gemini | VS Code extension (5 commands) |
-| **Hub / Backend** | ❌ | ❌ | **prism-hub** — NestJS + PostgreSQL + argon2 + JWT |
+| **Hub / Backend** | ❌ | ❌ | **prism-hub** — fleet control plane over three channels (batched telemetry ingest, policy distribution, MCP-interactive access), NestJS + PostgreSQL + BullMQ + argon2 + JWT |
 
 ### Token Compression & Savings
 
@@ -97,7 +97,7 @@ editing — not the retrieval stack.
 |---------|----------------|
 | **RTK** | Largest ecosystem (58k ⭐), 100+ commands, proven battle-tested, zero-config, <10ms overhead |
 | **LeanCTX** | Most complete feature set — 10 file read modes, AST (18 langs), property graph, context proofs, 67 MCP tools |
-| **PRISM** | **TurboVec ANN** (Google TurboQuant, no training, 10M docs/4GB) + **CRAG** (corrective re-query) + **TOON/TRON** (structured encoding) + **Memory Palace** (3-layer) + **prism-hub** (team backend) |
+| **PRISM** | **TurboVec ANN** (Google TurboQuant, no training, 10M docs/4GB) + **CRAG** (corrective re-query) + **TOON/TRON** (structured encoding) + **Memory Palace** (3-layer) + **prism-hub** (three-channel fleet control plane) |
 
 ### Where PRISM Beats Competitors
 
@@ -109,7 +109,7 @@ editing — not the retrieval stack.
 
 4. **Memory Palace** — 3-layer hierarchy (Recall → Core → Archive) with keyword scoring, semantic cache fallback via TurboVec ANN. More granular than LeanCTX's session memory.
 
-5. **prism-hub Backend** — Team deployment backend (NestJS, PostgreSQL, Prisma, argon2 auth, JWT). No competitor offers a shared-session analytics + team config store.
+5. **prism-hub Backend** — Fleet control plane over three channels: batched telemetry ingest (proxy/command/cache/session events), policy distribution (PrismConfig/FilterLimits/YAML rules per agent, ETag-polled), and MCP-interactive access to prism's own memory/graph/toon/compress tools (NestJS, PostgreSQL, BullMQ, Prisma, argon2 auth, JWT). No competitor offers a shared-session analytics + team policy + live MCP fleet store.
 
 6. **BLAS-Accelerated Matrix Ops** — TurboVec uses OpenBLAS for `cblas_sgemm` in vector quantization. build.rs auto-detects BLAS (portable: pkg-config → gslcblas fallback).
 
@@ -160,13 +160,18 @@ prism/
 ```
 
 ```
-prism-hub/ (team backend)
-├── backend/          — NestJS + Prisma + PostgreSQL
+prism-hub/ (fleet control plane — telemetry in, policy out, MCP interactive)
+├── backend/          — NestJS + Prisma + PostgreSQL + BullMQ
 │   ├── auth/         — argon2 + JWT
-│   ├── users/
+│   ├── ingest/       — Channel 1: batched HubEvent telemetry, agent-bearer-auth
+│   ├── agents/       — Channel 2: enrollment, fleet list, per-agent config (ETag)
+│   ├── policy/       — Channel 2: append-only PrismConfig/FilterLimits/rules revisions
+│   ├── prism-mcp/    — Channel 3: MCP client per agent (falls back to local CLI)
+│   ├── rollup/       — BullMQ job maintaining daily per-team rollups
 │   ├── analytics/
 │   └── prisma/       — migrations
-└── frontend/         — nginx-served SPA
+└── frontend/         — React dashboard (nginx-served in Docker): Proxy Analytics,
+                         Commands & Filters, Fleet, Policy, Memory, Graph Explorer, …
 ```
 
 ---
@@ -241,7 +246,7 @@ PRISM:
 - **Cross-file code reasoning** — GraphRAG queries
 - **Corrective retrieval** — CRAG re-queries below relevance threshold
 - **Persistent knowledge layers** — Memory Palace 3-layer
-- **Team deployment** — prism-hub backend (PostgreSQL, argon2, JWT)
+- **Team deployment** — prism-hub backend, a three-channel fleet control plane (telemetry ingest, policy distribution, MCP interactive; PostgreSQL, BullMQ, argon2, JWT)
 - **Hardware-accelerated ANN** — TurboVec (AVX-512BW, no training)
 
 ### Combined approach (recommended for power users):
