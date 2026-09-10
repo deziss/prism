@@ -56,7 +56,7 @@ webpki-roots = "=1.0.9"
 turbovec = "0.2"
 
 # Token counting
-tiktoken-rs = "0.6"
+tiktoken-rs = "=0.12.0"
 
 # Database / persistence
 sled = "0.34"
