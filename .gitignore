@@ -12,3 +12,6 @@ AGENTS.md
 
 # bench artifacts
 bench/
+
+# local cargo config — build flags live in build.rs
+.cargo/
