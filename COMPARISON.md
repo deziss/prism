@@ -31,7 +31,7 @@ this table.
 | File Read Modes (`prism read`) | **Live** | `reader.rs`, 7 modes (`skeleton`, `map`, `clean`, `diff`, `lines`, `cached`, `full`) with AST skeletonizer (55-93% savings) & PathJail |
 | Cached Re-Reads (~15 tokens) | **Live** | `reader.rs::check_session_cache` (SHA-256 session ledger) |
 | Failure Tee Mechanism | **Live** | `cli.rs::run_command` saves raw uncompressed outputs to `~/.local/share/prism/tee/` on command failure |
-| MCP server (JSON-RPC 2.0, 12 tools) | **Live** | `mcp.rs`, expanded with file reader, command filter, graph indexer, cache lookup |
+| MCP server (JSON-RPC 2.0, 17 tools) | **Live** | `mcp.rs`, expanded with file reader, command filter, graph indexer, cache lookup |
 | TOON/TRON encoding, command filters | **Live** | `encode.rs`, `filter.rs` (65+ commands) |
 | **Semantic cache** | **Live** | `cache.rs`, 16-dim SimHash feature projection + TurboVec ANN, sled persistence, CLI `prism cache`, MCP `prism_cache_lookup` |
 | **CRAG (corrective retrieval)** | **Live** | `knowledge/crag.rs`, adaptive relevance scoring + technical synonym rewrite, wired into `prism graph query` and MCP |
@@ -66,7 +66,7 @@ editing — not the retrieval stack.
 |-----------|-----------|----------------|-------|
 | **Primary Role** | CLI output proxy | Cognitive context layer | Enterprise token optimizer |
 | **Language** | Rust | Rust | Rust |
-| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 14 subcommands + MCP 6 tools + MITM proxy + Memory Palace |
+| **Architecture** | Single binary, zero deps | MCP 67 tools + shell hooks + property graph | CLI 19 subcommands + MCP 17 tools + MITM proxy + Memory Palace |
 | **Encoding Format** | Smart filtering (4 strategies) | 10 read modes + AST parsing | TOON (45-72%) + TRON (0-20%) |
 | **Command Coverage** | 100+ commands | 56 pattern modules + 270 rules | 65+ commands |
 | **Memory** | ❌ None | Session memory + knowledge graph | Memory Palace (Recall/Core/Archive + sled + TurboVec ANN) |
@@ -74,7 +74,7 @@ editing — not the retrieval stack.
 | **Retrieval** | ❌ | Graph search | **CRAG** — evaluate relevance → re-query if below threshold |
 | **Code Graph** | ❌ | Property graph (18 langs, 4 edge types) | GraphRAG (cross-file import + dependency) |
 | **Token Analytics** | ✅ Economics tracking | Context Manager dashboard | tiktoken-rs `cl100k_base` + per-message/cost tracking |
-| **MCP Server** | ❌ | 67 MCP tools | 5 MCP tools (memory_search, memory_save, graph_query, toon_encode, count_tokens) |
+| **MCP Server** | ❌ | 67 MCP tools | 17 MCP tools (count_tokens, read_file, filter_cmd, memory_search/_save/_stats, graph_query/_explain/_path/_god_nodes/_import/_index, toon_encode, compress, cache_save/_lookup, analytics_summary) |
 | **Proxy** | ✅ HTTX proxy (default mode) | lean-ctx serve (Streamable HTTP MCP) | **MITM CONNECT proxy** — per-domain TLS, keep-alive, SSE relay, code-safe compression, Anthropic cache breakpoints + context editing |
 | **Extensions** | None | VS Code, Cursor, Claude Code, Copilot, Windsurf, Codex, Gemini | VS Code extension (5 commands) |
 | **Hub / Backend** | ❌ | ❌ | **prism-hub** — fleet control plane over three channels (batched telemetry ingest, policy distribution, MCP-interactive access), NestJS + PostgreSQL + BullMQ + argon2 + JWT |
@@ -120,7 +120,7 @@ editing — not the retrieval stack.
 | **Maturity/Ecosystem** | RTK | 58k stars vs new; community trust |
 | **File read modes** | LeanCTX | 10 modes (full, map, signatures, diff, lines:N-M) vs none in PRISM |
 | **Language support** | LeanCTX | AST parsing for 18 languages |
-| **MCP tool count** | LeanCTX | 67 tools vs PRISM's 5 |
+| **MCP tool count** | LeanCTX | 67 tools vs PRISM's 17 |
 | **Multi-agent** | LeanCTX | Agent handoff + shared state + diary |
 | **Context proofs** | LeanCTX | 4-layer verification + CI drift gates |
 | **Zero-config** | RTK | Works immediately vs PRISM requires init |
@@ -132,7 +132,7 @@ editing — not the retrieval stack.
 
 ```
 prism/
-├── CLI (14 subcommands)
+├── CLI (19 subcommands)
 │   ├── filter.rs     — 65+ RTK-compatible output filters
 │   ├── cli.rs        — subcommand dispatch
 │   └── hook.rs       — shell hook install/uninstall
@@ -140,7 +140,7 @@ prism/
 ├── Proxy (axum)
 │   ├── proxy.rs      — HTTP reverse proxy
 │   ├── encode.rs     — TOON/TRON encoding
-│   └── cache.rs      — sled + TurboVec ANN semantic cache (not wired)
+│   └── cache.rs      — sled + TurboVec ANN semantic cache
 │
 ├── Knowledge
 │   ├── graph_rag.rs  — GraphRAG cross-file dependency analysis
@@ -152,8 +152,8 @@ prism/
 ├── Vector
 │   └── vector.rs     — TurboVecIndex (IdMapIndex, dim=16, bit_width=2)
 │
-├── MCP (axum)
-│   └── mcp.rs        — 5 MCP tools over HTTP
+├── MCP (rmcp)
+│   └── mcp.rs        — 17 MCP tools over stdio + streamable HTTP
 │
 └── Analytics
     └── analytics.rs  — tiktoken-rs cl100k_base + gain dashboard
@@ -187,10 +187,10 @@ LeanCTX:
              → [Session Memory] + [Context Proof] + [Dashboard]
 
 PRISM:
-  CLI (14 subcmds) → [65+ Filters] + [TOON/TRON Encoder]
+  CLI (19 subcmds) → [65+ Filters] + [TOON/TRON Encoder]
                    → [TurboVec ANN Cache] + [Memory Palace]
                    → [CRAG Pipeline] + [GraphRAG]
-                   → [MCP Server (5 tools)] + [TokenCounter Analytics]
+                   → [MCP Server (17 tools)] + [TokenCounter Analytics]
 ```
 
 ---
