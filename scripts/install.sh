@@ -53,9 +53,19 @@ echo "[2/4] Initializing XDG storage and CA certificates..."
 
 # 3. Install toggle helper scripts
 echo "[3/4] Installing system control helpers (prism-enable, prism-disable)..."
+for helper in prism-enable prism-disable; do
+    install -m 0755 "$SCRIPT_DIR/$helper" "$BIN_DIR/$helper"
+done
 ln -sf "$BIN_DIR/prism-enable" "$BIN_DIR/prism-on" 2>/dev/null || true
 ln -sf "$BIN_DIR/prism-disable" "$BIN_DIR/prism-off" 2>/dev/null || true
 echo "  ✓ Helpers active: prism-enable (alias: prism-on), prism-disable (alias: prism-off)"
+
+# certutil is what lets Chromium/Electron apps and Firefox trust the MITM CA
+if ! command -v certutil > /dev/null 2>&1; then
+    echo "  ! certutil not found. Install libnss3-tools, then re-run prism-enable,"
+    echo "    or Electron IDEs and browsers will reject intercepted hosts:"
+    echo "      sudo apt install libnss3-tools   # Debian/Ubuntu"
+fi
 
 echo "[4/4] Installation completed successfully!"
 echo "=========================================================================="

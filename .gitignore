@@ -9,3 +9,9 @@ graphify-out/
 PRISM_PLAN.md
 AGENTS.md
 .graphifyignore
+
+# bench artifacts
+bench/out*/
+bench/*.log
+bench/pyproj/.pytest_cache/
+bench/pyproj/__pycache__/

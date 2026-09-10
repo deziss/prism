@@ -21,6 +21,98 @@ pub struct PrismConfig {
     pub llmlingua_path: Option<String>,
     pub memory_tier: Option<String>,
     pub log_level: Option<String>,
+    /// Output-filter caps (`prism cmd`). Every cap is announced with a `[+N more …]` marker.
+    #[serde(default)]
+    pub filters: FilterLimits,
+}
+
+/// Caps used by the output filters. Override per key in `config.yaml` under
+/// `filters:` or via env `PRISM_FILTER_<UPPER_NAME>` (e.g. `PRISM_FILTER_GREP_MAX_PER_FILE=50`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FilterLimits {
+    /// grep/rg: matches shown per file before `[+N more matches]`
+    pub grep_max_per_file: usize,
+    /// grep/rg: total matches shown
+    pub grep_max_results: usize,
+    /// grep/rg: match line width before `…`
+    pub grep_line_width: usize,
+    /// find/fd: entries listed per directory
+    pub find_max_per_dir: usize,
+    /// find/fd: directories listed
+    pub find_max_dirs: usize,
+    /// ls: entries listed per directory
+    pub ls_max_entries: usize,
+    /// dependency trees / tabular lists (npm ls, cargo tree, docker images…)
+    pub list_max_lines: usize,
+    /// JSON renderer: lines
+    pub json_max_lines: usize,
+    /// JSON renderer: items per array
+    pub json_max_array: usize,
+    /// log tails (docker logs, kubectl logs, stern)
+    pub log_tail: usize,
+    /// unknown commands: lines kept
+    pub passthrough_max_lines: usize,
+    /// diffs: unchanged context lines kept around each change
+    pub diff_context: usize,
+    /// git status: files listed per section
+    pub status_max_files: usize,
+    /// test runners: failures shown in full
+    pub test_max_failures: usize,
+    /// compiler/linter diagnostics shown in full
+    pub max_diagnostics: usize,
+    /// process/socket rows kept (`ps`, `ss`), largest first
+    pub ps_max_rows: usize,
+}
+
+impl Default for FilterLimits {
+    fn default() -> Self {
+        FilterLimits {
+            grep_max_per_file: 25,
+            grep_max_results: 200,
+            grep_line_width: 160,
+            find_max_per_dir: 40,
+            find_max_dirs: 80,
+            ls_max_entries: 200,
+            list_max_lines: 200,
+            json_max_lines: 300,
+            json_max_array: 50,
+            log_tail: 100,
+            passthrough_max_lines: 400,
+            diff_context: 2,
+            status_max_files: 30,
+            test_max_failures: 10,
+            max_diagnostics: 40,
+            ps_max_rows: 40,
+        }
+    }
+}
+
+impl FilterLimits {
+    /// Apply `PRISM_FILTER_<NAME>` env overrides.
+    pub fn apply_env(&mut self) {
+        let set = |name: &str, slot: &mut usize| {
+            if let Ok(v) = std::env::var(format!("PRISM_FILTER_{}", name.to_ascii_uppercase())) {
+                if let Ok(n) = v.trim().parse::<usize>() { *slot = n }
+            }
+        };
+        set("grep_max_per_file", &mut self.grep_max_per_file);
+        set("grep_max_results", &mut self.grep_max_results);
+        set("grep_line_width", &mut self.grep_line_width);
+        set("find_max_per_dir", &mut self.find_max_per_dir);
+        set("find_max_dirs", &mut self.find_max_dirs);
+        set("ls_max_entries", &mut self.ls_max_entries);
+        set("list_max_lines", &mut self.list_max_lines);
+        set("json_max_lines", &mut self.json_max_lines);
+        set("json_max_array", &mut self.json_max_array);
+        set("log_tail", &mut self.log_tail);
+        set("passthrough_max_lines", &mut self.passthrough_max_lines);
+        set("diff_context", &mut self.diff_context);
+        set("status_max_files", &mut self.status_max_files);
+        set("test_max_failures", &mut self.test_max_failures);
+        set("max_diagnostics", &mut self.max_diagnostics);
+        set("ps_max_rows", &mut self.ps_max_rows);
+    }
 }
 
 impl Default for PrismConfig {
@@ -39,6 +131,7 @@ impl Default for PrismConfig {
             llmlingua_path: None,
             memory_tier: Some("3".to_string()),
             log_level: Some("info".to_string()),
+            filters: FilterLimits::default(),
         }
     }
 }
@@ -94,6 +187,7 @@ pub fn merge_config(global: &PrismConfig, project: &PrismConfig) -> PrismConfig 
         llmlingua_path: project.llmlingua_path.clone().or(global.llmlingua_path.clone()),
         memory_tier: project.memory_tier.clone().or(global.memory_tier.clone()),
         log_level: project.log_level.clone().or(global.log_level.clone()),
+        filters: if project.filters != FilterLimits::default() { project.filters.clone() } else { global.filters.clone() },
     }
 }
 

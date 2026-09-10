@@ -173,8 +173,10 @@ fn print_agent_integration() {
     println!("     Zero code changes needed. Route traffic through environment variables:");
     println!("       export HTTP_PROXY=http://127.0.0.1:27181");
     println!("       export HTTPS_PROXY=http://127.0.0.1:27181");
-    println!("       export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt");
-    println!("       export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt");
+    println!("       export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt      # adds a CA");
+    println!("       export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt  # replaces the store");
+    println!("     {}", "REQUESTS_CA_BUNDLE / SSL_CERT_FILE / CURL_CA_BUNDLE replace the trust".yellow());
+    println!("     {}", "store, so they must use ca-bundle.crt (system roots + PRISM CA).".yellow());
 }
 
 fn print_proxy_mechanics() {
@@ -205,6 +207,7 @@ fn print_cli_reference() {
     println!("");
 
     println!("  {}", "Filtered Command Runner & Failure Tee:".bold().yellow());
+    println!("    $ {:<44} {}", "prism shim install --path".cyan(), "# Route every agent's commands through prism".dimmed());
     println!("    $ {:<44} {}", "prism cmd cargo test".cyan(), "# Filter noise, track tokens".dimmed());
     println!("    $ {:<44} {}", "prism cmd git status".cyan(), "# Saves raw logs to tee/ on error".dimmed());
     println!("");
@@ -230,9 +233,12 @@ fn print_troubleshooting() {
     println!("     • Start manually on any custom port: `prism serve --port 27181`\n");
 
     println!("  {}", "2. SSL/TLS Certificate Warnings:".bold().white());
-    println!("     • Python:   export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt");
     println!("     • Node.js:  export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt");
-    println!("     • System:   sudo cp ~/.local/share/prism/ca/ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates\n");
+    println!("     • Python:   export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt");
+    println!("     • OpenSSL:  export SSL_CERT_FILE=~/.local/share/prism/ca/ca-bundle.crt");
+    println!("     • System:   sudo cp ~/.local/share/prism/ca/ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates");
+    println!("     • Chromium/Electron IDEs & Firefox read NSS, not the above:");
+    println!("       certutil -A -d sql:$HOME/.pki/nssdb -n 'PRISM Local CA' -t C,, -i ~/.local/share/prism/ca/ca.crt\n");
 
     println!("  {}", "3. Command Diagnostic Logs on Non-Zero Exit:".bold().white());
     println!("     • PRISM automatically dumps unstripped stdout/stderr to:");

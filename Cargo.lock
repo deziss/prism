@@ -2336,6 +2336,7 @@ dependencies = [
  "colored",
  "criterion",
  "dirs 5.0.1",
+ "flate2",
  "futures",
  "home",
  "http-body-util",

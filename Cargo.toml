@@ -69,6 +69,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Pin time to avoid rcgen/time 0.3.48 From trait coherence conflict (E0119)
 time = "=0.3.36"
 
+# Image rightsizing (PNG codec: inflate/deflate + CRC32) — already in the tree
+flate2 = "1.0"
+
 # Utilities
 dirs = "5.0"
 home = "0.5"

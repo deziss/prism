@@ -1,0 +1,16 @@
+# Copy to ~/.config/prism/filters/ to teach `prism cmd` a tool it has no Rust filter for.
+#
+# `shape` names an existing primitive, so cuts still emit `[+N more …]` and caps still
+# come from `filters:` in config.yaml / PRISM_FILTER_*. Shapes:
+#   table  logs  json  describe  tree  verb-group  dedupe  tail  errors  generic  raw
+#
+# Check it loaded with:  prism config --show
+tool: nomad
+subcommands:
+  status:       { shape: table, cap: list_max_lines }
+  node-status:  { shape: table }
+  alloc-logs:   { shape: logs, cap: log_tail }
+  job-inspect:  { shape: json }
+  run:          { shape: verb-group, verbs: [started, updated, stopped] }
+  version:      { shape: raw }          # already one line — do not reformat it
+default:        { shape: generic }

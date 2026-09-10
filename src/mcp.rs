@@ -547,12 +547,26 @@ async fn call_tool(name: &str, arguments: &Value) -> (Value, bool) {
         "prism_cache_lookup" => {
             let query = arguments.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+            if let Some(e) = crate::cache::open_error() {
+                // An unreachable store is not an empty one; an agent must not read a
+                // lock failure as "nothing cached".
+                return (
+                    text_content(format!("Cache unavailable (store locked by another process): {}", e)),
+                    true,
+                );
+            }
             let results = crate::cache::lookup_similar(query, limit);
             if results.is_empty() {
                 (text_content(format!("No cached entries found for: {}", query)), false)
             } else {
-                let formatted = results.iter().map(|e| {
-                    format!("[Cache: {} | model: {}] {}", e.key_hash, e.model.as_deref().unwrap_or("unknown"), e.response)
+                let formatted = results.iter().map(|hit| {
+                    format!(
+                        "[Cache: {} | {:.0}% match | model: {}] {}",
+                        hit.entry.key_hash,
+                        hit.score * 100.0,
+                        hit.entry.model.as_deref().unwrap_or("unknown"),
+                        hit.entry.response
+                    )
                 }).collect::<Vec<_>>().join("\n---\n");
                 (text_content(formatted), false)
             }

@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use crate::cache::SemanticCache;
-use dirs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MemoryLayer {
@@ -160,10 +159,10 @@ impl MemoryPalace {
             self.semantic_cache
                 .find_similar(query, max_results)
                 .into_iter()
-                .map(|entry| MemoryBlock {
-                    id: format!("_cached_{}", entry.key_hash),
+                .map(|hit| MemoryBlock {
+                    id: format!("_cached_{}", hit.entry.key_hash),
                     layer: MemoryLayer::Core,
-                    content: entry.response,
+                    content: hit.entry.response,
                     category: "cache".to_string(),
                     keywords: Vec::new(),
                     created_at: Utc::now().to_rfc3339(),
@@ -279,9 +278,7 @@ fn append_to_file(path: &std::path::Path, content: &str) -> std::io::Result<()> 
 // --- module-level async API for cli.rs / mcp.rs ---
 
 fn memory_palace_dir() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("prism")
+    crate::prism_data_dir()
 }
 
 pub fn memory_palace_dir_pub() -> std::path::PathBuf {

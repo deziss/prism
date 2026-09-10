@@ -9,9 +9,7 @@ use std::sync::Mutex;
 static PROXY_EVENTS_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn prism_data_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("prism")
+    crate::prism_data_dir()
 }
 
 pub fn analytics_dir() -> PathBuf {
@@ -139,14 +137,19 @@ pub fn record_proxy_event(
 }
 
 /// Record a command execution for analytics.
-pub fn record_command(cmd: &str, input_bytes: usize, output_tokens: usize) -> Result<()> {
+/// Append one `prism cmd` invocation to the local history.
+///
+/// Takes *bytes*, not tokens: this runs on every shimmed command, so it must not load a
+/// tokenizer. `CommandEntry::tokens` approximates at report time.
+pub fn record_command(cmd: &str, input_bytes: usize, output_bytes: usize) -> Result<()> {
     let history = load_history()?;
 
     let entry = CommandEntry {
         timestamp: chrono::Utc::now(),
         command: cmd.to_string(),
         input_bytes,
-        output_tokens,
+        output_tokens: 0,
+        output_bytes,
         savings: 0,
     };
 
@@ -208,10 +211,10 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
         println!("\n  PRISM Command History\n{}", "─".repeat(50));
         for entry in hist.commands.iter().rev().take(50) {
             let ts = entry.timestamp.format("%m-%d %H:%M");
-            println!("  {}  {:>12} tokens  {}", ts, entry.output_tokens, entry.command);
+            println!("  {}  {:>12} tokens  {}", ts, entry.tokens(), entry.command);
         }
     } else {
-        let total: usize = hist.commands.iter().map(|e| e.output_tokens).sum();
+        let total: usize = hist.commands.iter().map(|e| e.tokens()).sum();
 
         println!("\n  {}  {}", "PRISM TOKEN ANALYTICS".bold().cyan(), "v0.1.0".dimmed());
         println!("  {}\n", "─".repeat(65).dimmed());
@@ -246,7 +249,7 @@ pub async fn show_gains(history_flag: bool) -> Result<()> {
 
         let mut by_cmd: HashMap<&str, usize> = HashMap::new();
         for e in &hist.commands {
-            *by_cmd.entry(&e.command).or_default() += e.output_tokens;
+            *by_cmd.entry(&e.command).or_default() += e.tokens();
         }
         let mut top: Vec<_> = by_cmd.iter().collect();
         top.sort_by(|a, b| b.1.cmp(a.1));
@@ -272,7 +275,7 @@ pub async fn discover() -> Result<()> {
 
     println!("  Commands that could be cached: {}", uncached.len());
     for e in uncached.iter().take(5) {
-        println!("    {}  ({} tokens)", e.command, e.output_tokens);
+        println!("    {}  ({} tokens)", e.command, e.tokens());
     }
     println!(
         "\n  {} opportunity{} found\n",
@@ -295,8 +298,31 @@ pub struct CommandEntry {
     timestamp: chrono::DateTime<chrono::Utc>,
     command: String,
     input_bytes: usize,
+    /// Exact token count. Only present on entries written before token counting moved
+    /// off the hot path; zero on new ones, where `output_bytes` carries the size.
+    #[serde(default)]
     output_tokens: usize,
+    /// Bytes of filtered output. Free to record, unlike an exact count.
+    #[serde(default)]
+    output_bytes: usize,
     savings: usize,
+}
+
+impl CommandEntry {
+    /// Tokens for reporting: exact when the entry carries one, otherwise the same
+    /// chars/3.5 approximation `count_tokens` falls back to.
+    ///
+    /// Counting exactly here would mean loading the cl100k BPE table once per command —
+    /// 0.54s measured — which is unacceptable now that a PATH shim puts prism in front
+    /// of every command a user or agent runs. A savings dashboard does not need billing
+    /// precision.
+    fn tokens(&self) -> usize {
+        if self.output_tokens > 0 {
+            self.output_tokens
+        } else {
+            (self.output_bytes as f64 / 3.5) as usize
+        }
+    }
 }
 
 impl CommandEntry {

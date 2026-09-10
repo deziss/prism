@@ -70,8 +70,13 @@ prism-disable    # (or alias: prism-off)
    - `prism-mcp.service`: Model Context Protocol server active on `http://127.0.0.1:27182`
 2. **Environment Injection (`~/.config/environment.d/10-prism.conf` & `~/.bashrc`)**:
    - Sets `HTTP_PROXY` and `HTTPS_PROXY` to `http://127.0.0.1:27181`
-   - Sets `NO_PROXY=localhost,127.0.0.1,::1`
-   - Injects PRISM root CA into Node.js (`NODE_EXTRA_CA_CERTS`), Python (`REQUESTS_CA_BUNDLE`), and Curl (`SSL_CERT_FILE`)
+   - Sets `NO_PROXY=localhost,127.0.0.1,::1,.local,.internal`
+   - Adds the PRISM root CA for Node.js (`NODE_EXTRA_CA_CERTS=ca.crt`)
+   - Points the trust-store-*replacing* variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+     `CURL_CA_BUNDLE`) at `ca-bundle.crt` — system roots **plus** the PRISM CA, so hosts
+     PRISM does not intercept still verify
+   - Registers the CA in the NSS databases used by Chromium/Electron apps and Firefox
+     (requires `libnss3-tools`), which ignore both the variables above and the system store
 3. **CLI Aliases**:
    - `p` $\to$ `prism`
    - `pread` $\to$ `prism read`
@@ -166,9 +171,13 @@ Zero code changes required. Route traffic through environment variables:
 ```bash
 export HTTP_PROXY=http://127.0.0.1:27181
 export HTTPS_PROXY=http://127.0.0.1:27181
-export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt
-export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt
+export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt         # adds a CA
+export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt   # replaces the store
 ```
+
+`REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `CURL_CA_BUNDLE` replace the CA set instead of
+extending it — always give them `ca-bundle.crt` (system roots + PRISM CA), never the bare
+`ca.crt`, or every host PRISM does not intercept fails verification.
 
 ---
 
@@ -188,6 +197,99 @@ prism cmd cargo test                       # Strip noisy compiler ANSI progress,
 prism cmd git status                       # On failure, dumps raw stderr to ~/.local/share/prism/tee/
 ```
 
+#### Making every agent use the filters (`prism shim`)
+
+A filter that never runs saves nothing, and the filters are the only lever whose savings
+*compound*: a tool result cut from 40k to 4k tokens is not saved once, it is saved again
+on every later turn that re-sends the conversation.
+
+```bash
+prism shim install --path   # shims + the PATH line in every shell rc you have
+prism shim status           # installed? actually first on PATH?
+prism shim uninstall
+```
+
+Install prism to a stable location **before** running this. The shims hard-code the path
+of the binary that wrote them, so installing from `target/release` means a later
+`cargo clean` breaks every shimmed command on the machine. prism refuses to do that
+silently — it warns and prints the correct command — but the right order is:
+
+```bash
+cargo build --release
+cp target/release/prism ~/.local/bin/prism
+~/.local/bin/prism shim install --path
+exec $SHELL
+```
+
+`prism init --global` also does this, but it additionally turns on the HTTP proxy
+environment; use `shim install --path` if you only want the filters.
+
+Rather than one integration per client, the shims put a directory of tiny executables
+ahead of the real tools on `PATH`. Every client that runs shell commands is covered by
+the same code — Claude Code, Cursor, Windsurf, Codex, Aider, Cline, OpenCode, and any
+client that does not exist yet.
+
+Measured, with no client configuration at all:
+
+| command | raw | via shim |
+|---|---|---|
+| `ls -laR src` | 1,588 tok | **456** |
+| `find . -name '*.rs'` | 1,291 tok | **115** |
+
+**Your own terminal is unaffected.** `PRISM_SHIM=auto` (the default) filters only when
+stdout is a pipe — an agent reading — and hands the real tool straight through when
+stdout is a terminal, so `git rebase -i`, colours and progress bars behave normally.
+`PRISM_SHIM=always` filters regardless; `PRISM_SHIM=off` makes the shims transparent.
+
+Exit codes propagate, stdin is passed through (`echo '{}' | jq .` still works), and
+prism removes the shim directory from the child's `PATH` before spawning the real tool —
+so there is no recursion, and resolution stays dynamic, which keeps `nvm`, `rbenv` and
+`pyenv` working.
+
+GUI-launched editors do not read your shell rc. Set `PATH` in the client instead:
+
+```jsonc
+// ~/.claude/settings.json
+{ "env": { "PATH": "/home/you/.local/share/prism/shims:${PATH}" } }
+
+// Cursor / VS Code settings.json
+"terminal.integrated.env.linux": { "PATH": "/home/you/.local/share/prism/shims:${env:PATH}" }
+```
+
+`prism shim path` prints the directory for any other client's config.
+
+#### Adding a tool without recompiling
+
+`prism cmd` has Rust filters for 108 commands. For a tool it does not know, drop a YAML
+file in `~/.config/prism/filters/`:
+
+```yaml
+tool: nomad
+subcommands:
+  status:      { shape: table, cap: list_max_lines }
+  alloc-logs:  { shape: logs }
+  job-inspect: { shape: json }
+  run:         { shape: verb-group, verbs: [started, updated] }
+  version:     { shape: raw }        # already minimal — leave it alone
+default:       { shape: generic }
+```
+
+`shape` names an existing primitive, so a rule inherits the fidelity contract: cuts still
+emit `[+N more …]`, caps still come from `filters:`/`PRISM_FILTER_*`, and `prism cmd`
+still tees the raw output. Available shapes: `table` `logs` `json` `describe` `tree`
+`verb-group` `dedupe` `tail` `errors` `generic` `raw`.
+
+What YAML deliberately cannot do is express the parsing. A regex keep/drop language would
+be more expressive and strictly worse — regex can drop a line but cannot *count* what it
+dropped, and every marker in prism is arithmetic over parsed structure. So a rule handles
+a tool that prints a shape prism already understands; a genuinely new shape still needs a
+Rust filter.
+
+A rule only applies where the built-in dispatch would have fallen through to `generic`.
+Add `override: true` to take precedence over a built-in filter. `prism config --show`
+lists the rules that loaded and the files that failed, so a typo is reported rather than
+silently doing nothing.
+
 ### GraphRAG & Codebase Intelligence (`prism graph`)
 ```bash
 prism graph query "how does proxy work?"   # Query auto-detected Graphify knowledge graph
@@ -198,11 +300,34 @@ prism graph god-nodes --top 5              # Identify architectural bottleneck n
 
 ### Semantic Cache & Analytics
 ```bash
-prism cache query "prompt query"           # Sub-millisecond ANN vector lookup
-prism cache stats                          # View cache hit rate, size, and entries
+prism cache query "prompt query"           # Lexical re-rank over stored prompts, thresholded
+prism cache stats                          # Entries and store location
 prism gain                                 # Real-time token and dollar savings dashboard
 prism gain --history                       # View detailed historical command log
 ```
+
+The proxy fills the cache as it relays. Recording and serving are separate switches
+because they carry different risk:
+
+| variable | default | effect |
+|---|---|---|
+| `PRISM_CACHE_RECORD=0` | recording **on** | stop writing prompts and responses to `~/.local/share/prism/cache/` |
+| `PRISM_CACHE_SERVE=deterministic` | serving **off** | replay a cached response when the caller pinned `temperature: 0` |
+| `PRISM_CACHE_SERVE=always` | serving **off** | replay whatever matches, at any temperature |
+| `PRISM_CACHE_MIN_SIMILARITY` | 0.55 | floor for `prism cache query`; below it a match is noise |
+
+Recording never changes what the client receives — it only fills a store that was
+previously always empty. Serving *replaces* a live model call, which is why it is opt-in:
+an LLM response is not a pure function of its request, so the same question at two points
+in an agent run can have two different correct answers.
+
+Four things are never replayed, regardless of the switch: a response containing
+`tool_use`/`tool_calls` (replaying one makes the agent re-run a tool against a stale id),
+a body whose framing does not match the request (SSE to a JSON caller or the reverse), a
+non-200 response, and a body that outran the sniff buffer. Similarity hits are only ever
+*shown* — `prism cache query` and the `prism_cache_lookup` MCP tool — never auto-served;
+the serving path takes exact key matches only, where the key covers provider, model,
+system prompt, full message list, tools and sampling.
 
 ---
 

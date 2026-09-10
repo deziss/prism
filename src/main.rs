@@ -61,6 +61,11 @@ enum Args {
         #[command(subcommand)]
         cmd: cli::HookCmd,
     },
+    /// Install PATH shims so every agent's shell commands run through prism
+    Shim {
+        #[command(subcommand)]
+        cmd: cli::ShimCmd,
+    },
     Compress {
         #[arg(short, long)]
         string: Option<String>,
@@ -130,6 +135,7 @@ async fn main() -> Result<()> {
         Args::Toon { cmd } => cli::toon(cmd).await,
         Args::Count { string, file, model } => cli::count(string, file, model).await,
         Args::Hook { cmd } => cli::hook(cmd).await,
+        Args::Shim { cmd } => cli::shim(cmd).await,
         Args::Compress { string, file, ratio } => cli::compress(string, file, ratio).await,
         Args::Read { path, mode, lines, line_numbers } => {
             cli::read(path, mode, lines, line_numbers).await

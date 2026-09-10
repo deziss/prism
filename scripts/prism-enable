@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# prism-enable — make PRISM the default LLM interceptor for this user session.
+#
+# Trust model (this is where earlier versions went wrong):
+#   * NODE_EXTRA_CA_CERTS  ADDS a CA        → bare ca.crt
+#   * SSL_CERT_FILE
+#     REQUESTS_CA_BUNDLE   REPLACE the      → combined bundle (system roots + PRISM CA)
+#     CURL_CA_BUNDLE       trust store
+#   * Chromium/Electron apps and Firefox read NSS, not the OpenSSL variables and not
+#     the system store, so the CA is also added to every NSS database found.
+# Pointing the replacing variables at the bare CA leaves every client unable to verify
+# any host PRISM does not intercept, which is what broke Electron IDEs (Antigravity,
+# VS Code) while the proxy was on.
+# ==============================================================================
+set -euo pipefail
+
+CA_DIR="$HOME/.local/share/prism/ca"
+CA_PATH="$CA_DIR/ca.crt"
+BUNDLE_PATH="$CA_DIR/ca-bundle.crt"
+ENV_FILE="$HOME/.config/environment.d/10-prism.conf"
+PORT="27181"
+MCP_PORT="27182"
+HUB_PORT="27183"
+NSS_NICKNAME="PRISM Local CA"
+BLOCK_START="# >>> PRISM DEFAULT LLM PROXY >>>"
+BLOCK_END="# <<< PRISM DEFAULT LLM PROXY <<<"
+
+echo "[*] Setting PRISM as default LLM interceptor on this laptop..."
+
+if [ ! -f "$CA_PATH" ]; then
+    echo "  ! No CA at $CA_PATH — run 'prism init --global' first." >&2
+    exit 1
+fi
+
+# 1. Combined trust bundle: system roots first, PRISM CA appended.
+build_bundle() {
+    local sys=""
+    for candidate in \
+        /etc/ssl/certs/ca-certificates.crt \
+        /etc/pki/tls/certs/ca-bundle.crt \
+        /etc/ssl/ca-bundle.pem \
+        /etc/ssl/cert.pem \
+        /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+    do
+        if [ -r "$candidate" ]; then sys="$candidate"; break; fi
+    done
+    if [ -z "$sys" ]; then
+        echo "  ! No system CA bundle found; TLS verification will trust only PRISM." >&2
+        cp "$CA_PATH" "$BUNDLE_PATH"
+    else
+        cat "$sys" "$CA_PATH" > "$BUNDLE_PATH"
+        echo "  ✓ Trust bundle: $BUNDLE_PATH (system roots from $sys + PRISM CA)"
+    fi
+}
+build_bundle
+
+# 2. NSS trust for Chromium/Electron apps and Firefox profiles.
+install_nss() {
+    if ! command -v certutil > /dev/null 2>&1; then
+        echo "  ! certutil not found — install libnss3-tools so Electron IDEs and"
+        echo "    browsers trust the PRISM CA (otherwise they reject intercepted hosts)."
+        return
+    fi
+    local count=0 db
+    for db in $(prism_nss_dbs); do
+        certutil -D -d "$db" -n "$NSS_NICKNAME" > /dev/null 2>&1 || true
+        if certutil -A -d "$db" -n "$NSS_NICKNAME" -t "C,," -i "$CA_PATH" > /dev/null 2>&1; then
+            count=$((count + 1))
+        fi
+    done
+    echo "  ✓ NSS trust: $count database(s) updated"
+}
+
+prism_nss_dbs() {
+    [ -d "$HOME/.pki/nssdb" ] && echo "sql:$HOME/.pki/nssdb"
+    local prof
+    for prof in "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/; do
+        [ -f "${prof}cert9.db" ] && echo "sql:${prof%/}"
+    done
+    return 0
+}
+install_nss
+
+# 3. systemd user units for the proxy and MCP server.
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/environment.d"
+
+cat << UNIT_PROXY > "$HOME/.config/systemd/user/prism-proxy.service"
+[Unit]
+Description=PRISM Transparent LLM MITM Proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$HOME/.local/bin/prism serve --port $PORT
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=info
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
+UNIT_PROXY
+
+cat << UNIT_MCP > "$HOME/.config/systemd/user/prism-mcp.service"
+[Unit]
+Description=PRISM Model Context Protocol (MCP) Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$HOME/.local/bin/prism mcp --port $MCP_PORT
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=info
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
+UNIT_MCP
+
+systemctl --user daemon-reload
+systemctl --user enable --now prism-proxy.service prism-mcp.service
+echo "  ✓ Services: prism-proxy (:$PORT), prism-mcp (:$MCP_PORT)"
+
+# 4. Session environment (affects desktop apps started after the next login).
+cat << ENV_CONF > "$ENV_FILE"
+# PRISM System Proxy Configuration (Port $PORT)
+HTTP_PROXY=http://127.0.0.1:$PORT
+HTTPS_PROXY=http://127.0.0.1:$PORT
+http_proxy=http://127.0.0.1:$PORT
+https_proxy=http://127.0.0.1:$PORT
+ALL_PROXY=http://127.0.0.1:$PORT
+all_proxy=http://127.0.0.1:$PORT
+NO_PROXY=localhost,127.0.0.1,::1,.local,.internal
+no_proxy=localhost,127.0.0.1,::1,.local,.internal
+PRISM_HUB_URL=http://127.0.0.1:$HUB_PORT
+
+# Adds a CA (bare cert is correct here)
+NODE_EXTRA_CA_CERTS=$CA_PATH
+# Replace the trust store — must be the combined bundle, never the bare CA
+REQUESTS_CA_BUNDLE=$BUNDLE_PATH
+CURL_CA_BUNDLE=$BUNDLE_PATH
+SSL_CERT_FILE=$BUNDLE_PATH
+ENV_CONF
+echo "  ✓ Environment: $ENV_FILE"
+
+# 5. Shell rc block for interactive shells.
+PAYLOAD="
+$BLOCK_START
+# PRISM System Proxy Configuration (Port $PORT)
+export HTTP_PROXY=\"http://127.0.0.1:$PORT\"
+export HTTPS_PROXY=\"http://127.0.0.1:$PORT\"
+export http_proxy=\"http://127.0.0.1:$PORT\"
+export https_proxy=\"http://127.0.0.1:$PORT\"
+export ALL_PROXY=\"http://127.0.0.1:$PORT\"
+export all_proxy=\"http://127.0.0.1:$PORT\"
+export NO_PROXY=\"localhost,127.0.0.1,::1,.local,.internal\"
+export no_proxy=\"localhost,127.0.0.1,::1,.local,.internal\"
+
+# CA trust: NODE_EXTRA_CA_CERTS adds, the rest replace — see prism-enable header
+export NODE_EXTRA_CA_CERTS=\"$CA_PATH\"
+export REQUESTS_CA_BUNDLE=\"$BUNDLE_PATH\"
+export CURL_CA_BUNDLE=\"$BUNDLE_PATH\"
+export SSL_CERT_FILE=\"$BUNDLE_PATH\"
+
+# PRISM Aliases
+alias p=\"prism\"
+alias prtk=\"prism cmd\"
+alias pread=\"prism read\"
+alias ptoon=\"prism toon\"
+alias pcomp=\"prism compress\"
+alias pgraph=\"prism graph\"
+alias pcache=\"prism cache\"
+alias pgain=\"prism gain\"
+$BLOCK_END"
+
+for RC in "$HOME/.bashrc" "$HOME/.profile"; do
+    if [ -f "$RC" ]; then
+        sed -i "/$BLOCK_START/,/$BLOCK_END/d" "$RC"
+        echo "$PAYLOAD" >> "$RC"
+        echo "  ✓ Updated $RC"
+    fi
+done
+
+cat << SUMMARY
+
+==========================================================================
+  [✓] PRISM is now the default LLM interceptor for this user.
+  - Proxy:        127.0.0.1:$PORT (systemd --user: prism-proxy)
+  - MCP server:   127.0.0.1:$MCP_PORT (systemd --user: prism-mcp)
+  - Trust bundle: $BUNDLE_PATH
+  - Environment:  $ENV_FILE
+
+  Only provider API hosts are intercepted. Loopback traffic is tunnelled
+  untouched except on local model ports (11434, 1234) — override with
+  PRISM_LOCAL_AI_PORTS.
+
+  Desktop apps read environment.d at login, so log out and back in (or
+  restart the app) for GUI editors to pick this up.
+
+  Reload this shell:  source ~/.bashrc
+  Disable everything: prism-disable
+==========================================================================
+SUMMARY

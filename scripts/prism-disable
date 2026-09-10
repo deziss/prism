@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# prism-disable — remove PRISM from the session: stop the daemons, drop the proxy
+# environment, and remove the CA from the NSS trust databases.
+# ==============================================================================
+set -euo pipefail
+
+CA_DIR="$HOME/.local/share/prism/ca"
+ENV_FILE="$HOME/.config/environment.d/10-prism.conf"
+NSS_NICKNAME="PRISM Local CA"
+BLOCK_START="# >>> PRISM DEFAULT LLM PROXY >>>"
+BLOCK_END="# <<< PRISM DEFAULT LLM PROXY <<<"
+# also clear the block written by `prism init --global`
+INIT_START="# PRISM — transparent LLM proxy (added by \`prism init --global\`)"
+INIT_END="# end PRISM"
+
+echo "[*] Disabling PRISM default LLM interceptor..."
+
+# 1. Stop and disable the user services.
+for svc in prism-proxy.service prism-mcp.service; do
+    if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
+        systemctl --user stop "$svc"
+    fi
+    if systemctl --user is-enabled --quiet "$svc" 2>/dev/null; then
+        systemctl --user disable "$svc"
+    fi
+done
+echo "  ✓ Stopped & disabled prism-proxy and prism-mcp."
+
+# 2. Remove the session environment.
+if [ -f "$ENV_FILE" ]; then
+    rm -f "$ENV_FILE"
+    echo "  ✓ Removed $ENV_FILE"
+fi
+
+# 3. Clean the shell rc blocks.
+for RC in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
+    if [ -f "$RC" ]; then
+        sed -i "/$BLOCK_START/,/$BLOCK_END/d" "$RC"
+        sed -i "\|$INIT_START|,/$INIT_END/d" "$RC"
+        echo "  ✓ Cleaned $RC"
+    fi
+done
+
+# 4. Remove the CA from NSS databases, so browsers and Electron apps stop trusting
+#    a proxy that is no longer running.
+if command -v certutil > /dev/null 2>&1; then
+    count=0
+    dbs=""
+    [ -d "$HOME/.pki/nssdb" ] && dbs="sql:$HOME/.pki/nssdb"
+    for prof in "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/; do
+        [ -f "${prof}cert9.db" ] && dbs="$dbs sql:${prof%/}"
+    done
+    for db in $dbs; do
+        if certutil -D -d "$db" -n "$NSS_NICKNAME" > /dev/null 2>&1; then
+            count=$((count + 1))
+        fi
+    done
+    echo "  ✓ NSS trust: removed from $count database(s)"
+fi
+
+cat << SUMMARY
+
+==========================================================================
+  [✓] PRISM disabled. The CA and trust bundle are kept at
+      $CA_DIR
+      so 'prism-enable' can restore everything without a re-init.
+
+  This shell still has the old exports — start a new shell (or run
+  'unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+   SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS').
+
+  GUI apps read environment.d at login: log out and back in, or restart
+  the app, for them to stop using the proxy.
+
+  To remove the system-store CA as well:
+      sudo rm -f /usr/local/share/ca-certificates/prism.crt
+      sudo update-ca-certificates --fresh
+==========================================================================
+SUMMARY

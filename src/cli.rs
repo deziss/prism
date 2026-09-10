@@ -87,6 +87,22 @@ pub enum ToonCmd {
 }
 
 #[derive(Parser, Debug)]
+pub enum ShimCmd {
+    /// Write a PATH shim for every filtered tool present on this machine
+    Install {
+        /// Also add the PATH line to your shell rc files
+        #[arg(long)]
+        path: bool,
+    },
+    /// Remove the shims prism generated
+    Uninstall,
+    /// Show whether the shims are installed and actually winning the PATH lookup
+    Status,
+    /// Print the shim directory
+    Path,
+}
+
+#[derive(Parser, Debug)]
 pub enum HookCmd {
     Install,
     Validate,
@@ -94,9 +110,7 @@ pub enum HookCmd {
 }
 
 fn data_dir() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("prism")
+    crate::prism_data_dir()
 }
 
 // --- init ---
@@ -113,8 +127,25 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
     println!("  CA cert:      {}", ca_path.display());
 
     if global {
+        // A combined bundle (system roots + PRISM CA): `SSL_CERT_FILE` and friends
+        // replace the trust store, so they must never point at the bare CA.
+        let bundle = crate::proxy::ensure_ca_bundle(&ca.cert_pem)?;
+        println!("  CA bundle:    {}", bundle.display());
+
         // Write env vars to shell rc files
-        write_shell_env(ca_path.to_str().unwrap_or(""))?;
+        write_shell_env(ca_path.to_str().unwrap_or(""), bundle.to_str().unwrap_or(""))?;
+
+        // Chromium/Electron apps (VS Code, Antigravity, …) and Firefox read NSS, not
+        // the system store — without this they reject every intercepted host.
+        match crate::proxy::install_ca_nss(&ca.cert_pem) {
+            Ok(dbs) if !dbs.is_empty() => {
+                println!("  NSS trust:    {} database(s) updated", dbs.len())
+            }
+            Ok(_) => println!(
+                "  NSS trust:    no NSS database found (install libnss3-tools if an IDE or browser rejects certs)"
+            ),
+            Err(e) => println!("  NSS trust:    failed: {}", e),
+        }
 
         // Try to install CA to system trust store (requires sudo)
         match crate::proxy::install_ca_system(&ca.cert_pem) {
@@ -169,18 +200,24 @@ pub async fn guide(topic: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn write_shell_env(ca_cert_path: &str) -> Result<()> {
+fn write_shell_env(ca_cert_path: &str, ca_bundle_path: &str) -> Result<()> {
+    // NODE_EXTRA_CA_CERTS *adds* a CA, so it takes the bare cert. SSL_CERT_FILE,
+    // REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE *replace* the trust store, so they take
+    // the combined bundle — with the bare CA there, nothing on the machine can verify
+    // a host PRISM does not intercept.
     let block = format!(
         "\n# PRISM — transparent LLM proxy (added by `prism init --global`)\n\
          export HTTP_PROXY=http://localhost:27181\n\
          export HTTPS_PROXY=http://localhost:27181\n\
-         export NO_PROXY=localhost,127.0.0.1\n\
+         export NO_PROXY=localhost,127.0.0.1,::1\n\
          export PRISM_HUB_URL=http://localhost:27183\n\
          export NODE_EXTRA_CA_CERTS={ca}\n\
-         export REQUESTS_CA_BUNDLE={ca}\n\
-         export SSL_CERT_FILE={ca}\n\
+         export REQUESTS_CA_BUNDLE={bundle}\n\
+         export CURL_CA_BUNDLE={bundle}\n\
+         export SSL_CERT_FILE={bundle}\n\
          # end PRISM\n",
-        ca = ca_cert_path
+        ca = ca_cert_path,
+        bundle = ca_bundle_path
     );
 
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
@@ -335,6 +372,14 @@ pub async fn read(
 
 // --- cache ---
 pub async fn cache(cmd: CacheCmd) -> Result<()> {
+    // sled locks its directory, so the CLI cannot read the store while `prism serve`
+    // holds it. Say so — every command below would otherwise report an empty cache,
+    // which is a different answer from an unreachable one.
+    if let Some(e) = crate::cache::open_error() {
+        anyhow::bail!(
+            "cache unavailable: {e}\n  the store is locked while `prism serve` is running — stop it, or read the cache from the proxy's own MCP endpoint."
+        );
+    }
     match cmd {
         CacheCmd::Stats => {
             let stats = crate::cache::get_cache_stats();
@@ -353,8 +398,9 @@ pub async fn cache(cmd: CacheCmd) -> Result<()> {
                 println!("No cached entries found for: {}", query);
             } else {
                 println!("Cache matches for '{}':\n", query);
-                for (i, entry) in results.iter().enumerate() {
-                    println!("  [{}] hash: {} | model: {}", i + 1, entry.key_hash, entry.model.as_deref().unwrap_or("unknown"));
+                for (i, hit) in results.iter().enumerate() {
+                    let entry = &hit.entry;
+                    println!("  [{}] {:.0}% match | hash: {} | model: {}", i + 1, hit.score * 100.0, entry.key_hash, entry.model.as_deref().unwrap_or("unknown"));
                     let preview = if entry.response.len() > 150 { &entry.response[..150] } else { &entry.response };
                     println!("      {}\n", preview);
                 }
@@ -375,6 +421,7 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
         println!("\n  PRISM Configuration");
         println!("  {}", "═".repeat(40));
         println!("{}", crate::config::config_to_json(&global_cfg));
+        print_filter_rules();
     } else if let (Some(key), Some(val)) = (cmd.set_key, cmd.set_val) {
         let mut cfg = global_cfg;
         match key.as_str() {
@@ -502,59 +549,159 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
     use std::io::Write;
 
     if args.is_empty() {
-        anyhow::bail!("Usage: prism <cmd> [args...]");
+        anyhow::bail!("Usage: prism cmd <cmd> [args...]");
     }
 
     let cmd = &args[0];
 
-    // Run actual command
-    let mut c = Command::new(cmd);
-    c.args(&args[1..]);
-    let output = c.output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // When a person is watching, hand the tool through untouched — same stdio, same
+    // colours, same interactivity. Filtering exists for the agent reading a pipe, and a
+    // captured `git rebase -i` or `docker run -it` is a broken command, not a saving.
+    let depth: u32 = std::env::var("PRISM_SHIM_DEPTH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if !crate::shim::should_filter(crate::shim::mode(), stdout_is_tty, depth) {
+        let status = match child_command(cmd, &args[1..]).status() {
+            Ok(s) => s,
+            Err(e) => anyhow::bail!("prism cmd: failed to run `{}`: {}", cmd, e),
+        };
+        std::process::exit(status.code().unwrap_or(1));
+    }
 
-    let raw_text = if stdout.is_empty() && !stderr.is_empty() {
-        stderr.to_string()
-    } else if !stderr.is_empty() && !output.status.success() {
-        format!("{}\n{}", stdout, stderr)
-    } else {
-        stdout.clone()
+    // Capture, but leave stdin connected: `echo '{}' | prism cmd jq .` must still work,
+    // and `Command::output()` would silently hand the child an empty stdin.
+    let mut c = child_command(cmd, &args[1..]);
+    c.stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = match c.spawn().and_then(|ch| ch.wait_with_output()) {
+        Ok(o) => o,
+        Err(e) => anyhow::bail!("prism cmd: failed to run `{}`: {}", cmd, e),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    // Filters always see both streams (cargo/npm/pytest write diagnostics to stderr
+    // even on success); stdout first so tabular parsers stay aligned.
+    let raw_text = match (stdout.is_empty(), stderr.is_empty()) {
+        (true, _) => stderr.clone(),
+        (false, true) => stdout.clone(),
+        (false, false) => format!("{}\n{}", stdout.trim_end_matches('\n'), stderr),
     };
 
-    // Filter output through RTK-compatible filters
+    // Filter output through the tool-family filters
     let filtered = crate::filter::filter_output(&raw_text, cmd, &args[1..]);
-    let _ = std::io::stdout().write_all(filtered.as_bytes());
-    if !filtered.ends_with('\n') && !filtered.is_empty() {
-        let _ = std::io::stdout().write_all(b"\n");
-    }
+    let truncated = crate::filter::has_truncation(&filtered);
+    let failed = !output.status.success();
 
-    // Track tokens
-    if let Ok(tokens) = crate::analytics::count_tokens(&filtered, "gpt-4") {
-        crate::analytics::record_command(cmd, filtered.len(), tokens).ok();
-    }
+    // Tee raw output whenever the filter dropped something or the command failed, so
+    // every `[+N more …]` marker is recoverable from disk. Nothing to recover when the
+    // command printed nothing — teeing then would only add noise to the output.
+    // Only when something was actually held back: a failing command whose output the
+    // filter passed through verbatim has nothing to recover, and the notice would then
+    // be the single most expensive line in the output.
+    let compacted = filtered.len() + 512 < raw_text.len();
+    let tee_path = if !raw_text.trim().is_empty() && (truncated || compacted) {
+        tee_raw(cmd, &args[1..], output.status.code(), &stdout, &stderr)
+    } else {
+        None
+    };
 
-    // RTK-style Failure Tee Mechanism: preserve raw output on command failure
-    if !output.status.success() {
-        let tee_dir = crate::prism_data_dir().join("tee");
-        if std::fs::create_dir_all(&tee_dir).is_ok() {
-            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-            let safe_cmd: String = cmd.chars().filter(|c| c.is_alphanumeric()).collect();
-            let tee_file = tee_dir.join(format!("{}_{}.log", safe_cmd, ts));
-            let raw_combined = format!(
-                "COMMAND: {} {:?}\nEXIT CODE: {}\n\n--- RAW STDOUT ---\n{}\n\n--- RAW STDERR ---\n{}",
-                cmd, &args[1..], output.status.code().unwrap_or(-1), stdout, stderr
-            );
-            let _ = std::fs::write(&tee_file, raw_combined);
-            eprintln!(
-                "[prism] Command failed (exit code {}). Raw output preserved at: {}",
-                output.status.code().unwrap_or(1),
-                tee_file.display()
-            );
+    let mut out = filtered.into_owned();
+    if !out.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    if truncated {
+        if let Some(p) = &tee_path {
+            out.push_str(&format!("↳ {}\n", p.display()));
+        }
+    }
+    let _ = std::io::stdout().write_all(out.as_bytes());
+
+    // Record size, not an exact token count: a PATH shim puts this on the critical path
+    // of every command, and loading the cl100k table to fill in a dashboard statistic
+    // measured 0.54s per invocation. `prism gain` approximates at report time.
+    crate::analytics::record_command(cmd, raw_text.len(), out.len()).ok();
+
+    // One terse line, and only when it points at something: a bare exit code is
+    // already visible to the caller through the process status.
+    if failed && !truncated {
+        if let Some(p) = &tee_path {
+            eprintln!("[prism] exit {}; raw: {}", output.status.code().unwrap_or(-1), p.display());
         }
     }
 
-    std::process::exit(output.status.code().unwrap_or(0))
+    std::process::exit(output.status.code().unwrap_or(if failed { 1 } else { 0 }))
+}
+
+
+/// Build the child process for `prism cmd`.
+///
+/// The shim directory is dropped from the child's `PATH`, which is what stops
+/// `prism cmd git` from finding prism's own `git` shim and recursing forever. Resolution
+/// is left to `PATH` rather than baked in at install time, so version managers (nvm,
+/// rbenv, pyenv) still choose the binary. `PRISM_SHIM_DEPTH` is an independent guard for
+/// any path that sanitising misses.
+fn child_command(cmd: &str, rest: &[String]) -> Command {
+    let mut c = Command::new(cmd);
+    c.args(rest);
+    if let Ok(path) = std::env::var("PATH") {
+        c.env("PATH", crate::shim::strip_from_path(&path));
+    }
+    c.env("PRISM_SHIM_DEPTH", "1");
+    c
+}
+
+/// Write raw stdout/stderr to `<data>/tee/<unix_ts>_<cmd>_<args>.log`, keeping at most
+/// `TEE_MAX_FILES` files. Returns the path on success.
+fn tee_raw(cmd: &str, args: &[String], code: Option<i32>, stdout: &str, stderr: &str) -> Option<std::path::PathBuf> {
+    const TEE_MAX_FILES: usize = 50;
+    let tee_dir = crate::prism_data_dir().join("tee");
+    std::fs::create_dir_all(&tee_dir).ok()?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut slug: String = std::iter::once(cmd.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("_")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    slug.truncate(60);
+    let path = tee_dir.join(format!("{}_{}.log", ts, slug.trim_matches('_')));
+
+    let header = format!(
+        "# prism cmd {} {}\n# exit: {}\n",
+        cmd,
+        args.join(" "),
+        code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+    );
+    let body = if stderr.is_empty() {
+        format!("{}{}", header, stdout)
+    } else {
+        format!("{}{}\n# --- stderr ---\n{}", header, stdout.trim_end_matches('\n'), stderr)
+    };
+    std::fs::write(&path, body).ok()?;
+
+    // Rotate: drop oldest beyond the cap
+    if let Ok(rd) = std::fs::read_dir(&tee_dir) {
+        let mut files: Vec<std::path::PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|e| e == "log").unwrap_or(false))
+            .collect();
+        if files.len() > TEE_MAX_FILES {
+            files.sort();
+            for old in &files[..files.len() - TEE_MAX_FILES] {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+    }
+    Some(path)
 }
 
 // --- helpers ---
@@ -564,5 +711,91 @@ async fn init_data_dirs() -> Result<()> {
     std::fs::create_dir_all(data_dir.join("graph"))?;
     std::fs::create_dir_all(data_dir.join("cache"))?;
     std::fs::create_dir_all(data_dir.join("analytics"))?;
+    Ok(())
+}
+
+/// Report the state of `~/.config/prism/filters/*.yaml`.
+///
+/// A rule file that fails to parse is skipped rather than fatal — one typo must not
+/// disable the rules that do load — so the only way a user learns about it is here.
+fn print_filter_rules() {
+    let rules = crate::filter::loaded_rules();
+    let n = rules.tools().len();
+    println!();
+    println!("  Filter rules ({})", n);
+    println!("  {}", "─".repeat(40));
+    if n == 0 && rules.errors.is_empty() {
+        println!("  none — drop a YAML file in ~/.config/prism/filters/ to add one");
+    }
+    for tool in rules.tools() {
+        println!("  {}", tool);
+    }
+    for e in &rules.errors {
+        eprintln!("  error: {}", e);
+    }
+}
+
+// --- shim (PATH interception for every client) ---
+pub async fn shim(cmd: ShimCmd) -> Result<()> {
+    use crate::shim as sh;
+    match cmd {
+        ShimCmd::Install { path: true } => {
+            // hook::install writes the shims and the marked rc block together.
+            crate::hook::install(true).await?;
+            let st = sh::status();
+            println!("  Mode:         {:?} (PRISM_SHIM=auto|always|off)", st.mode);
+            println!("  auto filters only when stdout is a pipe, so your own terminal keeps raw output.");
+        }
+        ShimCmd::Install { path: false } => {
+            let r = sh::install()?;
+            println!("Installed {} shims in {}", r.written.len(), r.dir.display());
+            if let Some(vol) = &r.volatile_binary {
+                println!();
+                println!("  WARNING: these shims point at a build directory:");
+                println!("    {}", vol.display());
+                println!("  `cargo clean` or moving the repo breaks every shimmed command.");
+                println!("  Install to a stable path first:");
+                println!("    cp {} ~/.local/bin/prism && ~/.local/bin/prism shim install --path", vol.display());
+            }
+            if !r.absent.is_empty() {
+                println!("  skipped {} tools not installed here", r.absent.len());
+            }
+            let st = sh::status();
+            if st.active {
+                println!("  PATH: active");
+            } else {
+                println!();
+                println!("  Not yet active — the shims must come first on PATH. Add this to your shell rc:");
+                println!("    {}", sh::path_line());
+                println!();
+                println!("  GUI-launched editors do not read your shell rc. Set it in the client instead:");
+                println!("    Claude Code    ~/.claude/settings.json   {{\"env\": {{\"PATH\": \"{}:${{PATH}}\"}}}}", sh::shim_dir().display());
+                println!("    Cursor/VS Code settings.json             \"terminal.integrated.env.linux\": {{\"PATH\": \"{}:${{env:PATH}}\"}}", sh::shim_dir().display());
+                println!("    anything else  export PATH before launching it");
+            }
+            println!();
+            println!("  Mode: {:?} (PRISM_SHIM=auto|always|off).", sh::mode());
+            println!("  auto filters only when stdout is a pipe, so your own terminal keeps raw output.");
+        }
+        ShimCmd::Uninstall => {
+            let n = sh::uninstall()?;
+            println!("Removed {n} shims.");
+            println!("Also remove the PATH line from your shell rc / client config if you added one.");
+        }
+        ShimCmd::Status => {
+            let st = sh::status();
+            println!("\n  PRISM shims");
+            println!("  {}", "═".repeat(40));
+            println!("  Directory: {}", st.dir.display());
+            println!("  Installed: {}", st.installed);
+            println!("  On PATH:   {}", if st.active { "yes (first — shims win)" } else { "no (or not first — shims are inert)" });
+            println!("  Mode:      {:?}", st.mode);
+            if st.installed > 0 && !st.active {
+                println!();
+                println!("  Add to your shell rc:  {}", sh::path_line());
+            }
+        }
+        ShimCmd::Path => println!("{}", sh::shim_dir().display()),
+    }
     Ok(())
 }

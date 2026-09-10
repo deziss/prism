@@ -172,6 +172,60 @@ prism mcp --port 27184
 
 ---
 
+## Shims: a command hangs, or every command broke
+
+### Symptom
+
+After `prism shim install`, an interactive command (`git rebase -i`, `docker run -it`)
+produces no output — or every command fails with "No such file or directory".
+
+### Root Cause
+
+Two different problems.
+
+A hanging interactive command means output is being captured when a person is reading it.
+`PRISM_SHIM=auto` (the default) only filters when stdout is a *pipe*, so this should not
+happen at a terminal; it will happen if you set `PRISM_SHIM=always`.
+
+"No such file or directory" on every command means the shims point at a binary that no
+longer exists — almost always because they were installed from `target/debug` or
+`target/release` and the repo was later cleaned or moved. `prism shim install` warns when
+it detects this, but the warning is easy to miss.
+
+### Fix
+
+```bash
+# interactive command captured:
+PRISM_SHIM=off git rebase -i        # one command
+export PRISM_SHIM=off               # this shell
+
+# shims point at a deleted binary — recover PATH first, then reinstall from a stable path:
+export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/prism/shims$' | paste -sd:)
+cargo build --release
+cp target/release/prism ~/.local/bin/prism
+~/.local/bin/prism shim install --path
+```
+
+`prism shim status` reports whether the shims are installed and whether they are actually
+first on `PATH`. `prism shim uninstall` removes them and the shell-rc block.
+
+## Cache: "cache unavailable ... could not acquire lock"
+
+### Symptom
+
+`prism cache stats` or `prism cache query` exits non-zero with a lock error.
+
+### Root Cause
+
+sled takes an exclusive lock on its directory, and `prism serve` holds it for the whole
+time the proxy is running. This is reported rather than silently shown as an empty cache,
+because "no entries" and "cannot read the store" are different answers.
+
+### Fix
+
+Stop `prism serve`, or query through the proxy's own MCP endpoint (`prism_cache_lookup`)
+instead of the CLI.
+
 ## Proxy: TLS handshake fails / SSL_ERROR_SYSCALL
 
 ### Symptom
@@ -231,13 +285,33 @@ PRISM presents a certificate it signs itself. Clients must trust the PRISM CA.
 sudo cp ~/.local/share/prism/ca/ca.crt /usr/local/share/ca-certificates/prism.crt
 sudo update-ca-certificates
 
-# Runtimes that use their own bundle
-export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt   # Node
-export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca.crt    # Python requests
-export SSL_CERT_FILE=~/.local/share/prism/ca/ca.crt         # OpenSSL
+# Runtimes that use their own bundle.
+# NODE_EXTRA_CA_CERTS *adds* a CA, so it takes the bare cert:
+export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt          # Node
+# The rest *replace* the trust store, so they take the combined bundle
+# (system roots + PRISM CA) that `prism init --global` writes:
+export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt    # Python requests
+export CURL_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt        # curl
+export SSL_CERT_FILE=~/.local/share/prism/ca/ca-bundle.crt         # OpenSSL
 
-# Firefox and Chrome keep separate stores — import ca.crt in their settings.
+# Chromium/Electron apps (VS Code, Antigravity, Chrome) and Firefox read NSS —
+# not the variables above and not the system store:
+sudo apt install libnss3-tools
+certutil -A -d sql:$HOME/.pki/nssdb -n "PRISM Local CA" -t C,, \
+         -i ~/.local/share/prism/ca/ca.crt
 ```
+
+> **Pointing `SSL_CERT_FILE` at the bare `ca.crt` breaks every client.** Those
+> variables replace the CA set rather than extending it, so with only the PRISM CA
+> installed, any host PRISM does *not* intercept (an IDE's auth, telemetry, update
+> and marketplace endpoints) fails verification. That is the classic
+> "works after `prism-off` + restart" symptom. `prism-enable` and
+> `prism init --global` now always write `ca-bundle.crt` here.
+
+### Only some apps fail
+Loopback traffic is tunnelled untouched except on local model ports (`11434`,
+`1234`; override with `PRISM_LOCAL_AI_PORTS`). If a local service still breaks,
+check that its port is not in that list.
 
 Note `--upstream` on `prism serve` is accepted but ignored. PRISM is a MITM
 `CONNECT` proxy that routes by request hostname, not a reverse proxy to one

@@ -1,0 +1,13 @@
+file,raw_tok,rtk_agg_tok,prism_skel_tok,rtk_pct,prism_pct,raw_fns,rtk_fns,prism_fns
+src/filter/common.rs,5354,1410,1014,73.7,81.1,38,38,38
+src/filter/cloud.rs,21313,5215,2635,75.5,87.6,104,101,104
+src/proxy.rs,17717,5494,2361,69.0,86.7,68,68,68
+src/cli.rs,5160,1148,637,77.8,87.7,19,19,19
+src/mcp.rs,6824,1740,454,74.5,93.3,14,14,14
+src/reader.rs,15322,2231,1544,85.4,89.9,61,45,61
+src/analytics.rs,2971,702,643,76.4,78.4,16,16,16
+src/compress.rs,4127,1237,482,70.0,88.3,18,18,18
+src/memory.rs,2854,973,632,65.9,77.9,24,24,24
+src/cache.rs,2508,1210,694,51.8,72.3,24,25,24
+src/encode.rs,2507,604,335,75.9,86.6,12,12,12
+README.md,2780,2780,817,0.0,70.6,0,0,0

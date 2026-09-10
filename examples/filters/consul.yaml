@@ -1,0 +1,6 @@
+tool: consul
+subcommands:
+  members: { shape: table }
+  catalog: { shape: table }
+  monitor: { shape: logs }
+default:   { shape: generic }
