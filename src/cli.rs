@@ -428,6 +428,38 @@ pub async fn memory(cmd: MemoryCmd) -> Result<()> {
     }
 }
 
+/// The two hub-policy features, resolved.
+///
+/// The JSON above prints `null` for a flag no layer states, which does not answer the
+/// question a user actually has after `prism graph` refused — is it on? — nor say where
+/// the answer came from.
+fn print_hub_feature_state(cfg: &crate::config::PrismConfig) {
+    let state = |stated: Option<bool>, effective: bool| {
+        format!(
+            "{:<8}  ({})",
+            if effective { "enabled" } else { "disabled" },
+            match stated {
+                Some(v) => format!("set to {v} by a config layer"),
+                None => "not set by any layer — default".to_string(),
+            }
+        )
+    };
+    println!("\n  Hub-policy features");
+    println!("  {}", "─".repeat(40));
+    println!(
+        "  GraphRAG       (prism graph)  {}",
+        state(cfg.graph_enabled, cfg.graph_enabled())
+    );
+    println!(
+        "  Semantic cache (prism cache)  {}",
+        state(cfg.cache_enabled, cfg.cache_enabled())
+    );
+    if !cfg.graph_enabled() || !cfg.cache_enabled() {
+        println!("  Enabled by policy from a licensed PRISM Hub:");
+        println!("    prism hub enroll --url <hub> --token <join-token>");
+    }
+}
+
 // --- graph ---
 pub async fn graph(cmd: GraphCmd) -> Result<()> {
     graph_gated(cmd, crate::knowledge::graph_enabled()).await
@@ -635,6 +667,7 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
         println!("\n  PRISM Configuration");
         println!("  {}", "═".repeat(40));
         println!("{}", crate::config::config_to_json(&effective));
+        print_hub_feature_state(&effective);
         print_filter_rules();
     } else if let (Some(key), Some(val)) = (cmd.set_key, cmd.set_val) {
         let mut cfg = crate::config::load_global().unwrap_or_default();

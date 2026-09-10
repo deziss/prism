@@ -58,9 +58,10 @@ pub fn graph_enabled() -> bool {
 
 /// Fail with the enrolment hint when GraphRAG is off.
 ///
-/// Used by the operations that never reach [`find_active_graph`] — `index`, `import`,
-/// `extract`, `export` — and once at the top of `cli::graph`, so all nine `prism graph`
-/// subcommands report the same thing and exit non-zero rather than doing half a job.
+/// For the operations that never reach [`find_active_graph`] and so are not covered by
+/// its gate: `index`, `import`, `extract`, `export`, `stats`, `search_graph_with_path`,
+/// the CRAG fallback in `query_graph`, and the MCP graph tools. `cli::graph` states the
+/// same refusal once for all nine subcommands.
 pub fn ensure_enabled() -> Result<()> {
     if graph_enabled() {
         return Ok(());
