@@ -123,7 +123,15 @@ pub struct MemoryPalace {
     pub recall_blocks: Vec<MemoryBlock>,
     pub core_blocks: Vec<MemoryBlock>,
     pub archive_blocks: Vec<MemoryBlock>,
-    pub semantic_cache: SemanticCache,
+    /// The semantic cache, when it is enabled.
+    ///
+    /// `None` is the community case. The Memory Palace is free and its three layers do
+    /// not depend on this — but the fallback in [`MemoryPalace::search`] reads the
+    /// *cache* store, which is a hub feature, and `SemanticCache::new` creates and locks
+    /// `<data>/cache/sled` just by being constructed. Opening it unconditionally would
+    /// have made `prism memory` both a way around the gate and the reason the cache
+    /// directory appears on a machine that has the cache switched off.
+    pub semantic_cache: Option<SemanticCache>,
 }
 
 impl MemoryPalace {
@@ -137,7 +145,11 @@ impl MemoryPalace {
             recall_blocks: Self::load_layer(&data_dir, "recall")?,
             core_blocks: Self::load_layer(&data_dir, "core")?,
             archive_blocks: Self::load_layer(&data_dir, "archive")?,
-            semantic_cache: SemanticCache::new(data_dir)?,
+            semantic_cache: if crate::cache::is_enabled() {
+                Some(SemanticCache::new(data_dir)?)
+            } else {
+                None
+            },
         };
         palace.load_cache()?;
         Ok(palace)
@@ -190,8 +202,12 @@ impl MemoryPalace {
             .collect();
 
         if results.is_empty() {
-            // Return cached entries as memory blocks
-            self.semantic_cache
+            // Return cached entries as memory blocks — only when the semantic cache is
+            // enabled, since these are its rows and not the Memory Palace's own.
+            let Some(cache) = self.semantic_cache.as_ref() else {
+                return Vec::new();
+            };
+            cache
                 .find_similar(query, max_results)
                 .into_iter()
                 .map(|hit| MemoryBlock {
@@ -403,4 +419,61 @@ pub async fn compact() -> anyhow::Result<()> {
     let after = palace.count(MemoryLayer::Recall);
     println!("Memory compacted: recall {} → {} blocks", before, after);
     Ok(())
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    /// The Memory Palace is free and must keep working with the semantic cache off —
+    /// but it must not become a way around the gate. It opens the *same*
+    /// `<data>/cache/sled` store the cache uses, so an unconditional
+    /// `SemanticCache::new` would both create that directory on a machine with the
+    /// cache disabled and serve its rows back through `prism memory search`.
+    #[test]
+    fn memory_search_works_without_the_cache_and_does_not_read_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "prism-memory-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut palace = MemoryPalace::new(dir.clone()).expect("memory needs no cache to open");
+
+        if crate::cache::is_enabled() {
+            // This machine has policy enabling the cache; the gate is not under test.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        assert!(
+            palace.semantic_cache.is_none(),
+            "the cache store must not be opened when the cache is disabled"
+        );
+        assert!(
+            !dir.join("cache").join("sled").exists(),
+            "…and therefore must not be created"
+        );
+
+        // All three layers still save and search — the free feature is intact.
+        palace.save(
+            MemoryLayer::Core,
+            "the proxy keys on the original body",
+            "notes",
+        );
+        let hits = palace.search("proxy keys original body", 5);
+        assert!(!hits.is_empty(), "keyword search must still work");
+
+        // A query that matches nothing returns nothing, rather than falling back to
+        // cache rows.
+        assert!(
+            palace
+                .search("kubernetes ingress annotations", 5)
+                .is_empty()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
