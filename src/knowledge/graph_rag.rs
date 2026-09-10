@@ -1,4 +1,3 @@
-
 /// Graphify NetworkX graph.json format representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphifyJson {
@@ -66,8 +65,16 @@ impl From<NodeExplanation<'_>> for NodeExplanationOwned {
     fn from(e: NodeExplanation<'_>) -> Self {
         NodeExplanationOwned {
             node: e.node,
-            outgoing: e.outgoing.into_iter().map(|(n, k, w)| (n.clone(), k, w)).collect(),
-            incoming: e.incoming.into_iter().map(|(n, k, w)| (n.clone(), k, w)).collect(),
+            outgoing: e
+                .outgoing
+                .into_iter()
+                .map(|(n, k, w)| (n.clone(), k, w))
+                .collect(),
+            incoming: e
+                .incoming
+                .into_iter()
+                .map(|(n, k, w)| (n.clone(), k, w))
+                .collect(),
         }
     }
 }
@@ -106,13 +113,17 @@ pub enum GraphNodeKind {
 
 impl std::fmt::Display for GraphNodeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            GraphNodeKind::File => "file",
-            GraphNodeKind::Function => "func",
-            GraphNodeKind::Class => "class",
-            GraphNodeKind::Import => "import",
-            GraphNodeKind::Symbol => "symbol",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                GraphNodeKind::File => "file",
+                GraphNodeKind::Function => "func",
+                GraphNodeKind::Class => "class",
+                GraphNodeKind::Import => "import",
+                GraphNodeKind::Symbol => "symbol",
+            }
+        )
     }
 }
 
@@ -139,15 +150,19 @@ pub enum EdgeKind {
 
 impl std::fmt::Display for EdgeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            EdgeKind::Imports => "imports",
-            EdgeKind::Calls => "calls",
-            EdgeKind::References => "references",
-            EdgeKind::Inherits => "inherits",
-            EdgeKind::Implements => "implements",
-            EdgeKind::Depends => "depends",
-            EdgeKind::Contains => "contains",
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                EdgeKind::Imports => "imports",
+                EdgeKind::Calls => "calls",
+                EdgeKind::References => "references",
+                EdgeKind::Inherits => "inherits",
+                EdgeKind::Implements => "implements",
+                EdgeKind::Depends => "depends",
+                EdgeKind::Contains => "contains",
+            }
+        )
     }
 }
 
@@ -187,7 +202,8 @@ impl GraphRAG {
             node_map.insert(i, idx);
         }
         for edge in &self.edges {
-            if let (Some(&si), Some(&ti)) = (node_map.get(&edge.source), node_map.get(&edge.target)) {
+            if let (Some(&si), Some(&ti)) = (node_map.get(&edge.source), node_map.get(&edge.target))
+            {
                 if si != ti {
                     self.graph.add_edge(si, ti, edge.clone());
                 }
@@ -201,7 +217,8 @@ impl GraphRAG {
         let root_path = root.as_ref();
         let mut nodes: Vec<GraphNode> = Vec::new();
         let mut edges: Vec<GraphEdge> = Vec::new();
-        let mut file_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut file_indices: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         let walker = WalkDir::new(root_path)
             .follow_links(false)
@@ -211,7 +228,11 @@ impl GraphRAG {
                     return true;
                 }
                 let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') && name != "target" && name != "node_modules" && name != "dist" && name != "vendor"
+                !name.starts_with('.')
+                    && name != "target"
+                    && name != "node_modules"
+                    && name != "dist"
+                    && name != "vendor"
             });
 
         for entry in walker.filter_map(|e| e.ok()) {
@@ -221,11 +242,18 @@ impl GraphRAG {
 
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !matches!(ext, "rs" | "py" | "ts" | "js" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h") {
+            if !matches!(
+                ext,
+                "rs" | "py" | "ts" | "js" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h"
+            ) {
                 continue;
             }
 
-            let rel_path = path.strip_prefix(root_path).unwrap_or(path).to_string_lossy().to_string();
+            let rel_path = path
+                .strip_prefix(root_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
             let file_node_idx = nodes.len();
             file_indices.insert(rel_path.clone(), file_node_idx);
 
@@ -251,11 +279,22 @@ impl GraphRAG {
                     || trimmed.starts_with("fn ")
                     || trimmed.starts_with("def ")
                     || trimmed.starts_with("func ")
-                    || (trimmed.starts_with("export function ") || trimmed.starts_with("function "));
+                    || (trimmed.starts_with("export function ")
+                        || trimmed.starts_with("function "));
 
                 if is_func {
-                    let fn_name = trimmed.split('(').next().unwrap_or(trimmed).split_whitespace().last().unwrap_or("");
-                    if !fn_name.is_empty() && fn_name != "fn" && fn_name != "def" && fn_name != "func" {
+                    let fn_name = trimmed
+                        .split('(')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("");
+                    if !fn_name.is_empty()
+                        && fn_name != "fn"
+                        && fn_name != "def"
+                        && fn_name != "func"
+                    {
                         let fn_idx = nodes.len();
                         nodes.push(GraphNode {
                             id: format!("fn:{}:{}", rel_path, fn_name),
@@ -291,7 +330,11 @@ impl GraphRAG {
                         .split_whitespace()
                         .last()
                         .unwrap_or("");
-                    if !type_name.is_empty() && type_name != "struct" && type_name != "class" && type_name != "type" {
+                    if !type_name.is_empty()
+                        && type_name != "struct"
+                        && type_name != "class"
+                        && type_name != "type"
+                    {
                         let type_idx = nodes.len();
                         nodes.push(GraphNode {
                             id: format!("type:{}:{}", rel_path, type_name),
@@ -317,7 +360,11 @@ impl GraphRAG {
                     || trimmed.starts_with("from ");
 
                 if is_import {
-                    let target_module = trimmed.split_whitespace().nth(1).unwrap_or("").trim_end_matches(';');
+                    let target_module = trimmed
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim_end_matches(';');
                     if !target_module.is_empty() {
                         let import_idx = nodes.len();
                         nodes.push(GraphNode {
@@ -346,12 +393,16 @@ impl GraphRAG {
     /// Run a GraphRAG query across the codebase
     pub fn query(&self, query: &str, top_k: usize) -> Vec<GraphNode> {
         let query_tokens = Self::tokenize(query);
-        let mut scored: Vec<(f64, &GraphNode)> = self.nodes
+        let mut scored: Vec<(f64, &GraphNode)> = self
+            .nodes
             .iter()
             .map(|node| {
                 let node_tokens = Self::tokenize(&node.label);
                 let path_tokens = Self::tokenize(&node.path);
-                let overlap: usize = query_tokens.iter().filter(|t| node_tokens.contains(t) || path_tokens.contains(t)).count();
+                let overlap: usize = query_tokens
+                    .iter()
+                    .filter(|t| node_tokens.contains(t) || path_tokens.contains(t))
+                    .count();
                 let score = if overlap > 0 {
                     overlap as f64 + (1.0 / (node.label.len() as f64 + 1.0))
                 } else {
@@ -363,7 +414,11 @@ impl GraphRAG {
             .collect();
 
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(top_k).map(|(_, node)| node.clone()).collect()
+        scored
+            .into_iter()
+            .take(top_k)
+            .map(|(_, node)| node.clone())
+            .collect()
     }
 
     /// Retrieve nodes that form a connected component around a seed node
@@ -408,11 +463,15 @@ impl GraphRAG {
 
         for idx in &nodes {
             let i = idx.index();
-            if community_assignment.get(i).copied().flatten().is_some() { continue; }
-            let mut queue = vec![idx.clone()];
+            if community_assignment.get(i).copied().flatten().is_some() {
+                continue;
+            }
+            let mut queue = vec![*idx];
             while let Some(node_idx) = queue.pop() {
                 let ni = node_idx.index();
-                if community_assignment.get(ni).copied().flatten().is_some() { continue; }
+                if community_assignment.get(ni).copied().flatten().is_some() {
+                    continue;
+                }
                 community_assignment[ni] = Some(community_id);
                 if let Some(n) = self.nodes.get_mut(ni) {
                     n.community = Some(community_id);
@@ -443,9 +502,18 @@ impl GraphRAG {
             let path = gn.source_file.clone().unwrap_or_else(|| gn.label.clone());
             let kind = if gn.label.ends_with("()") || gn.label.starts_with('.') {
                 GraphNodeKind::Function
-            } else if gn.file_type.as_deref() == Some("code") && (path == gn.label || gn.label.contains('.')) {
+            } else if gn.file_type.as_deref() == Some("code")
+                && (path == gn.label || gn.label.contains('.'))
+            {
                 GraphNodeKind::File
-            } else if gn.label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) && !gn.label.contains("()") {
+            } else if gn
+                .label
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+                && !gn.label.contains("()")
+            {
                 GraphNodeKind::Class
             } else {
                 GraphNodeKind::Symbol
@@ -464,7 +532,9 @@ impl GraphRAG {
 
         let mut edges = Vec::with_capacity(g.links.len());
         for link in &g.links {
-            if let (Some(&source_idx), Some(&target_idx)) = (id_map.get(&link.source), id_map.get(&link.target)) {
+            if let (Some(&source_idx), Some(&target_idx)) =
+                (id_map.get(&link.source), id_map.get(&link.target))
+            {
                 let kind = match link.relation.as_deref() {
                     Some("contains") => EdgeKind::Contains,
                     Some("calls") | Some("method") => EdgeKind::Calls,
@@ -505,13 +575,19 @@ impl GraphRAG {
     /// Explain a node by finding its attributes, incoming connections, and outgoing connections
     pub fn explain_node(&self, name_or_id: &str) -> Option<NodeExplanation<'_>> {
         let name_lower = name_or_id.to_lowercase();
-        let (node_idx, node) = self.nodes.iter().enumerate().find(|(_, n)| {
-            n.label.to_lowercase() == name_lower || n.id.to_lowercase() == name_lower
-        }).or_else(|| {
-            self.nodes.iter().enumerate().find(|(_, n)| {
-                n.label.to_lowercase().contains(&name_lower) || n.path.to_lowercase().contains(&name_lower)
+        let (node_idx, node) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, n)| {
+                n.label.to_lowercase() == name_lower || n.id.to_lowercase() == name_lower
             })
-        })?;
+            .or_else(|| {
+                self.nodes.iter().enumerate().find(|(_, n)| {
+                    n.label.to_lowercase().contains(&name_lower)
+                        || n.path.to_lowercase().contains(&name_lower)
+                })
+            })?;
 
         let mut outgoing = Vec::new();
         let mut incoming = Vec::new();
@@ -532,16 +608,24 @@ impl GraphRAG {
     }
 
     /// Find shortest dependency path between two symbols/nodes using BFS
-    pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<(GraphNode, String, GraphNode)>> {
+    pub fn shortest_path(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Option<Vec<(GraphNode, String, GraphNode)>> {
         let from_lower = from.to_lowercase();
         let to_lower = to.to_lowercase();
 
         let (from_idx, _) = self.nodes.iter().enumerate().find(|(_, n)| {
-            n.label.to_lowercase() == from_lower || n.id.to_lowercase() == from_lower || n.label.to_lowercase().contains(&from_lower)
+            n.label.to_lowercase() == from_lower
+                || n.id.to_lowercase() == from_lower
+                || n.label.to_lowercase().contains(&from_lower)
         })?;
 
         let (to_idx, _) = self.nodes.iter().enumerate().find(|(_, n)| {
-            n.label.to_lowercase() == to_lower || n.id.to_lowercase() == to_lower || n.label.to_lowercase().contains(&to_lower)
+            n.label.to_lowercase() == to_lower
+                || n.id.to_lowercase() == to_lower
+                || n.label.to_lowercase().contains(&to_lower)
         })?;
 
         if from_idx == to_idx {
@@ -584,7 +668,11 @@ impl GraphRAG {
         let mut path_steps = Vec::new();
         let mut curr = to_idx;
         while let Some(&(prev, kind)) = parent.get(&curr) {
-            path_steps.push((self.nodes[prev].clone(), format!("{}", kind), self.nodes[curr].clone()));
+            path_steps.push((
+                self.nodes[prev].clone(),
+                format!("{}", kind),
+                self.nodes[curr].clone(),
+            ));
             curr = prev;
             if curr == from_idx {
                 break;
@@ -606,7 +694,9 @@ impl GraphRAG {
             }
         }
 
-        let mut scored: Vec<(&GraphNode, usize)> = self.nodes.iter()
+        let mut scored: Vec<(&GraphNode, usize)> = self
+            .nodes
+            .iter()
             .enumerate()
             .map(|(i, n)| (n, degrees[i]))
             .collect();
@@ -618,7 +708,11 @@ impl GraphRAG {
 
     fn tokenize(text: &str) -> Vec<String> {
         let lower = text.to_lowercase();
-        lower.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).map(String::from).collect()
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
     }
 }
 

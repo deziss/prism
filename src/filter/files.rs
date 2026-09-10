@@ -23,7 +23,9 @@ fn split_hit(line: &str, sep: char) -> Option<(&str, usize, &str)> {
             return Some((&line[..at], num, &rest[digits + 1..]));
         }
         i = at + 1;
-        if i >= bytes.len() { break }
+        if i >= bytes.len() {
+            break;
+        }
     }
     None
 }
@@ -32,7 +34,9 @@ fn split_hit(line: &str, sep: char) -> Option<(&str, usize, &str)> {
 fn split_count(line: &str) -> Option<(&str, usize)> {
     let at = line.rfind(':')?;
     let n: usize = line[at + 1..].trim().parse().ok()?;
-    if at == 0 { return None }
+    if at == 0 {
+        return None;
+    }
     Some((&line[..at], n))
 }
 
@@ -81,7 +85,11 @@ fn group_paths(paths: &[String], per_dir: usize, max_dirs: usize) -> String {
             continue;
         }
         let shown = names.len().min(per_dir);
-        let head = if d.is_empty() { ".".to_string() } else { format!("{}/", d) };
+        let head = if d.is_empty() {
+            ".".to_string()
+        } else {
+            format!("{}/", d)
+        };
         let mut line = format!("{} {}", head, names[..shown].join(" "));
         if names.len() > shown {
             line.push_str(&format!(" {}", more(names.len() - shown, "entries")));
@@ -98,6 +106,11 @@ fn group_paths(paths: &[String], per_dir: usize, max_dirs: usize) -> String {
     out.join("\n")
 }
 
+/// One grep/rg match: (line number, tidied content, is-context-line).
+type GrepHit = (usize, String, bool);
+/// Per-file hits, insertion ordered: (path, hits).
+type GrepFileHits = Vec<(String, Vec<GrepHit>)>;
+
 pub(crate) fn filter_grep(args: &[&str], output: &str) -> String {
     let l = limits();
     if output.trim().is_empty() {
@@ -111,12 +124,10 @@ pub(crate) fn filter_grep(args: &[&str], output: &str) -> String {
     let mut binaries: Vec<&str> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut plain: Vec<&str> = Vec::new();
-    // per-file hits, insertion ordered: (path, [(line, content, is_context)])
-    let mut files: Vec<(String, Vec<(usize, String, bool)>)> = Vec::new();
+    let mut files: GrepFileHits = Vec::new();
     let mut heading: Option<String> = None; // rg heading mode: bare path line
 
-    let push_hit = |path: &str, num: usize, content: &str, ctx: bool,
-                        files: &mut Vec<(String, Vec<(usize, String, bool)>)>| {
+    let push_hit = |path: &str, num: usize, content: &str, ctx: bool, files: &mut GrepFileHits| {
         let entry = (num, tidy_match(content, l.grep_line_width), ctx);
         match files.iter_mut().find(|(p, _)| p == path) {
             Some((_, v)) => v.push(entry),
@@ -199,7 +210,10 @@ pub(crate) fn filter_grep(args: &[&str], output: &str) -> String {
     }
 
     if !files.is_empty() {
-        let total: usize = files.iter().map(|(_, v)| v.iter().filter(|h| !h.2).count()).sum();
+        let total: usize = files
+            .iter()
+            .map(|(_, v)| v.iter().filter(|h| !h.2).count())
+            .sum();
         let multi = files.len() > 1;
         if multi || total > 1 {
             out.push(format!("{} matches in {} files", total, files.len()));
@@ -271,8 +285,16 @@ pub(crate) fn filter_grep(args: &[&str], output: &str) -> String {
 // ─── find / fd ────────────────────────────────────────────────────────────────
 
 const NOISE_DIRS: [&str; 10] = [
-    ".git", "node_modules", "target", "__pycache__", ".venv", "venv", "dist", ".next",
-    ".turbo", ".cache",
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    ".next",
+    ".turbo",
+    ".cache",
 ];
 
 /// Leading non-flag operands of `find` — its search roots.
@@ -349,9 +371,14 @@ pub(crate) fn filter_find(args: &[&str], output: &str) -> String {
     }
     // A name is a directory when some other result lives under it.
     let is_dir = |dir: &str, name: &str| -> bool {
-        let full = if dir.is_empty() { name.to_string() } else { format!("{}/{}", dir, name) };
+        let full = if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", dir, name)
+        };
         let probe = format!("{}/", full);
-        kept.iter().any(|k| k.starts_with(&probe)) || collapsed.iter().any(|(c, _)| c.starts_with(&probe))
+        kept.iter().any(|k| k.starts_with(&probe))
+            || collapsed.iter().any(|(c, _)| c.starts_with(&probe))
     };
 
     if groups.len() > 1 || !collapsed.is_empty() {
@@ -391,7 +418,9 @@ pub(crate) fn filter_find(args: &[&str], output: &str) -> String {
         // relative to the deepest one that is still open
         while ancestors
             .last()
-            .map(|a| !(dir.len() > a.len() && dir.starts_with(*a) && dir.as_bytes()[a.len()] == b'/'))
+            .map(|a| {
+                !(dir.len() > a.len() && dir.starts_with(*a) && dir.as_bytes()[a.len()] == b'/')
+            })
             .unwrap_or(false)
         {
             ancestors.pop();
@@ -445,9 +474,15 @@ fn octal_perms(field: &str) -> Option<String> {
     for chunk in 0..3 {
         let base = 1 + chunk * 3;
         let mut v = 0;
-        if b[base] == 'r' { v += 4 }
-        if b[base + 1] == 'w' { v += 2 }
-        if matches!(b[base + 2], 'x' | 's' | 't') { v += 1 }
+        if b[base] == 'r' {
+            v += 4
+        }
+        if b[base + 1] == 'w' {
+            v += 2
+        }
+        if matches!(b[base + 2], 'x' | 's' | 't') {
+            v += 1
+        }
         digits.push_str(&v.to_string());
     }
     Some(digits)
@@ -506,7 +541,11 @@ pub(crate) fn filter_ls(args: &[&str], output: &str) -> String {
     let long = has_flag(args, Some('l'), Some("--long"))
         || has_flag(args, Some('o'), None)
         || output.starts_with("total ")
-        || output.lines().next().map(|f| f.starts_with("total ")).unwrap_or(false);
+        || output
+            .lines()
+            .next()
+            .map(|f| f.starts_with("total "))
+            .unwrap_or(false);
 
     let mut out: Vec<String> = Vec::new();
     let mut errors: Vec<&str> = Vec::new();
@@ -563,7 +602,11 @@ pub(crate) fn filter_ls(args: &[&str], output: &str) -> String {
     if !plain.is_empty() {
         if long {
             // rows the parser could not read — keep them verbatim rather than drop
-            out.extend(cap_lines(plain.iter().copied(), l.ls_max_entries, "lines").lines().map(String::from));
+            out.extend(
+                cap_lines(plain.iter().copied(), l.ls_max_entries, "lines")
+                    .lines()
+                    .map(String::from),
+            );
         } else {
             // piped `ls` prints one name per line; pack them into ~100-char rows
             let names: Vec<&str> = plain
@@ -592,7 +635,11 @@ pub(crate) fn filter_ls(args: &[&str], output: &str) -> String {
     }
     if !errors.is_empty() {
         let shown = errors.len().min(3);
-        out.push(format!("ls: {} errors: {}", errors.len(), errors[..shown].join("; ")));
+        out.push(format!(
+            "ls: {} errors: {}",
+            errors.len(),
+            errors[..shown].join("; ")
+        ));
     }
     out.join("\n")
 }
@@ -652,7 +699,11 @@ grep: /root/secret: Permission denied";
     fn grep_groups_by_file_and_keeps_every_match() {
         let out = filter_grep(&["-rn", "pub fn", "src/"], GREP);
         assert!(out.starts_with("3 matches in 2 files"), "{}", out);
-        assert!(out.contains("src/vector.rs\n  20: pub fn new() -> Self {"), "{}", out);
+        assert!(
+            out.contains("src/vector.rs\n  20: pub fn new() -> Self {"),
+            "{}",
+            out
+        );
         assert!(out.contains("  30: pub fn add(&mut self, id: &str, embedding: &[f32]) {"));
         assert!(out.contains("src/main.rs\n  14: pub fn main() {"));
         assert!(out.contains("1 binary files match: target/debug/prism"));
@@ -666,10 +717,20 @@ grep: /root/secret: Permission denied";
             fixture.push_str(&format!("src/a.rs:{}:hit {}\n", i, i));
         }
         let out = filter_grep(&["-rn", "hit"], &fixture);
-        let shown = out.lines().filter(|l| l.starts_with("  ") && l.contains(':')).count();
+        let shown = out
+            .lines()
+            .filter(|l| l.starts_with("  ") && l.contains(':'))
+            .count();
         let announced: usize = out
             .lines()
-            .find_map(|l| l.trim().strip_prefix("[+")?.split_whitespace().next()?.parse().ok())
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("[+")?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
             .unwrap_or(0);
         assert_eq!(shown + announced, 60, "{}", out);
         assert!(has_truncation(&out));
@@ -688,7 +749,10 @@ grep: /root/secret: Permission denied";
 
     #[test]
     fn grep_rg_heading_mode_and_count_mode() {
-        let head = filter_grep(&["-n", "tokio"], "src/proxy.rs\n12:use tokio;\n14:tokio::spawn();");
+        let head = filter_grep(
+            &["-n", "tokio"],
+            "src/proxy.rs\n12:use tokio;\n14:tokio::spawn();",
+        );
         assert!(head.contains("src/proxy.rs\n  12: use tokio;"), "{}", head);
         let cnt = filter_grep(&["-c", "fn"], "src/a.rs:12\nsrc/b.rs:0\nsrc/c.rs:3");
         assert!(cnt.starts_with("15 matches in 2 files"), "{}", cnt);
@@ -741,13 +805,29 @@ grep: /root/secret: Permission denied";
         let out = filter_find(&["src"], &fixture);
         let announced: usize = out
             .lines()
-            .find_map(|l| l.split("[+").nth(1)?.split_whitespace().next()?.parse().ok())
+            .find_map(|l| {
+                l.split("[+")
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
             .unwrap_or(0);
         let shown = out.lines().last().unwrap().split_whitespace().count() - 1;
-        assert!(shown + announced >= 99, "{} / {}\n{}", shown, announced, out);
+        assert!(
+            shown + announced >= 99,
+            "{} / {}\n{}",
+            shown,
+            announced,
+            out
+        );
         assert!(has_truncation(&out));
         // a path that is also a prefix of others is marked as a directory
-        let dirs = filter_find(&["."], "prism-hub\nprism-hub/frontend\nprism-hub/frontend/src");
+        let dirs = filter_find(
+            &["."],
+            "prism-hub\nprism-hub/frontend\nprism-hub/frontend/src",
+        );
         assert!(dirs.contains("prism-hub/"), "{}", dirs);
     }
 
@@ -770,7 +850,11 @@ grep: /root/secret: Permission denied";
         use super::super::filter_output;
         // grouping/headers can outweigh a tiny output — the raw text wins then
         for (cmd, args, raw) in [
-            ("git", vec!["branch".to_string(), "-a".to_string()], "* main\n  remotes/origin/main\n"),
+            (
+                "git",
+                vec!["branch".to_string(), "-a".to_string()],
+                "* main\n  remotes/origin/main\n",
+            ),
             ("find", vec![".".to_string()], "./a.toml\n./b.toml\n"),
             ("jq", vec![".".to_string()], "{\"a\":1,\"b\":2}"),
             ("ls", vec![], "a\nb\n"),
@@ -792,7 +876,11 @@ grep: /root/secret: Permission denied";
         assert_eq!(filter_find(&["."], "./only/one"), "./only/one");
         assert_eq!(filter_find(&["."], ""), "");
         let err = filter_find(&["/"], "/a\n/b\nfind: '/root': Permission denied");
-        assert!(err.contains("find: 1 unreadable paths: '/root': Permission denied"), "{}", err);
+        assert!(
+            err.contains("find: 1 unreadable paths: '/root': Permission denied"),
+            "{}",
+            err
+        );
     }
 
     const LS: &str = "\
@@ -812,7 +900,10 @@ lrwxrwxrwx  1 root          root              7 Apr  2  2025 python -> python3
         assert!(out.contains("777  python -> python3"), "{}", out);
         assert!(out.contains("664  my file.rs  958B"), "{}", out);
         assert!(!out.contains("total "));
-        assert!(!out.lines().any(|l| l.ends_with("  .") || l.ends_with("  ..")));
+        assert!(
+            !out.lines()
+                .any(|l| l.ends_with("  .") || l.ends_with("  .."))
+        );
         assert!(!out.contains("anshukushwaha"));
     }
 
@@ -826,11 +917,20 @@ lrwxrwxrwx  1 root          root              7 Apr  2  2025 python -> python3
         let shown = out.lines().filter(|l| l.starts_with("644  ")).count();
         let announced: usize = out
             .lines()
-            .find_map(|l| l.strip_prefix("[+")?.split_whitespace().next()?.parse().ok())
+            .find_map(|l| {
+                l.strip_prefix("[+")?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
             .unwrap_or(0);
         assert_eq!(shown + announced, 250, "{}", out);
 
-        let rec = filter_ls(&["-laR", "src"], "src:\ntotal 4\n-rw-r--r-- 1 u g 10 Sep 1 10:00 a.rs\n\nsrc/knowledge:\ntotal 4\n-rw-r--r-- 1 u g 20 Sep 1 10:00 b.rs");
+        let rec = filter_ls(
+            &["-laR", "src"],
+            "src:\ntotal 4\n-rw-r--r-- 1 u g 10 Sep 1 10:00 a.rs\n\nsrc/knowledge:\ntotal 4\n-rw-r--r-- 1 u g 20 Sep 1 10:00 b.rs",
+        );
         assert!(rec.contains("src/:"), "{}", rec);
         assert!(rec.contains("src/knowledge/:"), "{}", rec);
         assert!(rec.contains("644  a.rs  10B") && rec.contains("644  b.rs  20B"));
@@ -847,7 +947,8 @@ lrwxrwxrwx  1 root          root              7 Apr  2  2025 python -> python3
 
     #[test]
     fn jq_compacts_json_and_passes_raw_output() {
-        let out = filter_jq("{\n  \"name\": \"prism\",\n  \"deps\": {\n    \"serde\": \"^1\"\n  }\n}");
+        let out =
+            filter_jq("{\n  \"name\": \"prism\",\n  \"deps\": {\n    \"serde\": \"^1\"\n  }\n}");
         assert!(out.contains("name: prism"), "{}", out);
         assert!(out.contains("deps:\n serde: ^1"), "{}", out);
         let raw = filter_jq("git status\ncargo check\n");
@@ -857,7 +958,9 @@ lrwxrwxrwx  1 root          root              7 Apr  2  2025 python -> python3
 
     #[test]
     fn tree_flattens_box_drawing_and_keeps_trailer() {
-        let out = filter_tree("src\n├── filter\n│   ├── mod.rs\n│   └── common.rs\n└── main.rs\n\n2 directories, 3 files");
+        let out = filter_tree(
+            "src\n├── filter\n│   ├── mod.rs\n│   └── common.rs\n└── main.rs\n\n2 directories, 3 files",
+        );
         assert!(out.contains("\n filter"), "{}", out);
         assert!(out.contains("\n  mod.rs"), "{}", out);
         assert!(out.ends_with("2 directories, 3 files"), "{}", out);

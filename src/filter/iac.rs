@@ -6,7 +6,11 @@
 use super::common::*;
 
 fn plural(n: usize, noun: &str) -> String {
-    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
 }
 
 /// What a line contributes once terraform's `│ ` diagnostic frame is removed.
@@ -26,7 +30,11 @@ fn ungutter(line: &str) -> Gut {
     match t.strip_prefix('│') {
         Some(rest) => {
             let r = rest.trim();
-            if r.is_empty() { Gut::Blank } else { Gut::Text(r.to_string()) }
+            if r.is_empty() {
+                Gut::Blank
+            } else {
+                Gut::Text(r.to_string())
+            }
         }
         None if t.is_empty() => Gut::Blank,
         None => Gut::Text(t.to_string()),
@@ -48,7 +56,9 @@ fn tf_action(line: &str) -> Option<(&'static str, String)> {
     // `  # aws_instance.web will be created`
     let t = line.trim();
     let rest = t.strip_prefix("# ")?;
-    let (name, tail) = rest.split_once(" will be ").or_else(|| rest.split_once(" must be "))?;
+    let (name, tail) = rest
+        .split_once(" will be ")
+        .or_else(|| rest.split_once(" must be "))?;
     let action = match tail.trim().trim_end_matches(':') {
         "created" => "create",
         "destroyed" => "destroy",
@@ -95,8 +105,11 @@ fn tf_plan(output: &str) -> String {
             diags.push(format!("  {}", truncate(&squeeze_ws(&t), 200)));
             continue;
         }
-        if t.starts_with("Plan:") || t.starts_with("No changes.") || t.starts_with("Apply complete!")
-            || t.starts_with("Destroy complete!") || t.starts_with("Changes to Outputs")
+        if t.starts_with("Plan:")
+            || t.starts_with("No changes.")
+            || t.starts_with("Apply complete!")
+            || t.starts_with("Destroy complete!")
+            || t.starts_with("Changes to Outputs")
         {
             trailer = Some(squeeze_ws(&t));
             continue;
@@ -116,7 +129,8 @@ fn tf_plan(output: &str) -> String {
             continue;
         }
         // attribute changes inside a resource block
-        let is_change = t.starts_with('~') || t.starts_with('+') || t.starts_with('-') || t.starts_with("+/-");
+        let is_change =
+            t.starts_with('~') || t.starts_with('+') || t.starts_with('-') || t.starts_with("+/-");
         if is_change {
             if t.contains("(known after apply)") {
                 known_after += 1;
@@ -156,7 +170,10 @@ fn tf_plan(output: &str) -> String {
     if let Some(t) = trailer {
         out.push(t);
     } else if out.is_empty() {
-        out.push(format!("terraform: no changes ({} refresh steps)", progress));
+        out.push(format!(
+            "terraform: no changes ({} refresh steps)",
+            progress
+        ));
     }
     out.join("\n")
 }
@@ -269,7 +286,10 @@ pub(crate) fn filter_terraform(args: &[&str], output: &str) -> String {
             }
             let mut out = Vec::new();
             if !providers.is_empty() {
-                out.push(format!("terraform init: ok (providers: {})", providers.join(", ")));
+                out.push(format!(
+                    "terraform init: ok (providers: {})",
+                    providers.join(", ")
+                ));
             }
             out.extend(cap_vec(diags, l.max_diagnostics, "diagnostic lines"));
             if out.is_empty() {
@@ -315,16 +335,17 @@ pub(crate) fn filter_terraform(args: &[&str], output: &str) -> String {
             if files.is_empty() && changes.is_empty() {
                 return "terraform fmt: ok".to_string();
             }
-            let mut out = vec![format!("terraform fmt: {} need formatting", plural(files.len(), "file"))];
+            let mut out = vec![format!(
+                "terraform fmt: {} need formatting",
+                plural(files.len(), "file")
+            )];
             out.extend(cap_vec(files, l.list_max_lines, "files"));
             out.extend(cap_vec(changes, l.max_diagnostics, "diff lines"));
             out.join("\n")
         }
-        Some("output") => {
-            compact_json_output(output, |o| {
-                cap_lines(collapse_blank(o).lines(), l.list_max_lines, "lines")
-            })
-        }
+        Some("output") => compact_json_output(output, |o| {
+            cap_lines(collapse_blank(o).lines(), l.list_max_lines, "lines")
+        }),
         Some("show") | Some("state") | Some("providers") | Some("graph") | Some("workspace") => {
             let body: Vec<String> = output
                 .lines()
@@ -344,10 +365,21 @@ pub(crate) fn filter_terraform(args: &[&str], output: &str) -> String {
                     continue;
                 }
                 // the "out of date" notice wraps across lines; keep only the facts
-                if t.contains("out of date") || t.starts_with("is ") || t.contains("The latest version") {
-                    if let Some(v) = t.split("is ").nth(1).and_then(|r| r.split_whitespace().next()) {
+                if t.contains("out of date")
+                    || t.starts_with("is ")
+                    || t.contains("The latest version")
+                {
+                    if let Some(v) = t
+                        .split("is ")
+                        .nth(1)
+                        .and_then(|r| r.split_whitespace().next())
+                    {
                         let v = v.trim_end_matches('.');
-                        if v.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        if v.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                        {
                             newer = Some(v.to_string());
                         }
                     }
@@ -391,7 +423,10 @@ pub(crate) fn filter_pulumi(args: &[&str], output: &str) -> String {
                     section = "out";
                     continue;
                 }
-                if t.starts_with("Resources:") || t.starts_with("Duration:") || t.starts_with("Updating") {
+                if t.starts_with("Resources:")
+                    || t.starts_with("Duration:")
+                    || t.starts_with("Updating")
+                {
                     section = "";
                     trailer.push(squeeze_ws(t));
                     continue;
@@ -400,7 +435,10 @@ pub(crate) fn filter_pulumi(args: &[&str], output: &str) -> String {
                     "diag" => diags.push(squeeze_ws(t)),
                     "out" => outputs.push(squeeze_ws(t)),
                     _ => {
-                        if t.starts_with("Type ") || t.contains("pulumi:pulumi:Stack") || t.starts_with("Previewing") {
+                        if t.starts_with("Type ")
+                            || t.contains("pulumi:pulumi:Stack")
+                            || t.starts_with("Previewing")
+                        {
                             continue;
                         }
                         rows.push(squeeze_ws(t));
@@ -468,7 +506,14 @@ pub(crate) fn filter_ansible(output: &str) -> String {
             continue;
         }
         if let Some(name) = banner(&t, "TASK").or_else(|| banner(&t, "HANDLER")) {
-            tasks.push(Task { name, ok: 0, changed: 0, skipped: 0, unreachable: 0, failed: Vec::new() });
+            tasks.push(Task {
+                name,
+                ok: 0,
+                changed: 0,
+                skipped: 0,
+                unreachable: 0,
+                failed: Vec::new(),
+            });
             continue;
         }
         let host = |t: &str| -> String {
@@ -512,14 +557,27 @@ pub(crate) fn filter_ansible(output: &str) -> String {
     }
     let mut lines: Vec<String> = Vec::new();
     for t in &tasks {
-        if t.ok == 0 && t.changed == 0 && t.skipped == 0 && t.failed.is_empty() && t.unreachable == 0 {
+        if t.ok == 0
+            && t.changed == 0
+            && t.skipped == 0
+            && t.failed.is_empty()
+            && t.unreachable == 0
+        {
             continue;
         }
         let mut bits = Vec::new();
-        if t.ok > 0 { bits.push(format!("ok={}", t.ok)) }
-        if t.changed > 0 { bits.push(format!("changed={}", t.changed)) }
-        if t.skipped > 0 { bits.push(format!("skipped={}", t.skipped)) }
-        if !t.failed.is_empty() { bits.push(format!("failed={}", t.failed.len())) }
+        if t.ok > 0 {
+            bits.push(format!("ok={}", t.ok))
+        }
+        if t.changed > 0 {
+            bits.push(format!("changed={}", t.changed))
+        }
+        if t.skipped > 0 {
+            bits.push(format!("skipped={}", t.skipped))
+        }
+        if !t.failed.is_empty() {
+            bits.push(format!("failed={}", t.failed.len()))
+        }
         lines.push(format!("{}: {}", t.name, bits.join(" ")));
         for f in &t.failed {
             lines.push(format!("  {}", f));
@@ -570,12 +628,20 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
     fn plan_groups_actions_keeps_attrs_and_trailer() {
         let out = filter_terraform(&["plan"], PLAN);
         assert!(out.contains("create (1): aws_instance.web"), "{}", out);
-        assert!(out.contains("replace (1): aws_security_group.sg"), "{}", out);
+        assert!(
+            out.contains("replace (1): aws_security_group.sg"),
+            "{}",
+            out
+        );
         assert!(out.contains("destroy (1): aws_subnet.a"), "{}", out);
         assert!(out.contains("instance_type = \"t3.micro\""), "{}", out);
         assert!(out.contains("forces replacement"), "{}", out);
         assert!(out.contains("(2 attributes known after apply)"), "{}", out);
-        assert!(out.ends_with("Plan: 2 to add, 0 to change, 2 to destroy."), "{}", out);
+        assert!(
+            out.ends_with("Plan: 2 to add, 0 to change, 2 to destroy."),
+            "{}",
+            out
+        );
         assert!(!out.contains("Refreshing state"), "{}", out);
     }
 
@@ -590,8 +656,16 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
             &["plan"],
             "╷\n│ Error: Inconsistent dependency lock file\n│ \n│ The following dependency selections recorded in the lock file are\n│ inconsistent with the current configuration:\n╵",
         );
-        assert!(err.contains("Error: Inconsistent dependency lock file"), "{}", err);
-        assert!(err.contains("inconsistent with the current configuration"), "{}", err);
+        assert!(
+            err.contains("Error: Inconsistent dependency lock file"),
+            "{}",
+            err
+        );
+        assert!(
+            err.contains("inconsistent with the current configuration"),
+            "{}",
+            err
+        );
         assert!(!err.contains('│'), "{}", err);
     }
 
@@ -616,7 +690,11 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
         assert!(out.contains("creation (1): aws_instance.web"), "{}", out);
         assert!(out.contains("destruction (1): aws_subnet.a"), "{}", out);
         assert!(out.contains("url = \"https://x\""), "{}", out);
-        assert!(out.contains("Apply complete! Resources: 1 added, 0 changed, 1 destroyed."), "{}", out);
+        assert!(
+            out.contains("Apply complete! Resources: 1 added, 0 changed, 1 destroyed."),
+            "{}",
+            out
+        );
         assert!(!out.contains("Still creating"), "{}", out);
     }
 
@@ -627,12 +705,28 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
             "Initializing the backend...\n\nInitializing provider plugins...\n- Installing hashicorp/aws v5.1.0...\n- Installed hashicorp/aws v5.1.0 (signed)\n\nTerraform has been successfully initialized!",
         );
         assert!(init.contains("providers: hashicorp/aws v5.1.0"), "{}", init);
-        assert_eq!(filter_terraform(&["validate"], "Success! The configuration is valid.\n"), "terraform validate: ok");
-        assert_eq!(filter_terraform(&["fmt", "-check"], ""), "terraform fmt: ok");
-        let fmt = filter_terraform(&["fmt", "-check", "-diff"], "main.tf\n--- old/main.tf\n+++ new/main.tf\n@@ -1,3 +1,3 @@\n-resource \"aws_vpc\" \"main\"{\n+resource \"aws_vpc\" \"main\" {\n");
-        assert!(fmt.contains("terraform fmt: 1 file need formatting"), "{}", fmt);
+        assert_eq!(
+            filter_terraform(&["validate"], "Success! The configuration is valid.\n"),
+            "terraform validate: ok"
+        );
+        assert_eq!(
+            filter_terraform(&["fmt", "-check"], ""),
+            "terraform fmt: ok"
+        );
+        let fmt = filter_terraform(
+            &["fmt", "-check", "-diff"],
+            "main.tf\n--- old/main.tf\n+++ new/main.tf\n@@ -1,3 +1,3 @@\n-resource \"aws_vpc\" \"main\"{\n+resource \"aws_vpc\" \"main\" {\n",
+        );
+        assert!(
+            fmt.contains("terraform fmt: 1 file need formatting"),
+            "{}",
+            fmt
+        );
         assert!(fmt.contains("main.tf"), "{}", fmt);
-        let ver = filter_terraform(&["version"], "Terraform v1.9.5\non linux_amd64\n\nYour version of Terraform is out of date! The latest version\nis 1.13.0. You can update by downloading from https://www.terraform.io/downloads.html");
+        let ver = filter_terraform(
+            &["version"],
+            "Terraform v1.9.5\non linux_amd64\n\nYour version of Terraform is out of date! The latest version\nis 1.13.0. You can update by downloading from https://www.terraform.io/downloads.html",
+        );
         assert!(ver.contains("Terraform v1.9.5"), "{}", ver);
         assert!(ver.contains("update available"), "{}", ver);
         assert!(!ver.contains("out of date"), "{}", ver);
@@ -648,7 +742,11 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
         assert!(out.contains("warning: bucket has no policy"), "{}", out);
         assert!(out.contains("+ 1 to create"), "{}", out);
         assert!(out.contains("Duration: 2s"), "{}", out);
-        assert!(out.contains("https://app.pulumi.com/x/dev/updates/1"), "{}", out);
+        assert!(
+            out.contains("https://app.pulumi.com/x/dev/updates/1"),
+            "{}",
+            out
+        );
         assert!(!out.contains("pulumi:pulumi:Stack"), "{}", out);
     }
 
@@ -659,16 +757,31 @@ Plan: 2 to add, 0 to change, 2 to destroy.";
         );
         assert!(out.contains("plays: webservers"), "{}", out);
         assert!(out.contains("Gathering Facts: ok=2"), "{}", out);
-        assert!(out.contains("Install nginx: ok=1 changed=1 skipped=1"), "{}", out);
+        assert!(
+            out.contains("Install nginx: ok=1 changed=1 skipped=1"),
+            "{}",
+            out
+        );
         assert!(out.contains("Start nginx: failed=1"), "{}", out);
-        assert!(out.contains("web1: Could not find unit nginx.service"), "{}", out);
-        assert!(out.contains("web1: ok=2 changed=1 unreachable=0 failed=1 skipped=0"), "{}", out);
+        assert!(
+            out.contains("web1: Could not find unit nginx.service"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("web1: ok=2 changed=1 unreachable=0 failed=1 skipped=0"),
+            "{}",
+            out
+        );
         assert!(!out.contains("****"), "{}", out);
     }
 
     #[test]
     fn empty_and_unknown_are_safe() {
-        assert_eq!(filter_terraform(&["plan"], ""), "terraform: no changes (0 refresh steps)");
+        assert_eq!(
+            filter_terraform(&["plan"], ""),
+            "terraform: no changes (0 refresh steps)"
+        );
         assert_eq!(filter_terraform(&["providers"], ""), "");
         assert_eq!(filter_pulumi(&["whoami"], "\n\nuser\n\n"), "user");
         let json = filter_ansible("{\"web1\":{\"ping\":\"pong\"}}");

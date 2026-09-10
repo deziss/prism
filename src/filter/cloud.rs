@@ -7,10 +7,10 @@
 //!   * fixed-width tables (gcloud lists, `az -o table`) → `a|b|c` rows sliced at the
 //!     header's column starts so empty cells keep their position
 //!   * tab-separated (`--output text`, `-o tsv`) → tabs squeezed
-//! Per-subcommand text parsers handle the rest (s3 ls/cp/sync, logs tail, builds,
-//! run deploy, config list, az login, …). Every cap comes from [`limits`]; every cut is
-//! announced with [`more`]. The only silent drops are decoration: spinner frames,
-//! progress bars, docker layer chatter, usage/hint boilerplate.
+//!     Per-subcommand text parsers handle the rest (s3 ls/cp/sync, logs tail, builds,
+//!     run deploy, config list, az login, …). Every cap comes from [`limits`]; every cut is
+//!     announced with [`more`]. The only silent drops are decoration: spinner frames,
+//!     progress bars, docker layer chatter, usage/hint boilerplate.
 
 use super::common::*;
 use regex::Regex;
@@ -23,7 +23,11 @@ use std::sync::OnceLock;
 
 /// CRLF / bare CR (progress bars redrawn in place) → LF so parsers see one record per line.
 fn normalize(s: &str) -> String {
-    if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
+    if s.contains('\r') {
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        s.to_string()
+    }
 }
 
 /// First `n` command words, skipping flags and the values of known option-with-value flags.
@@ -33,7 +37,9 @@ fn cmd_words<'a>(args: &[&'a str], valued: &[&str], n: usize) -> Vec<&'a str> {
     while i < args.len() && out.len() < n {
         let a = args[i];
         if a.starts_with('-') {
-            if !a.contains('=') && valued.contains(&a) { i += 1 }
+            if !a.contains('=') && valued.contains(&a) {
+                i += 1
+            }
         } else {
             out.push(a);
         }
@@ -68,7 +74,8 @@ fn is_empty_val(v: &Value) -> bool {
 }
 
 fn is_scalar_val(v: &Value) -> bool {
-    !matches!(v, Value::Array(a) if !a.is_empty()) && !matches!(v, Value::Object(o) if !o.is_empty())
+    !matches!(v, Value::Array(a) if !a.is_empty())
+        && !matches!(v, Value::Object(o) if !o.is_empty())
 }
 
 /// Unquoted string for identifiers we place in prose (`scalar_str` would quote numeric-looking ids).
@@ -81,14 +88,20 @@ fn plain(v: &Value) -> String {
 
 /// `[{Key: k, Value: v}, …]` (aws Tags/TagSet/TagList, lower-case variants) → `k=v, k2=v2`.
 fn fold_tags(a: &[Value]) -> Option<String> {
-    if a.is_empty() { return None }
+    if a.is_empty() {
+        return None;
+    }
     let mut parts = Vec::with_capacity(a.len());
     for it in a {
         let o = it.as_object()?;
-        if o.len() != 2 { return None }
+        if o.len() != 2 {
+            return None;
+        }
         let k = o.get("Key").or_else(|| o.get("key"))?.as_str()?;
         let v = o.get("Value").or_else(|| o.get("value"))?;
-        if !is_scalar_val(v) { return None }
+        if !is_scalar_val(v) {
+            return None;
+        }
         parts.push(format!("{}={}", k, plain(v)));
     }
     Some(parts.join(", "))
@@ -101,8 +114,12 @@ fn fold_tags(a: &[Value]) -> Option<String> {
 fn cloud_transform(v: &mut Value, dropped: &mut usize) {
     match v {
         Value::Object(o) => {
-            if o.remove("ResponseMetadata").is_some() { *dropped += 1 }
-            for val in o.values_mut() { cloud_transform(val, dropped) }
+            if o.remove("ResponseMetadata").is_some() {
+                *dropped += 1
+            }
+            for val in o.values_mut() {
+                cloud_transform(val, dropped)
+            }
             let before = o.len();
             o.retain(|_, val| !is_empty_val(val));
             *dropped += before - o.len();
@@ -116,21 +133,27 @@ fn cloud_transform(v: &mut Value, dropped: &mut usize) {
                 let mut keys: BTreeSet<String> = BTreeSet::new();
                 for it in a.iter_mut() {
                     let o = it.as_object_mut().unwrap();
-                    if o.remove("ResponseMetadata").is_some() { *dropped += 1 }
+                    if o.remove("ResponseMetadata").is_some() {
+                        *dropped += 1
+                    }
                     for (k, val) in o.iter_mut() {
                         cloud_transform(val, dropped);
                         keys.insert(k.clone());
                     }
                 }
                 for k in keys {
-                    if a.iter().all(|it| it.get(&k).map_or(true, is_empty_val)) {
+                    if a.iter().all(|it| it.get(&k).is_none_or(is_empty_val)) {
                         for it in a.iter_mut() {
-                            if it.as_object_mut().unwrap().remove(&k).is_some() { *dropped += 1 }
+                            if it.as_object_mut().unwrap().remove(&k).is_some() {
+                                *dropped += 1
+                            }
                         }
                     }
                 }
             } else {
-                for it in a.iter_mut() { cloud_transform(it, dropped) }
+                for it in a.iter_mut() {
+                    cloud_transform(it, dropped)
+                }
             }
         }
         _ => {}
@@ -150,7 +173,9 @@ fn render_docs(docs: &[Value]) -> String {
         .collect();
     let mut s = parts.join("\n---\n");
     if dropped > 0 {
-        if !s.is_empty() { s.push('\n') }
+        if !s.is_empty() {
+            s.push('\n')
+        }
         s.push_str(&more(dropped, "empty fields"));
     }
     s
@@ -176,13 +201,16 @@ fn split_json(output: &str) -> (Vec<&str>, Option<Vec<Value>>) {
 fn yaml_line(l: &str) -> bool {
     let t = l.trim_start();
     let t = t.strip_prefix("- ").unwrap_or(t);
-    if t == "-" || t.starts_with("---") { return true }
+    if t == "-" || t.starts_with("---") {
+        return true;
+    }
     match t.find(':') {
         Some(i) if i > 0 => {
             let key = &t[..i];
             let rest = &t[i + 1..];
-            key.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '"' | '\'' | '@'))
-                && (rest.is_empty() || rest.starts_with(' '))
+            key.chars().all(|c| {
+                c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '"' | '\'' | '@')
+            }) && (rest.is_empty() || rest.starts_with(' '))
         }
         _ => false,
     }
@@ -192,17 +220,23 @@ fn yaml_line(l: &str) -> bool {
 /// check so prose and error text never get "parsed" as a YAML scalar.
 fn yaml_docs(s: &str) -> Option<Vec<Value>> {
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() < 2 { return None }
+    if lines.len() < 2 {
+        return None;
+    }
     let first = lines[0].trim_start();
     if first.starts_with("ERROR") || first.starts_with("WARNING") || first.starts_with("An error") {
         return None;
     }
     let yamlish = lines.iter().filter(|l| yaml_line(l)).count();
-    if yamlish * 2 < lines.len() { return None }
+    if yamlish * 2 < lines.len() {
+        return None;
+    }
     let mut out = Vec::new();
     for doc in serde_yaml::Deserializer::from_str(s) {
         let v = Value::deserialize(doc).ok()?;
-        if !(v.is_object() || v.is_array()) { return None }
+        if !(v.is_object() || v.is_array()) {
+            return None;
+        }
         out.push(v);
     }
     if out.is_empty() { None } else { Some(out) }
@@ -218,7 +252,9 @@ fn col_starts(line: &str) -> Vec<usize> {
         if c == ' ' {
             spaces += 1;
         } else {
-            if spaces >= 2 { starts.push(i) }
+            if spaces >= 2 {
+                starts.push(i)
+            }
             spaces = 0;
         }
     }
@@ -229,7 +265,11 @@ fn slice_cols(line: &str, starts: &[usize]) -> Vec<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut cells = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
-        let e = starts.get(i + 1).copied().unwrap_or(chars.len()).min(chars.len());
+        let e = starts
+            .get(i + 1)
+            .copied()
+            .unwrap_or(chars.len())
+            .min(chars.len());
         let s = s.min(e);
         cells.push(chars[s..e].iter().collect::<String>().trim().to_string());
     }
@@ -243,21 +283,31 @@ fn is_dash_rule(l: &str) -> bool {
 
 fn is_upper_cell(c: &str) -> bool {
     !c.is_empty()
-        && c.chars().next().map_or(false, |f| f.is_ascii_uppercase())
-        && c.chars().all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '_' | '.' | '/' | '-' | ' ' | '(' | ')'))
+        && c.chars().next().is_some_and(|f| f.is_ascii_uppercase())
+        && c.chars().all(|ch| {
+            ch.is_ascii_uppercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '_' | '.' | '/' | '-' | ' ' | '(' | ')')
+        })
 }
 
 /// A header row: ≥2 columns and either all-UPPERCASE cells (gcloud) or a dashed underline (az).
 fn is_table_header(line: &str, next: Option<&str>) -> bool {
     let starts = col_starts(line);
-    if starts.len() < 2 { return false }
-    if next.map_or(false, is_dash_rule) { return true }
+    if starts.len() < 2 {
+        return false;
+    }
+    if next.is_some_and(is_dash_rule) {
+        return true;
+    }
     slice_cols(line, &starts).iter().all(|c| is_upper_cell(c))
 }
 
 fn join_pipe(cells: &[String]) -> String {
     let mut c: Vec<String> = cells.iter().map(|x| x.replace('|', "\\|")).collect();
-    while c.len() > 1 && c.last().map_or(false, |x| x.is_empty()) { c.pop(); } // trailing empties are unambiguous
+    while c.len() > 1 && c.last().is_some_and(|x| x.is_empty()) {
+        c.pop();
+    } // trailing empties are unambiguous
     c.join("|")
 }
 
@@ -273,7 +323,10 @@ fn fixed_table(lines: &[&str]) -> Vec<String> {
         }
     }
     let mut out = vec![join_pipe(&slice_cols(header, &starts))];
-    let rows: Vec<String> = body.iter().map(|l| join_pipe(&slice_cols(l, &starts))).collect();
+    let rows: Vec<String> = body
+        .iter()
+        .map(|l| join_pipe(&slice_cols(l, &starts)))
+        .collect();
     out.extend(cap_vec(rows, limits().list_max_lines, "rows"));
     out
 }
@@ -289,13 +342,18 @@ fn render_blocks(lines: &[String]) -> Vec<String> {
             continue;
         }
         let mut j = i;
-        while j < lines.len() && !lines[j].trim().is_empty() { j += 1 }
+        while j < lines.len() && !lines[j].trim().is_empty() {
+            j += 1
+        }
         let block: Vec<&str> = lines[i..j].iter().map(|s| s.trim_end()).collect();
         let hdr = (0..block.len().saturating_sub(1))
             .find(|&p| is_table_header(block[p], block.get(p + 1).copied()));
         match hdr {
             // need at least one data row besides header (+ underline)
-            Some(p) if block.len() - p >= 2 && !(block.len() - p == 2 && is_dash_rule(block[p + 1])) => {
+            Some(p)
+                if block.len() - p >= 2
+                    && !(block.len() - p == 2 && is_dash_rule(block[p + 1])) =>
+            {
                 out.extend(block[..p].iter().map(|s| s.to_string()));
                 out.extend(fixed_table(&block[p..]));
             }
@@ -316,29 +374,56 @@ fn is_box_border(l: &str) -> bool {
 /// `+----+` box tables → titles as `Title:`, vertical blocks as `key: value`,
 /// header+rows as `a|b|c`; nesting depth (`||`) becomes indentation.
 fn aws_box_table(output: &str) -> Option<String> {
-    let lines: Vec<&str> = output.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() < 3 || !lines.iter().any(|l| is_box_border(l)) { return None }
-    if !lines.iter().all(|l| is_box_border(l) || (l.starts_with('|') && l.ends_with('|'))) { return None }
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.len() < 3 || !lines.iter().any(|l| is_box_border(l)) {
+        return None;
+    }
+    if !lines
+        .iter()
+        .all(|l| is_box_border(l) || (l.starts_with('|') && l.ends_with('|')))
+    {
+        return None;
+    }
 
-    struct Block { depth: usize, rows: Vec<Vec<String>> }
+    struct Block {
+        depth: usize,
+        rows: Vec<Vec<String>>,
+    }
     let mut blocks: Vec<Block> = Vec::new();
     let mut cur: Option<Block> = None;
     for l in &lines {
         if is_box_border(l) {
-            if let Some(b) = cur.take() { blocks.push(b) }
+            if let Some(b) = cur.take() {
+                blocks.push(b)
+            }
             continue;
         }
         let depth = l.chars().take_while(|c| *c == '|').count();
-        let cells: Vec<String> = l.trim_matches('|').split('|').map(|c| c.trim().to_string()).collect();
+        let cells: Vec<String> = l
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim().to_string())
+            .collect();
         match cur.as_mut() {
             Some(b) if b.depth == depth && b.rows[0].len() == cells.len() => b.rows.push(cells),
             _ => {
-                if let Some(b) = cur.take() { blocks.push(b) }
-                cur = Some(Block { depth, rows: vec![cells] });
+                if let Some(b) = cur.take() {
+                    blocks.push(b)
+                }
+                cur = Some(Block {
+                    depth,
+                    rows: vec![cells],
+                });
             }
         }
     }
-    if let Some(b) = cur.take() { blocks.push(b) }
+    if let Some(b) = cur.take() {
+        blocks.push(b)
+    }
 
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -346,18 +431,28 @@ fn aws_box_table(output: &str) -> Option<String> {
         let b = &blocks[i];
         let pad = " ".repeat(b.depth.saturating_sub(1));
         let width = b.rows[0].len();
-        let next_is_data = blocks.get(i + 1).map_or(false, |n| n.depth == b.depth && n.rows[0].len() == width);
+        let next_is_data = blocks
+            .get(i + 1)
+            .is_some_and(|n| n.depth == b.depth && n.rows[0].len() == width);
         if width == 1 {
-            for r in &b.rows { out.push(format!("{}{}:", pad, r[0])) }
+            for r in &b.rows {
+                out.push(format!("{}{}:", pad, r[0]))
+            }
         } else if b.rows.len() == 1 && next_is_data {
             // header row, then the data block
             out.push(format!("{}{}", pad, join_pipe(&b.rows[0])));
-            for r in &blocks[i + 1].rows { out.push(format!("{}{}", pad, join_pipe(r))) }
+            for r in &blocks[i + 1].rows {
+                out.push(format!("{}{}", pad, join_pipe(r)))
+            }
             i += 1;
         } else if width == 2 {
-            for r in &b.rows { out.push(format!("{}{}: {}", pad, r[0], r[1])) }
+            for r in &b.rows {
+                out.push(format!("{}{}: {}", pad, r[0], r[1]))
+            }
         } else {
-            for r in &b.rows { out.push(format!("{}{}", pad, join_pipe(r))) }
+            for r in &b.rows {
+                out.push(format!("{}{}", pad, join_pipe(r)))
+            }
         }
         i += 1;
     }
@@ -369,7 +464,9 @@ fn aws_box_table(output: &str) -> Option<String> {
 /// Line template for dedupe: every digit → `#` so timestamps/counters/ids don't defeat grouping.
 /// Digit-run *width* is kept (`10`≠`100`) so only same-shaped lines collapse.
 fn template_of(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect()
+    s.chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .collect()
 }
 
 /// Consecutive lines with the same template collapse to the first one + `(×N)`.
@@ -382,35 +479,63 @@ fn dedupe_template(lines: Vec<String>) -> Vec<String> {
             _ => out.push((l, t, 1)),
         }
     }
-    out.into_iter().map(|(l, _, n)| if n > 1 { format!("{}  (×{})", l, n) } else { l }).collect()
+    out.into_iter()
+        .map(|(l, _, n)| {
+            if n > 1 {
+                format!("{}  (×{})", l, n)
+            } else {
+                l
+            }
+        })
+        .collect()
 }
 
 fn is_log_alert(l: &str) -> bool {
     let u = l.to_ascii_uppercase();
-    ["ERROR", "WARN", "FATAL", "EXCEPTION", "TRACEBACK", "PANIC", "FAIL", "CRITICAL"].iter().any(|k| u.contains(k))
+    [
+        "ERROR",
+        "WARN",
+        "FATAL",
+        "EXCEPTION",
+        "TRACEBACK",
+        "PANIC",
+        "FAIL",
+        "CRITICAL",
+    ]
+    .iter()
+    .any(|k| u.contains(k))
 }
 
 /// Keep the last `max` lines; lines from the dropped head that satisfy `pin` are kept too,
 /// followed by one marker for the rest.
 fn tail_pinned(lines: Vec<String>, max: usize, pin: impl Fn(&str) -> bool) -> Vec<String> {
-    if lines.len() <= max { return lines }
+    if lines.len() <= max {
+        return lines;
+    }
     let cut = lines.len() - max;
     let mut out: Vec<String> = lines[..cut].iter().filter(|l| pin(l)).cloned().collect();
     let dropped = cut - out.len();
-    if dropped > 0 { out.push(more(dropped, "lines")) }
+    if dropped > 0 {
+        out.push(more(dropped, "lines"))
+    }
     out.extend_from_slice(&lines[cut..]);
     out
 }
 
 fn fmt_epoch_ms(ms: i64) -> Option<String> {
-    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string())
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|d| d.format("%Y-%m-%dT%H:%M:%S.%3fZ").to_string())
 }
 
 // ── text fallbacks ────────────────────────────────────────────────────────────
 
 /// Tab-separated (`--output text`, `-o tsv`): squeeze whitespace, cap.
 fn tsv_text(output: &str) -> String {
-    let lines: Vec<String> = output.lines().map(squeeze_ws).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<String> = output
+        .lines()
+        .map(squeeze_ws)
+        .filter(|l| !l.is_empty())
+        .collect();
     cap_vec(lines, limits().list_max_lines, "lines").join("\n")
 }
 
@@ -419,16 +544,24 @@ fn looks_tsv(output: &str) -> bool {
     let mut tabs = 0usize;
     for l in output.lines().filter(|l| !l.trim().is_empty()) {
         n += 1;
-        if l.contains('\t') { tabs += 1 }
+        if l.contains('\t') {
+            tabs += 1
+        }
     }
     n > 0 && tabs * 2 >= n
 }
 
 /// Shape-detected fallback for any cloud CLI: box table → YAML → TSV → fixed tables/text.
 fn structured_text(output: &str) -> String {
-    if let Some(t) = aws_box_table(output) { return t }
-    if let Some(docs) = yaml_docs(output) { return render_docs(&docs) }
-    if looks_tsv(output) { return tsv_text(output) }
+    if let Some(t) = aws_box_table(output) {
+        return t;
+    }
+    if let Some(docs) = yaml_docs(output) {
+        return render_docs(&docs);
+    }
+    if looks_tsv(output) {
+        return tsv_text(output);
+    }
     let lines: Vec<String> = output.lines().map(|l| l.trim_end().to_string()).collect();
     text_lines(render_blocks(&lines))
 }
@@ -444,15 +577,36 @@ fn text_lines(lines: Vec<String>) -> String {
 // ─── AWS ──────────────────────────────────────────────────────────────────────
 
 const AWS_VALUED: &[&str] = &[
-    "--profile", "--region", "--output", "--endpoint-url", "--query", "--cli-read-timeout",
-    "--cli-connect-timeout", "--ca-bundle", "--color", "--cli-binary-format",
+    "--profile",
+    "--region",
+    "--output",
+    "--endpoint-url",
+    "--query",
+    "--cli-read-timeout",
+    "--cli-connect-timeout",
+    "--ca-bundle",
+    "--color",
+    "--cli-binary-format",
 ];
 
 const AWS_ERROR_PREFIXES: &[&str] = &[
-    "An error occurred", "Unable to locate credentials", "aws: error", "fatal error", "Could not connect",
-    "usage: aws", "Invalid choice", "Partial credentials", "The config profile", "Error when retrieving",
-    "Unknown options", "Invalid endpoint", "Error parsing parameter", "Unknown output type",
-    "Expecting value", "argument ", "Error:",
+    "An error occurred",
+    "Unable to locate credentials",
+    "aws: error",
+    "fatal error",
+    "Could not connect",
+    "usage: aws",
+    "Invalid choice",
+    "Partial credentials",
+    "The config profile",
+    "Error when retrieving",
+    "Unknown options",
+    "Invalid endpoint",
+    "Error parsing parameter",
+    "Unknown output type",
+    "Expecting value",
+    "argument ",
+    "Error:",
 ];
 
 fn is_aws_error(output: &str) -> bool {
@@ -465,24 +619,36 @@ fn is_aws_error(output: &str) -> bool {
 /// Errors verbatim; `usage:` boilerplate dropped; the 300-service "valid choices" list counted.
 fn aws_error_text(output: &str) -> String {
     const BOILER: &[&str] = &[
-        "usage: aws [options]", "To see help text, you can run:", "aws help", "aws <command> help",
-        "aws <command> <subcommand> help", "Note: AWS CLI version 2",
+        "usage: aws [options]",
+        "To see help text, you can run:",
+        "aws help",
+        "aws <command> help",
+        "aws <command> <subcommand> help",
+        "Note: AWS CLI version 2",
     ];
     let mut out: Vec<String> = Vec::new();
     let mut choices = 0usize;
     let mut in_choices = false;
     for raw in output.lines() {
         let t = raw.trim();
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         if in_choices {
             choices += 1;
             continue;
         }
-        if BOILER.iter().any(|b| t.starts_with(b)) { continue }
+        if BOILER.iter().any(|b| t.starts_with(b)) {
+            continue;
+        }
         out.push(raw.trim_end().to_string());
-        if t.ends_with("valid choices are:") { in_choices = true }
+        if t.ends_with("valid choices are:") {
+            in_choices = true
+        }
     }
-    if choices > 0 { out.push(more(choices, "choices")) }
+    if choices > 0 {
+        out.push(more(choices, "choices"))
+    }
     cap_vec(out, limits().passthrough_max_lines, "lines").join("\n")
 }
 
@@ -491,7 +657,9 @@ fn aws_s3_ls(output: &str) -> String {
     let mut lines = Vec::new();
     for raw in output.lines() {
         let t = squeeze_ws(raw);
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         lines.push(t.strip_prefix("PRE ").map(str::to_string).unwrap_or(t));
     }
     cap_vec(lines, limits().ls_max_entries, "entries").join("\n")
@@ -506,7 +674,9 @@ fn aws_s3_transfer(output: &str) -> String {
     let mut progress = 0usize;
     for raw in output.lines() {
         let t = squeeze_ws(raw);
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         if t.starts_with("Completed ") && (t.contains(" remaining") || t.contains(" with ")) {
             progress += 1;
             continue;
@@ -522,9 +692,14 @@ fn aws_s3_transfer(output: &str) -> String {
         }
         out.push(t);
     }
-    if dropped > 0 { out.push(more(dropped, "transfers")) }
+    if dropped > 0 {
+        out.push(more(dropped, "transfers"))
+    }
     if out.is_empty() && progress > 0 {
-        out.push(format!("aws s3: {} progress lines, no transfers listed", progress));
+        out.push(format!(
+            "aws s3: {} progress lines, no transfers listed",
+            progress
+        ));
     }
     out.join("\n")
 }
@@ -539,10 +714,14 @@ fn aws_logs_tail(output: &str) -> String {
     let mut lines = Vec::new();
     for raw in output.lines() {
         let t = raw.trim_end();
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         let mut it = t.splitn(3, ' ');
         match (it.next(), it.next(), it.next()) {
-            (Some(ts), Some(_stream), Some(msg)) if is_iso_ts(ts) => lines.push(format!("{} {}", ts, msg.trim_start())),
+            (Some(ts), Some(_stream), Some(msg)) if is_iso_ts(ts) => {
+                lines.push(format!("{} {}", ts, msg.trim_start()))
+            }
             _ => lines.push(t.to_string()),
         }
     }
@@ -553,26 +732,39 @@ fn aws_logs_tail(output: &str) -> String {
 /// (stream names / ingestion times dropped), then the remaining keys (tokens…) compactly.
 fn aws_log_events(docs: &[Value]) -> String {
     let obj = match docs {
-        [Value::Object(o)] if o.get("events").map_or(false, Value::is_array) => o,
+        [Value::Object(o)] if o.get("events").is_some_and(Value::is_array) => o,
         _ => return render_docs(docs),
     };
     let events = obj["events"].as_array().unwrap();
     let mut lines = Vec::with_capacity(events.len());
     for e in events {
-        let ts = e.get("timestamp").and_then(Value::as_i64).and_then(fmt_epoch_ms);
-        let msg = e.get("message").and_then(Value::as_str).unwrap_or("").trim_end();
+        let ts = e
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .and_then(fmt_epoch_ms);
+        let msg = e
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim_end();
         lines.push(match ts {
             Some(ts) => format!("{} {}", ts, msg),
             None => msg.to_string(),
         });
     }
     let mut out = vec![format!("{} events", events.len())];
-    out.extend(tail_pinned(dedupe_template(lines), limits().log_tail, is_log_alert));
+    out.extend(tail_pinned(
+        dedupe_template(lines),
+        limits().log_tail,
+        is_log_alert,
+    ));
     let mut rest = Value::Object(obj.clone());
     rest.as_object_mut().unwrap().remove("events");
     let mut dropped = 0usize;
     cloud_transform(&mut rest, &mut dropped);
-    if rest.as_object().map_or(false, |o| !o.is_empty()) { out.push(compact_json(&rest)) }
+    if rest.as_object().is_some_and(|o| !o.is_empty()) {
+        out.push(compact_json(&rest))
+    }
     out.join("\n")
 }
 
@@ -580,7 +772,12 @@ fn aws_log_events(docs: &[Value]) -> String {
 fn aws_sts_identity(docs: &[Value]) -> String {
     if let [Value::Object(o)] = docs {
         if let (Some(a), Some(arn), Some(u)) = (o.get("Account"), o.get("Arn"), o.get("UserId")) {
-            return format!("Account: {}  Arn: {}  UserId: {}", plain(a), plain(arn), plain(u));
+            return format!(
+                "Account: {}  Arn: {}  UserId: {}",
+                plain(a),
+                plain(arn),
+                plain(u)
+            );
         }
     }
     render_docs(docs)
@@ -588,9 +785,14 @@ fn aws_sts_identity(docs: &[Value]) -> String {
 
 pub(crate) fn filter_aws(args: &[&str], output: &str) -> String {
     let output = normalize(output);
-    if output.trim().is_empty() { return String::new() }
+    if output.trim().is_empty() {
+        return String::new();
+    }
     let w = cmd_words(args, AWS_VALUED, 2);
-    let (svc, op) = (w.first().copied().unwrap_or(""), w.get(1).copied().unwrap_or(""));
+    let (svc, op) = (
+        w.first().copied().unwrap_or(""),
+        w.get(1).copied().unwrap_or(""),
+    );
 
     let (preface, docs) = split_json(&output);
     if let Some(docs) = docs {
@@ -599,7 +801,11 @@ pub(crate) fn filter_aws(args: &[&str], output: &str) -> String {
             ("logs", "get-log-events" | "filter-log-events") => aws_log_events(&docs),
             _ => render_docs(&docs),
         };
-        let mut out: Vec<String> = preface.iter().filter(|l| !l.trim().is_empty()).map(|l| l.trim_end().to_string()).collect();
+        let mut out: Vec<String> = preface
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim_end().to_string())
+            .collect();
         out.push(body);
         return out.join("\n");
     }
@@ -616,15 +822,33 @@ pub(crate) fn filter_aws(args: &[&str], output: &str) -> String {
 // ─── GCLOUD ───────────────────────────────────────────────────────────────────
 
 const GCLOUD_VALUED: &[&str] = &[
-    "--project", "--account", "--configuration", "--impersonate-service-account", "--billing-project",
-    "--format", "--filter", "--sort-by", "--limit", "--page-size", "--verbosity", "--flags-file",
-    "--access-token-file", "--region", "--zone", "--platform",
+    "--project",
+    "--account",
+    "--configuration",
+    "--impersonate-service-account",
+    "--billing-project",
+    "--format",
+    "--filter",
+    "--sort-by",
+    "--limit",
+    "--page-size",
+    "--verbosity",
+    "--flags-file",
+    "--access-token-file",
+    "--region",
+    "--zone",
+    "--platform",
 ];
 
 const GCLOUD_HINTS: &[&str] = &[
-    "$ gcloud ", "To set the active account, run:", "To take a quick anonymous survey",
-    "Updates are available for some Google Cloud CLI components", "installed components, run:",
-    "To update all installed components", "To install or remove components", "To update your SDK installation",
+    "$ gcloud ",
+    "To set the active account, run:",
+    "To take a quick anonymous survey",
+    "Updates are available for some Google Cloud CLI components",
+    "installed components, run:",
+    "To update all installed components",
+    "To install or remove components",
+    "To update your SDK installation",
     "To view your current configuration",
 ];
 
@@ -632,7 +856,9 @@ fn is_spinner(t: &str) -> bool {
     match t.chars().next() {
         Some(c) if ('\u{2800}'..='\u{28FF}').contains(&c) => true, // braille spinner frames
         Some('.') => t.chars().all(|c| c == '.'),
-        Some(c) if "═║╔╗╚╝─│┌┐└┘├┤╠╣".contains(c) => t.chars().all(|c| "═║╔╗╚╝─│┌┐└┘├┤╠╣ ".contains(c)),
+        Some(c) if "═║╔╗╚╝─│┌┐└┘├┤╠╣".contains(c) => {
+            t.chars().all(|c| "═║╔╗╚╝─│┌┐└┘├┤╠╣ ".contains(c))
+        }
         _ => false,
     }
 }
@@ -656,14 +882,21 @@ fn gcloud_text(output: &str) -> String {
     // stderr notices (WARNING:/ERROR:) precede the payload; keep them, detect the rest
     let split = lines.iter().position(|l| {
         let t = l.trim_start();
-        !(t.is_empty() || t.starts_with("WARNING:") || t.starts_with("ERROR:") || t.starts_with("Updated property"))
+        !(t.is_empty()
+            || t.starts_with("WARNING:")
+            || t.starts_with("ERROR:")
+            || t.starts_with("Updated property"))
     });
     let (notices, body) = match split {
         Some(p) => (&lines[..p], &lines[p..]),
         None => (&lines[..], &lines[lines.len()..]),
     };
     let body_text = body.join("\n");
-    let mut out: Vec<String> = notices.iter().filter(|l| !l.trim().is_empty()).cloned().collect();
+    let mut out: Vec<String> = notices
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .cloned()
+        .collect();
     if body.is_empty() {
         return out.join("\n");
     }
@@ -685,12 +918,18 @@ fn gcloud_config_list(output: &str) -> String {
     let mut section: Option<(String, Vec<String>)> = None;
     let flush = |section: &mut Option<(String, Vec<String>)>, out: &mut Vec<String>| {
         if let Some((name, kv)) = section.take() {
-            out.push(if kv.is_empty() { format!("{}:", name) } else { format!("{}: {}", name, kv.join(", ")) });
+            out.push(if kv.is_empty() {
+                format!("{}:", name)
+            } else {
+                format!("{}: {}", name, kv.join(", "))
+            });
         }
     };
     for l in gcloud_denoise(output.lines()) {
         let t = l.trim();
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         if t.starts_with('[') && t.ends_with(']') && t.len() > 2 {
             flush(&mut section, &mut out);
             section = Some((t[1..t.len() - 1].to_string(), Vec::new()));
@@ -702,7 +941,10 @@ fn gcloud_config_list(output: &str) -> String {
         }
         flush(&mut section, &mut out);
         if let Some(rest) = t.strip_prefix("Your active configuration is: ") {
-            out.push(format!("active configuration: {}", rest.trim_matches(|c| c == '[' || c == ']')));
+            out.push(format!(
+                "active configuration: {}",
+                rest.trim_matches(|c| c == '[' || c == ']')
+            ));
         } else {
             out.push(t.to_string());
         }
@@ -722,12 +964,18 @@ fn gcloud_deploy(output: &str) -> String {
     let mut pending = 0usize;
     for l in gcloud_denoise(output.lines()) {
         let t = l.trim();
-        if t.is_empty() { continue }
+        if t.is_empty() {
+            continue;
+        }
         if t.starts_with('✓') || t.starts_with('✔') || is_dots_done(t) {
             pending += 1;
             continue;
         }
-        if t == "Done." || t == "Deploying..." || t.starts_with("Deploying new service...") || t == "Building using Dockerfile and deploying container to Cloud Run service..." {
+        if t == "Done."
+            || t == "Deploying..."
+            || t.starts_with("Deploying new service...")
+            || t == "Building using Dockerfile and deploying container to Cloud Run service..."
+        {
             continue;
         }
         if pending > 0 {
@@ -736,8 +984,15 @@ fn gcloud_deploy(output: &str) -> String {
         }
         out.push(t.to_string());
     }
-    if pending > 0 { out.push(format!("✓ {} steps", pending)) }
-    cap_vec(dedupe_consecutive(out), limits().passthrough_max_lines, "lines").join("\n")
+    if pending > 0 {
+        out.push(format!("✓ {} steps", pending))
+    }
+    cap_vec(
+        dedupe_consecutive(out),
+        limits().passthrough_max_lines,
+        "lines",
+    )
+    .join("\n")
 }
 
 fn build_noise_re() -> &'static Regex {
@@ -772,9 +1027,15 @@ fn is_build_status(l: &str) -> bool {
         || t.starts_with("Created [")
         || t.starts_with("Logs are available")
         || t.starts_with("Successfully")
-        || matches!(t, "FETCHSOURCE" | "BUILD" | "PUSH" | "DONE" | "REMOTE BUILD OUTPUT")
-        || t.contains("SUCCESS") || t.contains("TIMEOUT") || t.contains("CANCELLED")
-        || t.starts_with("ID ") || t.starts_with("ID|")
+        || matches!(
+            t,
+            "FETCHSOURCE" | "BUILD" | "PUSH" | "DONE" | "REMOTE BUILD OUTPUT"
+        )
+        || t.contains("SUCCESS")
+        || t.contains("TIMEOUT")
+        || t.contains("CANCELLED")
+        || t.starts_with("ID ")
+        || t.starts_with("ID|")
 }
 
 /// `gcloud builds submit|log`: docker layer chatter dropped, repeated `Step #N:` prefixes
@@ -790,12 +1051,18 @@ fn gcloud_build_log(output: &str) -> String {
     let mut cur_step: Option<String> = None;
     for l in gcloud_denoise(output.lines()) {
         let t = l.trim();
-        if t.is_empty() { continue }
-        if noise.is_match(t) { continue }
+        if t.is_empty() {
+            continue;
+        }
+        if noise.is_match(t) {
+            continue;
+        }
         // `----- REMOTE BUILD OUTPUT -----` dividers → bare title; pure rules dropped
         if t.starts_with("---") && t.ends_with("---") {
             let inner = t.trim_matches('-').trim();
-            if !inner.is_empty() { lines.push(inner.to_string()) }
+            if !inner.is_empty() {
+                lines.push(inner.to_string())
+            }
             cur_step = None;
             continue;
         }
@@ -817,7 +1084,9 @@ fn gcloud_build_log(output: &str) -> String {
                 lines.push(format!("{}:", prefix));
                 cur_step = Some(prefix.to_string());
             }
-            if !rest.trim().is_empty() { lines.push(format!(" {}", rest.trim_end())) }
+            if !rest.trim().is_empty() {
+                lines.push(format!(" {}", rest.trim_end()))
+            }
             continue;
         }
         cur_step = None;
@@ -833,21 +1102,27 @@ fn gcloud_build_log(output: &str) -> String {
 
 pub(crate) fn filter_gcloud(args: &[&str], output: &str) -> String {
     let output = normalize(output);
-    if output.trim().is_empty() { return String::new() }
+    if output.trim().is_empty() {
+        return String::new();
+    }
     let w = cmd_words(args, GCLOUD_VALUED, 3);
 
     let (preface, docs) = split_json(&output);
     if let Some(docs) = docs {
-        let mut out: Vec<String> = gcloud_denoise(preface).into_iter().filter(|l| !l.trim().is_empty()).collect();
+        let mut out: Vec<String> = gcloud_denoise(preface)
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         out.push(render_docs(&docs));
         return out.join("\n");
     }
     match w.as_slice() {
         ["config", "list", ..] => gcloud_config_list(&output),
         ["builds", "submit" | "log", ..] => gcloud_build_log(&output),
-        ["run", "deploy", ..] | ["run", "services" | "jobs", "deploy"] | ["app", "deploy", ..] | ["functions", "deploy", ..] => {
-            gcloud_deploy(&output)
-        }
+        ["run", "deploy", ..]
+        | ["run", "services" | "jobs", "deploy"]
+        | ["app", "deploy", ..]
+        | ["functions", "deploy", ..] => gcloud_deploy(&output),
         _ => gcloud_text(&output),
     }
 }
@@ -855,12 +1130,24 @@ pub(crate) fn filter_gcloud(args: &[&str], output: &str) -> String {
 // ─── AZ ───────────────────────────────────────────────────────────────────────
 
 const AZ_VALUED: &[&str] = &[
-    "--subscription", "-o", "--output", "--query", "-g", "--resource-group", "-n", "--name", "-l", "--location",
+    "--subscription",
+    "-o",
+    "--output",
+    "--query",
+    "-g",
+    "--resource-group",
+    "-n",
+    "--name",
+    "-l",
+    "--location",
 ];
 
 const AZ_LOGIN_BOILER: &[&str] = &[
-    "A web browser has been opened", "Retrieving tenants and subscriptions", "[Tenant and subscription selection]",
-    "The default is marked with an *", "Select a subscription and tenant",
+    "A web browser has been opened",
+    "Retrieving tenants and subscriptions",
+    "[Tenant and subscription selection]",
+    "The default is marked with an *",
+    "Select a subscription and tenant",
 ];
 
 /// Pull `WARNING:` lines out of az output. Warnings mentioning error/deprecation stay verbatim;
@@ -904,15 +1191,21 @@ fn az_error_text(output: &str) -> String {
     let mut in_help = false;
     for l in output.lines() {
         let t = l.trim();
-        if t.is_empty() { continue }
-        if t.starts_with("Examples from ") && t.ends_with("knowledge base:") { in_help = true }
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with("Examples from ") && t.ends_with("knowledge base:") {
+            in_help = true
+        }
         if in_help {
             help += 1;
             continue;
         }
         out.push(l.trim_end().to_string());
     }
-    if help > 0 { out.push(more(help, "help lines")) }
+    if help > 0 {
+        out.push(more(help, "help lines"))
+    }
     cap_vec(out, limits().passthrough_max_lines, "lines").join("\n")
 }
 
@@ -926,11 +1219,30 @@ fn az_login(output: &str) -> String {
                 let rows: Vec<String> = subs
                     .iter()
                     .map(|s| {
-                        let mark = if s.get("isDefault").and_then(Value::as_bool) == Some(true) { "*" } else { " " };
-                        let tenant = s.get("tenantDisplayName").or_else(|| s.get("tenantId")).map(plain).unwrap_or_default();
+                        let mark = if s.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                            "*"
+                        } else {
+                            " "
+                        };
+                        let tenant = s
+                            .get("tenantDisplayName")
+                            .or_else(|| s.get("tenantId"))
+                            .map(plain)
+                            .unwrap_or_default();
                         let state = s.get("state").and_then(Value::as_str).unwrap_or("Enabled");
-                        let state = if state == "Enabled" { String::new() } else { format!(" [{}]", state) };
-                        format!("{} {} {} ({}){}", mark, plain(&s["name"]), s.get("id").map(plain).unwrap_or_default(), tenant, state)
+                        let state = if state == "Enabled" {
+                            String::new()
+                        } else {
+                            format!(" [{}]", state)
+                        };
+                        format!(
+                            "{} {} {} ({}){}",
+                            mark,
+                            plain(&s["name"]),
+                            s.get("id").map(plain).unwrap_or_default(),
+                            tenant,
+                            state
+                        )
                     })
                     .collect();
                 let mut out = vec![format!("az login: ok ({} subscriptions)", subs.len())];
@@ -941,7 +1253,9 @@ fn az_login(output: &str) -> String {
         return render_docs(&docs);
     }
     let lines: Vec<&str> = output.lines().collect();
-    let hdr = lines.iter().position(|l| l.trim_start().starts_with("No ") && l.contains("Subscription"));
+    let hdr = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("No ") && l.contains("Subscription"));
     let Some(h) = hdr else {
         return az_structured(output, None);
     };
@@ -951,11 +1265,17 @@ fn az_login(output: &str) -> String {
     };
     let mut rows: Vec<String> = Vec::new();
     let mut i = h + 1;
-    if lines.get(i).map_or(false, |u| is_dash_rule(u)) { i += 1 }
+    if lines.get(i).is_some_and(|u| is_dash_rule(u)) {
+        i += 1
+    }
     while i < lines.len() && !lines[i].trim().is_empty() {
         let cells = slice_cols(lines[i], &starts);
         // "[1] *" → default marker
-        let mark = if cells.first().map_or(false, |c| c.contains('*')) { "*" } else { " " };
+        let mark = if cells.first().is_some_and(|c| c.contains('*')) {
+            "*"
+        } else {
+            " "
+        };
         let name = cells.get(1).cloned().unwrap_or_default();
         let id = cells.get(2).cloned().unwrap_or_default();
         let tenant = cells.get(3).cloned().unwrap_or_default();
@@ -967,11 +1287,19 @@ fn az_login(output: &str) -> String {
     // outcome lines (`Tenant:` / `Subscription:`) and anything else that is not boilerplate
     let mut announcements = false;
     for (k, l) in lines.iter().enumerate() {
-        if k >= h && k < i { continue }
+        if k >= h && k < i {
+            continue;
+        }
         let t = l.trim();
-        if t.is_empty() || AZ_LOGIN_BOILER.iter().any(|b| t.starts_with(b)) { continue }
-        if t == "[Announcements]" { announcements = true }
-        if announcements { continue }
+        if t.is_empty() || AZ_LOGIN_BOILER.iter().any(|b| t.starts_with(b)) {
+            continue;
+        }
+        if t == "[Announcements]" {
+            announcements = true
+        }
+        if announcements {
+            continue;
+        }
         out.push(t.to_string());
     }
     out.join("\n")
@@ -981,18 +1309,28 @@ fn az_login(output: &str) -> String {
 fn az_structured(output: &str, fmt: Option<&str>) -> String {
     let (preface, docs) = split_json(output);
     if let Some(docs) = docs {
-        let mut out: Vec<String> = preface.iter().filter(|l| !l.trim().is_empty()).map(|l| l.trim_end().to_string()).collect();
+        let mut out: Vec<String> = preface
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.trim_end().to_string())
+            .collect();
         out.push(render_docs(&docs));
         return out.join("\n");
     }
-    if is_az_error(output) { return az_error_text(output) }
-    if fmt == Some("tsv") { return tsv_text(output) }
+    if is_az_error(output) {
+        return az_error_text(output);
+    }
+    if fmt == Some("tsv") {
+        return tsv_text(output);
+    }
     structured_text(output)
 }
 
 pub(crate) fn filter_az(args: &[&str], output: &str) -> String {
     let output = normalize(output);
-    if output.trim().is_empty() { return String::new() }
+    if output.trim().is_empty() {
+        return String::new();
+    }
     let (mut out, body) = az_split_warnings(&output);
     let w = cmd_words(args, AZ_VALUED, 2);
     let fmt = out_format(args, &["--output", "-o"]);
@@ -1001,7 +1339,9 @@ pub(crate) fn filter_az(args: &[&str], output: &str) -> String {
             Some("login") => az_login(&body),
             _ => az_structured(&body, fmt.as_deref()),
         };
-        if !rendered.is_empty() { out.push(rendered) }
+        if !rendered.is_empty() {
+            out.push(rendered)
+        }
     }
     out.join("\n")
 }
@@ -1072,24 +1412,56 @@ mod tests {
         assert!(!out.contains("ProductCodes"), "{}", out);
         assert!(!out.contains("GroupName: \"\""), "{}", out);
         assert!(!out.contains("ClientToken"), "{}", out);
-        assert!(out.contains("LaunchTime: 2024-01-15T10:23:45+00:00"), "{}", out);
+        assert!(
+            out.contains("LaunchTime: 2024-01-15T10:23:45+00:00"),
+            "{}",
+            out
+        );
         // Groups[], ProductCodes[], GroupName"", StateTransitionReason"", ClientToken"", ResponseMetadata = 6
         assert!(out.contains("[+6 more empty fields]"), "{}", out);
         // serde_json sorts keys (no preserve_order) — crate-wide convention from compact_json
-        assert!(out.contains("SecurityGroups: [2] GroupId|GroupName\n     sg-0011223344|web-sg"), "{}", out);
+        assert!(
+            out.contains("SecurityGroups: [2] GroupId|GroupName\n     sg-0011223344|web-sg"),
+            "{}",
+            out
+        );
         assert!(has_truncation(&out));
-        assert!(out.len() < EC2_JSON.len() / 2, "{} vs {}", out.len(), EC2_JSON.len());
+        assert!(
+            out.len() < EC2_JSON.len() / 2,
+            "{} vs {}",
+            out.len(),
+            EC2_JSON.len()
+        );
     }
 
     #[test]
     fn aws_json_fidelity() {
         let out = filter_aws(&["ec2", "describe-instances"], EC2_JSON);
-        assert_all(&out, &[
-            "ami-0abcdef1234567890", "i-0123456789abcdef0", "t3.micro", "prod-key", "us-east-1a",
-            "10.0.1.23", "54.12.34.56", "running", "subnet-0a1b2c3d", "vpc-0f9e8d7c", "web-sg",
-            "sg-0011223344", "ssh-sg", "sg-5566778899", "arn:aws:iam::123456789012:instance-profile/web-role",
-            "AIPAEXAMPLE", "123456789012", "r-0aa1bb2cc3", "Tenancy: default", "EbsOptimized: false",
-        ]);
+        assert_all(
+            &out,
+            &[
+                "ami-0abcdef1234567890",
+                "i-0123456789abcdef0",
+                "t3.micro",
+                "prod-key",
+                "us-east-1a",
+                "10.0.1.23",
+                "54.12.34.56",
+                "running",
+                "subnet-0a1b2c3d",
+                "vpc-0f9e8d7c",
+                "web-sg",
+                "sg-0011223344",
+                "ssh-sg",
+                "sg-5566778899",
+                "arn:aws:iam::123456789012:instance-profile/web-role",
+                "AIPAEXAMPLE",
+                "123456789012",
+                "r-0aa1bb2cc3",
+                "Tenancy: default",
+                "EbsOptimized: false",
+            ],
+        );
     }
 
     #[test]
@@ -1107,14 +1479,24 @@ mod tests {
     fn aws_json_preface_notice_kept() {
         let raw = "Python 3.7 deprecation warning\n{\"Buckets\": [{\"Name\": \"my-bucket\", \"CreationDate\": \"2023-01-01T00:00:00+00:00\"}]}";
         let out = filter_aws(&["s3api", "list-buckets"], raw);
-        assert_all(&out, &["Python 3.7 deprecation warning", "my-bucket", "2023-01-01T00:00:00+00:00"]);
+        assert_all(
+            &out,
+            &[
+                "Python 3.7 deprecation warning",
+                "my-bucket",
+                "2023-01-01T00:00:00+00:00",
+            ],
+        );
     }
 
     #[test]
     fn aws_sts_one_line() {
         let raw = "{\n    \"UserId\": \"AIDAEXAMPLEID\",\n    \"Account\": \"123456789012\",\n    \"Arn\": \"arn:aws:iam::123456789012:user/dev\"\n}";
         let out = filter_aws(&["sts", "get-caller-identity"], raw);
-        assert_eq!(out, "Account: 123456789012  Arn: arn:aws:iam::123456789012:user/dev  UserId: AIDAEXAMPLEID");
+        assert_eq!(
+            out,
+            "Account: 123456789012  Arn: arn:aws:iam::123456789012:user/dev  UserId: AIDAEXAMPLEID"
+        );
     }
 
     #[test]
@@ -1132,12 +1514,22 @@ mod tests {
         let out = filter_aws(&["logs", "get-log-events", "--log-group-name", "g"], raw);
         assert!(out.starts_with("4 events\n"), "{}", out);
         // 1705312425000 ms = 2024-01-15T09:53:45Z
-        assert!(out.contains("2024-01-15T09:53:45.000Z START RequestId: aaa"), "{}", out);
+        assert!(
+            out.contains("2024-01-15T09:53:45.000Z START RequestId: aaa"),
+            "{}",
+            out
+        );
         assert!(out.contains("processed 10 items  (×2)"), "{}", out);
         assert!(!out.contains("processed 12"), "{}", out);
         assert!(out.contains("ERROR boom"), "{}", out);
         assert!(!out.contains("ingestionTime"), "{}", out);
-        assert_all(&out, &["nextForwardToken: f/1234567890/s", "nextBackwardToken: b/0987654321/s"]);
+        assert_all(
+            &out,
+            &[
+                "nextForwardToken: f/1234567890/s",
+                "nextBackwardToken: b/0987654321/s",
+            ],
+        );
     }
 
     // ── aws table / text / yaml ───────────────────────────────────────────────
@@ -1163,23 +1555,33 @@ mod tests {
 
     #[test]
     fn aws_table_golden() {
-        let out = filter_aws(&["ec2", "describe-instances", "--output", "table"], EC2_TABLE);
+        let out = filter_aws(
+            &["ec2", "describe-instances", "--output", "table"],
+            EC2_TABLE,
+        );
         let expect = "DescribeInstances:\n Instances:\n InstanceId: i-0123456789abcdef0\n InstanceType: t3.micro\n PrivateIpAddress: 10.0.1.23\n  Tags:\n  Key|Value\n  Name|web-1\n  env|prod";
         assert_eq!(out, expect);
     }
 
     #[test]
     fn aws_table_drops_borders_no_plus() {
-        let out = filter_aws(&["ec2", "describe-instances", "--output", "table"], EC2_TABLE);
+        let out = filter_aws(
+            &["ec2", "describe-instances", "--output", "table"],
+            EC2_TABLE,
+        );
         assert!(!out.contains("+--"));
         assert!(!out.contains("||"));
     }
 
     #[test]
     fn aws_text_tsv() {
-        let raw = "i-0123456789abcdef0\tt3.micro\trunning\ni-0fedcba9876543210\tt3.small\tstopped\n";
+        let raw =
+            "i-0123456789abcdef0\tt3.micro\trunning\ni-0fedcba9876543210\tt3.small\tstopped\n";
         let out = filter_aws(&["ec2", "describe-instances", "--output", "text"], raw);
-        assert_eq!(out, "i-0123456789abcdef0 t3.micro running\ni-0fedcba9876543210 t3.small stopped");
+        assert_eq!(
+            out,
+            "i-0123456789abcdef0 t3.micro running\ni-0fedcba9876543210 t3.small stopped"
+        );
         // content-detected without the flag too
         assert_eq!(filter_aws(&["ec2", "describe-instances"], raw), out);
     }
@@ -1189,7 +1591,16 @@ mod tests {
         let raw = "Buckets:\n- CreationDate: '2023-01-01T00:00:00+00:00'\n  Name: my-bucket\n- CreationDate: '2023-02-01T00:00:00+00:00'\n  Name: other-bucket\nOwner:\n  DisplayName: me\n  ID: abcdef0123456789\n";
         let out = filter_aws(&["s3api", "list-buckets", "--output", "yaml"], raw);
         assert!(out.contains("Buckets: [2] CreationDate|Name"), "{}", out);
-        assert_all(&out, &["my-bucket", "other-bucket", "2023-02-01T00:00:00+00:00", "DisplayName: me", "ID: abcdef0123456789"]);
+        assert_all(
+            &out,
+            &[
+                "my-bucket",
+                "other-bucket",
+                "2023-02-01T00:00:00+00:00",
+                "DisplayName: me",
+                "ID: abcdef0123456789",
+            ],
+        );
     }
 
     // ── aws s3 ────────────────────────────────────────────────────────────────
@@ -1198,13 +1609,18 @@ mod tests {
     fn aws_s3_ls_golden() {
         let raw = "                           PRE logs/\n                           PRE tmp/\n2024-01-15 10:23:45     123456 data/report.csv\n2024-01-16 08:00:00          0 data/empty.txt\n\nTotal Objects: 2\n   Total Size: 123456\n";
         let out = filter_aws(&["s3", "ls", "s3://my-bucket/", "--summarize"], raw);
-        assert_eq!(out, "logs/\ntmp/\n2024-01-15 10:23:45 123456 data/report.csv\n2024-01-16 08:00:00 0 data/empty.txt\nTotal Objects: 2\nTotal Size: 123456");
+        assert_eq!(
+            out,
+            "logs/\ntmp/\n2024-01-15 10:23:45 123456 data/report.csv\n2024-01-16 08:00:00 0 data/empty.txt\nTotal Objects: 2\nTotal Size: 123456"
+        );
     }
 
     #[test]
     fn aws_s3_ls_cap_announced() {
         let n = limits().ls_max_entries + 5;
-        let raw: String = (0..n).map(|i| format!("2024-01-15 10:23:45 {} data/f{}.txt\n", i, i)).collect();
+        let raw: String = (0..n)
+            .map(|i| format!("2024-01-15 10:23:45 {} data/f{}.txt\n", i, i))
+            .collect();
         let out = filter_aws(&["s3", "ls", "s3://b/"], &raw);
         assert!(out.contains(&more(5, "entries")), "{}", out);
         assert!(out.contains("data/f0.txt"));
@@ -1216,24 +1632,32 @@ mod tests {
         let out = filter_aws(&["s3", "sync", ".", "s3://my-bucket"], raw);
         assert!(!out.contains("Completed"), "{}", out);
         assert_eq!(out.lines().count(), 4, "{}", out);
-        assert_all(&out, &[
-            "upload: ./a.txt to s3://my-bucket/a.txt",
-            "upload: ./dir/b.txt to s3://my-bucket/dir/b.txt",
-            "upload failed: ./c.txt to s3://my-bucket/c.txt An error occurred (AccessDenied) when calling the PutObject operation: Access Denied",
-            "delete: s3://my-bucket/old.txt",
-        ]);
+        assert_all(
+            &out,
+            &[
+                "upload: ./a.txt to s3://my-bucket/a.txt",
+                "upload: ./dir/b.txt to s3://my-bucket/dir/b.txt",
+                "upload failed: ./c.txt to s3://my-bucket/c.txt An error occurred (AccessDenied) when calling the PutObject operation: Access Denied",
+                "delete: s3://my-bucket/old.txt",
+            ],
+        );
     }
 
     #[test]
     fn aws_s3_cp_only_progress() {
-        let out = filter_aws(&["s3", "cp", "a", "s3://b/a"], "Completed 256.0 KiB/1.0 MiB (1.2 MiB/s) with 1 file(s) remaining\r");
+        let out = filter_aws(
+            &["s3", "cp", "a", "s3://b/a"],
+            "Completed 256.0 KiB/1.0 MiB (1.2 MiB/s) with 1 file(s) remaining\r",
+        );
         assert_eq!(out, "aws s3: 1 progress lines, no transfers listed");
     }
 
     #[test]
     fn aws_s3_transfer_cap() {
         let n = limits().list_max_lines + 3;
-        let raw: String = (0..n).map(|i| format!("upload: ./f{}.txt to s3://b/f{}.txt\n", i, i)).collect();
+        let raw: String = (0..n)
+            .map(|i| format!("upload: ./f{}.txt to s3://b/f{}.txt\n", i, i))
+            .collect();
         let out = filter_aws(&["s3", "sync", ".", "s3://b"], &raw);
         assert!(out.contains(&more(3, "transfers")), "{}", out);
     }
@@ -1245,8 +1669,16 @@ mod tests {
         let raw = "2024-01-15T10:23:45.123000+00:00 2024/01/15/[$LATEST]abc123 START RequestId: 1\n2024-01-15T10:23:45.200000+00:00 2024/01/15/[$LATEST]abc123 processed 10 items\n2024-01-15T10:23:45.300000+00:00 2024/01/15/[$LATEST]abc123 processed 11 items\n2024-01-15T10:23:45.400000+00:00 2024/01/15/[$LATEST]abc123 ERROR timeout after 3000ms\n";
         let out = filter_aws(&["logs", "tail", "/aws/lambda/fn"], raw);
         assert!(!out.contains("[$LATEST]abc123"), "{}", out);
-        assert!(out.contains("2024-01-15T10:23:45.200000+00:00 processed 10 items  (×2)"), "{}", out);
-        assert!(out.contains("2024-01-15T10:23:45.400000+00:00 ERROR timeout after 3000ms"), "{}", out);
+        assert!(
+            out.contains("2024-01-15T10:23:45.200000+00:00 processed 10 items  (×2)"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("2024-01-15T10:23:45.400000+00:00 ERROR timeout after 3000ms"),
+            "{}",
+            out
+        );
         assert!(out.contains("START RequestId: 1"));
     }
 
@@ -1255,19 +1687,34 @@ mod tests {
         let n = limits().log_tail + 20;
         let mut raw = String::from("2024-01-15T10:00:00.000000+00:00 s ERROR early failure\n");
         for i in 0..n {
-            raw.push_str(&format!("2024-01-15T10:00:00.000000+00:00 s line {} value {}\n", i, i * 7 % 5));
+            raw.push_str(&format!(
+                "2024-01-15T10:00:00.000000+00:00 s line {} value {}\n",
+                i,
+                i * 7 % 5
+            ));
         }
         let out = filter_aws(&["logs", "tail", "g"], &raw);
         // line templates dedupe fully → tiny output, but the error survives
         assert!(out.contains("ERROR early failure"), "{}", out);
         // short-format (no stream column) lines are untouched
-        let short = filter_aws(&["logs", "tail", "g", "--format", "short"], "10:23:45 hello world\n");
+        let short = filter_aws(
+            &["logs", "tail", "g", "--format", "short"],
+            "10:23:45 hello world\n",
+        );
         assert_eq!(short, "10:23:45 hello world");
     }
 
     #[test]
     fn tail_pinned_marker() {
-        let lines: Vec<String> = (0..10).map(|i| if i == 1 { "ERROR x".into() } else { format!("l{}", i) }).collect();
+        let lines: Vec<String> = (0..10)
+            .map(|i| {
+                if i == 1 {
+                    "ERROR x".into()
+                } else {
+                    format!("l{}", i)
+                }
+            })
+            .collect();
         let out = tail_pinned(lines, 3, is_log_alert);
         assert_eq!(out, vec!["ERROR x", "[+6 more lines]", "l7", "l8", "l9"]);
     }
@@ -1278,16 +1725,28 @@ mod tests {
     fn aws_error_verbatim() {
         let raw = "\nAn error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied\n";
         let out = filter_aws(&["s3api", "list-buckets"], raw);
-        assert_eq!(out, "An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied");
-        let creds = filter_aws(&["ec2", "describe-instances"], "Unable to locate credentials. You can configure credentials by running \"aws configure\".\n");
-        assert_eq!(creds, "Unable to locate credentials. You can configure credentials by running \"aws configure\".");
+        assert_eq!(
+            out,
+            "An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied"
+        );
+        let creds = filter_aws(
+            &["ec2", "describe-instances"],
+            "Unable to locate credentials. You can configure credentials by running \"aws configure\".\n",
+        );
+        assert_eq!(
+            creds,
+            "Unable to locate credentials. You can configure credentials by running \"aws configure\"."
+        );
     }
 
     #[test]
     fn aws_usage_error_boilerplate_and_choices() {
         let raw = "usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\nTo see help text, you can run:\n\n  aws help\n  aws <command> help\n  aws <command> <subcommand> help\n\naws: error: argument command: Invalid choice, valid choices are:\n\naccessanalyzer                           | account\nacm                                      | acm-pca\namplify                                  | amplifybackend\n";
         let out = filter_aws(&["s3x"], raw);
-        assert_eq!(out, "aws: error: argument command: Invalid choice, valid choices are:\n[+3 more choices]");
+        assert_eq!(
+            out,
+            "aws: error: argument command: Invalid choice, valid choices are:\n[+3 more choices]"
+        );
     }
 
     #[test]
@@ -1295,14 +1754,29 @@ mod tests {
         assert_eq!(filter_aws(&["ec2", "describe-instances"], ""), "");
         assert_eq!(filter_aws(&["s3", "ls"], "\n\n"), "");
         assert_eq!(filter_aws(&["s3", "sync", ".", "s3://b"], ""), "");
-        let out = filter_aws(&["ecr", "get-login-password"], "eyJwYXlsb2FkIjoiYWJj\n\n\nsecond\n");
+        let out = filter_aws(
+            &["ecr", "get-login-password"],
+            "eyJwYXlsb2FkIjoiYWJj\n\n\nsecond\n",
+        );
         assert_eq!(out, "eyJwYXlsb2FkIjoiYWJj\n\nsecond");
     }
 
     #[test]
     fn aws_words_skip_global_options() {
         let raw = "{\"UserId\": \"U\", \"Account\": \"1\", \"Arn\": \"a\"}";
-        let out = filter_aws(&["--profile", "prod", "--region", "eu-west-1", "sts", "get-caller-identity", "--output", "json"], raw);
+        let out = filter_aws(
+            &[
+                "--profile",
+                "prod",
+                "--region",
+                "eu-west-1",
+                "sts",
+                "get-caller-identity",
+                "--output",
+                "json",
+            ],
+            raw,
+        );
         assert_eq!(out, "Account: 1  Arn: a  UserId: U");
     }
 
@@ -1325,7 +1799,9 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
     fn gcloud_table_cap() {
         let n = limits().list_max_lines + 4;
         let mut raw = String::from("NAME     ZONE\n");
-        for i in 0..n { raw.push_str(&format!("vm-{:<5} us-central1-a\n", i)) }
+        for i in 0..n {
+            raw.push_str(&format!("vm-{:<5} us-central1-a\n", i))
+        }
         let out = filter_gcloud(&["compute", "instances", "list"], &raw);
         assert!(out.contains(&more(4, "rows")), "{}", out);
         assert!(out.contains("vm-0"));
@@ -1335,7 +1811,10 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
     fn gcloud_json_format() {
         let raw = "[\n  {\n    \"name\": \"web-1\",\n    \"status\": \"RUNNING\",\n    \"labels\": {},\n    \"zone\": \"https://www.googleapis.com/compute/v1/projects/p/zones/us-central1-a\"\n  }\n]";
         let out = filter_gcloud(&["compute", "instances", "list", "--format=json"], raw);
-        assert_all(&out, &["name: web-1", "status: RUNNING", "zones/us-central1-a"]);
+        assert_all(
+            &out,
+            &["name: web-1", "status: RUNNING", "zones/us-central1-a"],
+        );
         assert!(!out.contains("labels"), "{}", out);
         assert!(out.contains("[+1 more empty fields]"), "{}", out);
     }
@@ -1344,8 +1823,24 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
     fn gcloud_describe_yaml() {
         let raw = "WARNING: Some requests generated warnings.\nid: '1234567890123456789'\nkind: compute#instance\nmachineType: https://www.googleapis.com/compute/v1/projects/p/zones/us-central1-a/machineTypes/e2-medium\nname: web-1\nnetworkInterfaces:\n- accessConfigs:\n  - natIP: 34.120.10.11\n    type: ONE_TO_ONE_NAT\n  networkIP: 10.128.0.2\nstatus: RUNNING\ntags:\n  fingerprint: abc=\n  items:\n  - http-server\n  - https-server\n";
         let out = filter_gcloud(&["compute", "instances", "describe", "web-1"], raw);
-        assert!(out.starts_with("WARNING: Some requests generated warnings.\n"), "{}", out);
-        assert_all(&out, &["name: web-1", "status: RUNNING", "natIP: 34.120.10.11", "networkIP: 10.128.0.2", "items: [http-server, https-server]", "fingerprint: abc=", "\"1234567890123456789\"", "machineTypes/e2-medium"]);
+        assert!(
+            out.starts_with("WARNING: Some requests generated warnings.\n"),
+            "{}",
+            out
+        );
+        assert_all(
+            &out,
+            &[
+                "name: web-1",
+                "status: RUNNING",
+                "natIP: 34.120.10.11",
+                "networkIP: 10.128.0.2",
+                "items: [http-server, https-server]",
+                "fingerprint: abc=",
+                "\"1234567890123456789\"",
+                "machineTypes/e2-medium",
+            ],
+        );
         // parsed, not passed through: raw YAML has the bullet at column 0
         assert!(!out.contains("\n- accessConfigs:"), "{}", out);
         assert!(out.contains("networkInterfaces: [1]"), "{}", out);
@@ -1355,12 +1850,18 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
     fn gcloud_config_list_compact() {
         let raw = "[compute]\nregion = us-central1\nzone = us-central1-a\n[core]\naccount = dev@example.com\ndisable_usage_reporting = True\nproject = my-project\n\nYour active configuration is: [default]\n";
         let out = filter_gcloud(&["config", "list"], raw);
-        assert_eq!(out, "compute: region=us-central1, zone=us-central1-a\ncore: account=dev@example.com, disable_usage_reporting=True, project=my-project\nactive configuration: default");
+        assert_eq!(
+            out,
+            "compute: region=us-central1, zone=us-central1-a\ncore: account=dev@example.com, disable_usage_reporting=True, project=my-project\nactive configuration: default"
+        );
     }
 
     #[test]
     fn gcloud_config_set_kept() {
-        let out = filter_gcloud(&["config", "set", "project", "my-project"], "Updated property [core/project].\n");
+        let out = filter_gcloud(
+            &["config", "set", "project", "my-project"],
+            "Updated property [core/project].\n",
+        );
         assert_eq!(out, "Updated property [core/project].");
     }
 
@@ -1368,14 +1869,20 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
     fn gcloud_auth_list_table_hints_dropped() {
         let raw = "   Credentialed Accounts\nACTIVE  ACCOUNT\n*       dev@example.com\n        ci@my-project.iam.gserviceaccount.com\n\nTo set the active account, run:\n    $ gcloud config set account `ACCOUNT`\n\n";
         let out = filter_gcloud(&["auth", "list"], raw);
-        assert_eq!(out, "   Credentialed Accounts\nACTIVE|ACCOUNT\n*|dev@example.com\n|ci@my-project.iam.gserviceaccount.com");
+        assert_eq!(
+            out,
+            "   Credentialed Accounts\nACTIVE|ACCOUNT\n*|dev@example.com\n|ci@my-project.iam.gserviceaccount.com"
+        );
     }
 
     #[test]
     fn gcloud_run_deploy_success() {
         let raw = "Deploying container to Cloud Run service [api] in project [my-project] region [us-central1]\nDeploying...\nCreating Revision......................done\nRouting traffic.....done\nSetting IAM Policy....done\nDone.\nService [api] revision [api-00012-xyz] has been deployed and is serving 100 percent of traffic.\nService URL: https://api-abc123-uc.a.run.app\n";
         let out = filter_gcloud(&["run", "deploy", "api", "--image", "gcr.io/p/api"], raw);
-        assert_eq!(out, "Deploying container to Cloud Run service [api] in project [my-project] region [us-central1]\n✓ 3 steps\nService [api] revision [api-00012-xyz] has been deployed and is serving 100 percent of traffic.\nService URL: https://api-abc123-uc.a.run.app");
+        assert_eq!(
+            out,
+            "Deploying container to Cloud Run service [api] in project [my-project] region [us-central1]\n✓ 3 steps\nService [api] revision [api-00012-xyz] has been deployed and is serving 100 percent of traffic.\nService URL: https://api-abc123-uc.a.run.app"
+        );
     }
 
     #[test]
@@ -1383,14 +1890,17 @@ batch-7  us-central1-b  n2-standard-4 true         10.128.0.9                  T
         let raw = "Deploying container to Cloud Run service [api] in project [my-project] region [us-central1]\n⠛ Deploying... Creating Revision...\n⠶ Deploying... Creating Revision...\nX Deploying... Revision deployment failed. Container failed to start.\n  ✓ Creating Revision...\n  X Routing traffic...\n  . Setting IAM Policy...\nDeployment failed\nERROR: (gcloud.run.deploy) The user-provided container failed to start and listen on the port defined provided by the PORT=8080 environment variable.\nLogs URL: https://console.cloud.google.com/logs/viewer?project=my-project&resource=cloud_run_revision/service_name/api/revision_name/api-00013-abc\n";
         let out = filter_gcloud(&["run", "deploy", "api"], raw);
         assert!(!out.contains('⠛'), "{}", out);
-        assert_all(&out, &[
-            "X Deploying... Revision deployment failed. Container failed to start.",
-            "✓ 1 steps",
-            "X Routing traffic...",
-            ". Setting IAM Policy...",
-            "ERROR: (gcloud.run.deploy) The user-provided container failed to start",
-            "Logs URL: https://console.cloud.google.com/logs/viewer?project=my-project",
-        ]);
+        assert_all(
+            &out,
+            &[
+                "X Deploying... Revision deployment failed. Container failed to start.",
+                "✓ 1 steps",
+                "X Routing traffic...",
+                ". Setting IAM Policy...",
+                "ERROR: (gcloud.run.deploy) The user-provided container failed to start",
+                "Logs URL: https://console.cloud.google.com/logs/viewer?project=my-project",
+            ],
+        );
     }
 
     #[test]
@@ -1449,12 +1959,22 @@ ID                                    CREATE_TIME                DURATION  SOURC
         assert!(out.contains("Starting Step #0 - \"build\":\n Step 1/3 : FROM node:20-alpine\n Step 2/3 : WORKDIR /app"), "{}", out);
         // status table → positional pipe row
         assert!(out.contains("ID|CREATE_TIME|DURATION|SOURCE|IMAGES|STATUS\n8f1a2b3c-4d5e|2024-01-15T10:23:45+00:00|1M23S|"), "{}", out);
-        assert_all(&out, &[
-            "Step 1/3 : FROM node:20-alpine", "Step 3/3 : COPY . .", "Successfully tagged gcr.io/my-project/app:latest",
-            "latest: digest: sha256:0123456789abcdef size: 1234", "8f1a2b3c-4d5e", "gs://my-project_cloudbuild/source/1705312345.12-abc.tgz",
-            "1M23S", "SUCCESS", "Finished Step #1 - \"push\"", "FETCHSOURCE",
-            "Logs are available at [ https://console.cloud.google.com/cloud-build/builds/8f1a2b3c-4d5e?project=123 ].",
-        ]);
+        assert_all(
+            &out,
+            &[
+                "Step 1/3 : FROM node:20-alpine",
+                "Step 3/3 : COPY . .",
+                "Successfully tagged gcr.io/my-project/app:latest",
+                "latest: digest: sha256:0123456789abcdef size: 1234",
+                "8f1a2b3c-4d5e",
+                "gs://my-project_cloudbuild/source/1705312345.12-abc.tgz",
+                "1M23S",
+                "SUCCESS",
+                "Finished Step #1 - \"push\"",
+                "FETCHSOURCE",
+                "Logs are available at [ https://console.cloud.google.com/cloud-build/builds/8f1a2b3c-4d5e?project=123 ].",
+            ],
+        );
         // gsutil FETCHSOURCE chatter is decoration: the source URL survives in Uploading + status table
         assert!(!out.contains("Fetching storage object"), "{}", out);
         assert!(out.len() < raw.len() / 2, "{} vs {}", out.len(), raw.len());
@@ -1464,8 +1984,12 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn gcloud_builds_log_tail_pins_error() {
         let n = limits().log_tail + 30;
         let mut raw = String::from("Step #0: ERROR: build failed early\n");
-        for i in 0..n { raw.push_str(&format!("Step #0: compiling module {} of {}\n", i, n)) }
-        raw.push_str("ERROR: (gcloud.builds.submit) build 8f1a-2b3c completed with status \"FAILURE\"\n");
+        for i in 0..n {
+            raw.push_str(&format!("Step #0: compiling module {} of {}\n", i, n))
+        }
+        raw.push_str(
+            "ERROR: (gcloud.builds.submit) build 8f1a-2b3c completed with status \"FAILURE\"\n",
+        );
         let out = filter_gcloud(&["builds", "submit"], &raw);
         assert!(out.contains("ERROR: build failed early"), "{}", out);
         assert!(out.contains("completed with status \"FAILURE\""), "{}", out);
@@ -1476,12 +2000,18 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn gcloud_error_and_empty() {
         let raw = "ERROR: (gcloud.compute.instances.list) Some requests did not succeed:\n - Failed to find project my-project\n";
         let out = filter_gcloud(&["compute", "instances", "list"], raw);
-        assert_eq!(out, "ERROR: (gcloud.compute.instances.list) Some requests did not succeed:\n - Failed to find project my-project");
+        assert_eq!(
+            out,
+            "ERROR: (gcloud.compute.instances.list) Some requests did not succeed:\n - Failed to find project my-project"
+        );
         assert_eq!(filter_gcloud(&["compute", "instances", "list"], ""), "");
         assert_eq!(filter_gcloud(&["run", "deploy"], "\n"), "");
         assert_eq!(filter_gcloud(&["builds", "log"], ""), "");
         assert_eq!(filter_gcloud(&["config", "list"], ""), "");
-        assert_eq!(filter_gcloud(&["projects", "list"], "Listed 0 items.\n"), "Listed 0 items.");
+        assert_eq!(
+            filter_gcloud(&["projects", "list"], "Listed 0 items.\n"),
+            "Listed 0 items."
+        );
     }
 
     #[test]
@@ -1497,7 +2027,16 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn az_json_group_create() {
         let raw = "{\n  \"id\": \"/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-demo\",\n  \"location\": \"eastus\",\n  \"managedBy\": null,\n  \"name\": \"rg-demo\",\n  \"properties\": {\n    \"provisioningState\": \"Succeeded\"\n  },\n  \"tags\": null,\n  \"type\": \"Microsoft.Resources/resourceGroups\"\n}\n";
         let out = filter_az(&["group", "create", "-n", "rg-demo", "-l", "eastus"], raw);
-        assert_all(&out, &["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-demo", "location: eastus", "name: rg-demo", "provisioningState: Succeeded", "type: Microsoft.Resources/resourceGroups"]);
+        assert_all(
+            &out,
+            &[
+                "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-demo",
+                "location: eastus",
+                "name: rg-demo",
+                "provisioningState: Succeeded",
+                "type: Microsoft.Resources/resourceGroups",
+            ],
+        );
         assert!(!out.contains("managedBy"), "{}", out);
         assert!(out.contains("[+2 more empty fields]"), "{}", out);
     }
@@ -1506,7 +2045,10 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn az_table_output() {
         let raw = "Name       ResourceGroup    Location    Zones    PowerState\n---------  ---------------  ----------  -------  ------------\nvm-web-1   rg-demo          eastus      1        VM running\nvm-db-1    rg-demo          eastus               VM deallocated\n";
         let out = filter_az(&["vm", "list", "-d", "-o", "table"], raw);
-        assert_eq!(out, "Name|ResourceGroup|Location|Zones|PowerState\nvm-web-1|rg-demo|eastus|1|VM running\nvm-db-1|rg-demo|eastus||VM deallocated");
+        assert_eq!(
+            out,
+            "Name|ResourceGroup|Location|Zones|PowerState\nvm-web-1|rg-demo|eastus|1|VM running\nvm-db-1|rg-demo|eastus||VM deallocated"
+        );
     }
 
     #[test]
@@ -1519,14 +2061,20 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn az_login_text_table() {
         let raw = "A web browser has been opened at https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize. Please continue the login in the web browser. If no web browser is available or if the web browser fails to open, use device code flow with `az login --use-device-code`.\n\nRetrieving tenants and subscriptions for the selection...\n\n[Tenant and subscription selection]\n\nNo     Subscription name    Subscription ID                       Tenant\n-----  -------------------  ------------------------------------  -----------------\n[1] *  Pay-As-You-Go        00000000-0000-0000-0000-000000000000  Default Directory\n[2]    Dev Sandbox          11111111-1111-1111-1111-111111111111  Contoso\n\nThe default is marked with an *; the default tenant is 'Default Directory' and subscription is 'Pay-As-You-Go' (00000000-0000-0000-0000-000000000000).\n\nSelect a subscription and tenant (Type a number or Enter for no changes): \n\nTenant: Default Directory\nSubscription: Pay-As-You-Go (00000000-0000-0000-0000-000000000000)\n\n[Announcements]\nWith the new Azure CLI login experience, you can select the subscription to use with 'az login'.\n";
         let out = filter_az(&["login"], raw);
-        assert_eq!(out, "az login: ok (2 subscriptions)\n* Pay-As-You-Go 00000000-0000-0000-0000-000000000000 (Default Directory)\n  Dev Sandbox 11111111-1111-1111-1111-111111111111 (Contoso)\nTenant: Default Directory\nSubscription: Pay-As-You-Go (00000000-0000-0000-0000-000000000000)");
+        assert_eq!(
+            out,
+            "az login: ok (2 subscriptions)\n* Pay-As-You-Go 00000000-0000-0000-0000-000000000000 (Default Directory)\n  Dev Sandbox 11111111-1111-1111-1111-111111111111 (Contoso)\nTenant: Default Directory\nSubscription: Pay-As-You-Go (00000000-0000-0000-0000-000000000000)"
+        );
     }
 
     #[test]
     fn az_login_json() {
         let raw = "[\n  {\n    \"cloudName\": \"AzureCloud\",\n    \"homeTenantId\": \"aaaa\",\n    \"id\": \"00000000-0000-0000-0000-000000000000\",\n    \"isDefault\": true,\n    \"managedByTenants\": [],\n    \"name\": \"Pay-As-You-Go\",\n    \"state\": \"Enabled\",\n    \"tenantId\": \"aaaa\",\n    \"user\": { \"name\": \"me@example.com\", \"type\": \"user\" }\n  },\n  {\n    \"cloudName\": \"AzureCloud\",\n    \"homeTenantId\": \"bbbb\",\n    \"id\": \"11111111-1111-1111-1111-111111111111\",\n    \"isDefault\": false,\n    \"managedByTenants\": [],\n    \"name\": \"Dev\",\n    \"state\": \"Disabled\",\n    \"tenantId\": \"bbbb\",\n    \"user\": { \"name\": \"me@example.com\", \"type\": \"user\" }\n  }\n]\n";
         let out = filter_az(&["login"], raw);
-        assert_eq!(out, "az login: ok (2 subscriptions)\n* Pay-As-You-Go 00000000-0000-0000-0000-000000000000 (aaaa)\n  Dev 11111111-1111-1111-1111-111111111111 (bbbb) [Disabled]");
+        assert_eq!(
+            out,
+            "az login: ok (2 subscriptions)\n* Pay-As-You-Go 00000000-0000-0000-0000-000000000000 (aaaa)\n  Dev 11111111-1111-1111-1111-111111111111 (bbbb) [Disabled]"
+        );
     }
 
     #[test]
@@ -1539,15 +2087,35 @@ ID                                    CREATE_TIME                DURATION  SOURC
     #[test]
     fn az_warnings_collapsed_unless_important() {
         let json = "{\"name\": \"aks-1\", \"provisioningState\": \"Succeeded\"}";
-        let two = format!("WARNING: The behavior of this command has been altered by the following extension: aks-preview\nWARNING: Command group 'aks' is in preview and under development.\n{}", json);
+        let two = format!(
+            "WARNING: The behavior of this command has been altered by the following extension: aks-preview\nWARNING: Command group 'aks' is in preview and under development.\n{}",
+            json
+        );
         let out = filter_az(&["aks", "show", "-n", "aks-1", "-g", "rg"], &two);
-        assert_eq!(out, "[+2 more warnings]\nname: aks-1\nprovisioningState: Succeeded");
-        let one = format!("WARNING: Command group 'aks' is in preview and under development.\n{}", json);
+        assert_eq!(
+            out,
+            "[+2 more warnings]\nname: aks-1\nprovisioningState: Succeeded"
+        );
+        let one = format!(
+            "WARNING: Command group 'aks' is in preview and under development.\n{}",
+            json
+        );
         let out1 = filter_az(&["aks", "show"], &one);
-        assert!(out1.starts_with("WARNING: Command group 'aks' is in preview"), "{}", out1);
-        let dep = format!("WARNING: This command has been deprecated and will be removed in a future release.\nWARNING: noise\nWARNING: more noise\n{}", json);
+        assert!(
+            out1.starts_with("WARNING: Command group 'aks' is in preview"),
+            "{}",
+            out1
+        );
+        let dep = format!(
+            "WARNING: This command has been deprecated and will be removed in a future release.\nWARNING: noise\nWARNING: more noise\n{}",
+            json
+        );
         let out2 = filter_az(&["aks", "show"], &dep);
-        assert!(out2.starts_with("WARNING: This command has been deprecated"), "{}", out2);
+        assert!(
+            out2.starts_with("WARNING: This command has been deprecated"),
+            "{}",
+            out2
+        );
         assert!(out2.contains("[+2 more warnings]"), "{}", out2);
     }
 
@@ -1555,15 +2123,24 @@ ID                                    CREATE_TIME                DURATION  SOURC
     fn az_error_with_examples_block() {
         let raw = "ERROR: (ResourceGroupNotFound) Resource group 'rg-missing' could not be found.\nCode: ResourceGroupNotFound\nMessage: Resource group 'rg-missing' could not be found.\n\nExamples from AI knowledge base:\naz vm list --resource-group MyResourceGroup\nList all VMs in a resource group\n\nhttps://docs.microsoft.com/en-us/cli/azure/vm#az_vm_list\nRead more about the command in reference docs\n";
         let out = filter_az(&["vm", "list", "-g", "rg-missing"], raw);
-        assert_eq!(out, "ERROR: (ResourceGroupNotFound) Resource group 'rg-missing' could not be found.\nCode: ResourceGroupNotFound\nMessage: Resource group 'rg-missing' could not be found.\n[+5 more help lines]");
+        assert_eq!(
+            out,
+            "ERROR: (ResourceGroupNotFound) Resource group 'rg-missing' could not be found.\nCode: ResourceGroupNotFound\nMessage: Resource group 'rg-missing' could not be found.\n[+5 more help lines]"
+        );
     }
 
     #[test]
     fn az_empty_and_unknown_text() {
         assert_eq!(filter_az(&["group", "list"], ""), "");
         assert_eq!(filter_az(&["login"], "\n"), "");
-        let out = filter_az(&["aks", "get-credentials", "-n", "aks-1", "-g", "rg"], "Merged \"aks-1\" as current context in /home/me/.kube/config\n");
-        assert_eq!(out, "Merged \"aks-1\" as current context in /home/me/.kube/config");
+        let out = filter_az(
+            &["aks", "get-credentials", "-n", "aks-1", "-g", "rg"],
+            "Merged \"aks-1\" as current context in /home/me/.kube/config\n",
+        );
+        assert_eq!(
+            out,
+            "Merged \"aks-1\" as current context in /home/me/.kube/config"
+        );
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -1573,14 +2150,32 @@ ID                                    CREATE_TIME                DURATION  SOURC
         assert_eq!(filter_aws(&["s3", "ls"], "PRE\n"), "PRE");
         assert_eq!(filter_aws(&["logs", "tail", "g"], "x\n"), "x");
         assert_eq!(filter_gcloud(&[], "héllo  wörld\n"), "héllo  wörld");
-        assert_eq!(filter_az(&[], "WARNING: only a warning\n"), "WARNING: only a warning");
-        assert!(filter_aws(&["ec2", "describe-instances", "--output", "table"], "---\n|a|\n---\n").ends_with("a:"));
+        assert_eq!(
+            filter_az(&[], "WARNING: only a warning\n"),
+            "WARNING: only a warning"
+        );
+        assert!(
+            filter_aws(
+                &["ec2", "describe-instances", "--output", "table"],
+                "---\n|a|\n---\n"
+            )
+            .ends_with("a:")
+        );
         assert!(!is_table_header("ERROR: SOMETHING  BAD", None));
         assert!(is_table_header("NAME  ZONE  STATUS", None));
         // per-digit: run width kept so `9 items` and `10 items` stay distinct templates
-        assert_eq!(template_of("2024-01-15 processed 10 items in 45ms"), "####-##-## processed ## items in ##ms");
-        assert_eq!(template_of("processed 10 items"), template_of("processed 12 items"));
-        assert_ne!(template_of("processed 9 items"), template_of("processed 10 items"));
+        assert_eq!(
+            template_of("2024-01-15 processed 10 items in 45ms"),
+            "####-##-## processed ## items in ##ms"
+        );
+        assert_eq!(
+            template_of("processed 10 items"),
+            template_of("processed 12 items")
+        );
+        assert_ne!(
+            template_of("processed 9 items"),
+            template_of("processed 10 items")
+        );
         assert!(yaml_docs("just a sentence\nanother one").is_none());
         assert!(yaml_docs("ERROR: x\nfoo: bar").is_none());
     }

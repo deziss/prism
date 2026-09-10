@@ -1,4 +1,3 @@
-
 // PRISM encode.rs — TOON (Token-Oriented Object Notation) + TRON encoding
 
 use serde_json::Value;
@@ -110,21 +109,21 @@ fn encode_array_tron(arr: &[Value]) -> String {
     let mut result = String::new();
 
     // Header
-    result.push_str("┌");
+    result.push('┌');
     for (i, w) in widths.iter().enumerate() {
         let label = &keys[i];
         result.push_str(&format!(" {:<width$} ", label, width = w + 2));
         if i < widths.len() - 1 {
-            result.push_str("┬");
+            result.push('┬');
         } else {
             result.push_str("┐\n");
         }
     }
-    result.push_str("├");
+    result.push('├');
     for w in &widths {
         result.push_str(&"─".repeat(w + 2));
-        if w < &widths.last().unwrap_or(&0) {
-            result.push_str("┼");
+        if w < widths.last().unwrap_or(&0) {
+            result.push('┼');
         }
     }
     result.push_str("┤\n");
@@ -132,7 +131,7 @@ fn encode_array_tron(arr: &[Value]) -> String {
     // Rows
     let last_w = widths.last().cloned().unwrap_or(0);
     for val in arr {
-        result.push_str("│");
+        result.push('│');
         for (i, k) in keys.iter().enumerate() {
             let text = if let Some(obj) = val.as_object() {
                 obj.get(k.as_str()).map(toon_scalar).unwrap_or_default()
@@ -141,18 +140,18 @@ fn encode_array_tron(arr: &[Value]) -> String {
             };
             result.push_str(&format!(" {:<width$} ", text, width = widths[i] + 2));
             if i < widths.len() - 1 {
-                result.push_str("┼");
+                result.push('┼');
             }
         }
         result.push_str("┤\n");
     }
 
     // Footer
-    result.push_str("└");
+    result.push('└');
     for w in &widths {
         result.push_str(&"─".repeat(w + 2));
         if w < &last_w {
-            result.push_str("┴");
+            result.push('┴');
         }
     }
     result.push_str("┘\n");
@@ -179,31 +178,31 @@ fn encode_obj_tron(obj: &serde_json::Map<String, Value>) -> String {
     let keys: Vec<&String> = obj.keys().collect();
 
     let mut header = String::new();
-    header.push_str("┌");
+    header.push('┌');
     for k in &keys {
         let w = k.len().max(3);
         header.push_str(&format!(" {:<width$} ", k, width = w));
-        header.push_str("┬");
+        header.push('┬');
     }
     header.push_str("┐\n");
 
     let sep_len: usize = obj.keys().map(|k| k.len().saturating_add(4)).sum();
     let mut body = String::new();
-    body.push_str("├");
+    body.push('├');
     body.push_str(&"─".repeat(sep_len));
     body.push_str("┤\n");
 
     let mut row = String::new();
-    row.push_str("┌");
+    row.push('┌');
     for k in &keys {
         let w = k.len().max(3);
         row.push_str(&format!(" {:<width$} ", k, width = w));
-        row.push_str("┬");
+        row.push('┬');
     }
     row.push_str("┐\n");
 
     let mut val_row = String::new();
-    val_row.push_str("│");
+    val_row.push('│');
     for (k, v) in obj {
         val_row.push_str(&format!(" {:<width$} ", k, width = k.len() + 2));
         val_row.push_str(&format!(
@@ -215,7 +214,7 @@ fn encode_obj_tron(obj: &serde_json::Map<String, Value>) -> String {
     }
 
     let mut footer = String::new();
-    footer.push_str("└");
+    footer.push('└');
     footer.push_str(&"─".repeat(sep_len));
     footer.push_str("┘\n");
 
@@ -243,7 +242,7 @@ fn toon_scalar(value: &Value) -> String {
             if obj.len() > 10 {
                 format!("{{{} keys}}", obj.len())
             } else {
-                format!("{{...}}")
+                "{...}".to_string()
             }
         }
     }

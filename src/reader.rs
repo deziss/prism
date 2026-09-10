@@ -1,18 +1,19 @@
 //! PRISM reader.rs — Intelligent 7-mode file reader with AST code skeletonization,
 //! session-cached re-reads (~15 tokens), git diff slice, and PathJail protection.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Supported file reading modes
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ReadMode {
     /// Full file content with optional line numbers
     Full,
     /// Code skeleton: types, signatures, classes, structs (drops function bodies)
+    #[default]
     Skeleton,
     /// Structural outline map of symbols, line ranges, and imports
     Map,
@@ -24,12 +25,6 @@ pub enum ReadMode {
     Lines { start: usize, end: usize },
     /// Session-cached read: returns tiny receipt (~15 tokens) if file is unchanged
     Cached,
-}
-
-impl Default for ReadMode {
-    fn default() -> Self {
-        ReadMode::Skeleton
-    }
 }
 
 impl std::str::FromStr for ReadMode {
@@ -50,7 +45,9 @@ impl std::str::FromStr for ReadMode {
         } else if lower == "cached" || lower == "cache" {
             Ok(ReadMode::Cached)
         } else if lower.starts_with("lines:") || lower.starts_with("line:") {
-            let range_str = lower.trim_start_matches("lines:").trim_start_matches("line:");
+            let range_str = lower
+                .trim_start_matches("lines:")
+                .trim_start_matches("line:");
             parse_lines_range(range_str)
         } else {
             Err(anyhow!(
@@ -62,16 +59,33 @@ impl std::str::FromStr for ReadMode {
 }
 
 pub fn parse_lines_range(range_str: &str) -> Result<ReadMode> {
-    let parts: Vec<&str> = range_str.split(&['-', ':', '.'][..]).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = range_str
+        .split(&['-', ':', '.'][..])
+        .filter(|s| !s.is_empty())
+        .collect();
     if parts.len() == 2 {
-        let start = parts[0].trim().parse::<usize>().context("Invalid start line")?;
-        let end = parts[1].trim().parse::<usize>().context("Invalid end line")?;
+        let start = parts[0]
+            .trim()
+            .parse::<usize>()
+            .context("Invalid start line")?;
+        let end = parts[1]
+            .trim()
+            .parse::<usize>()
+            .context("Invalid end line")?;
         Ok(ReadMode::Lines { start, end })
     } else if parts.len() == 1 {
-        let line = parts[0].trim().parse::<usize>().context("Invalid line number")?;
-        Ok(ReadMode::Lines { start: line, end: line })
+        let line = parts[0]
+            .trim()
+            .parse::<usize>()
+            .context("Invalid line number")?;
+        Ok(ReadMode::Lines {
+            start: line,
+            end: line,
+        })
     } else {
-        Err(anyhow!("Invalid line range format. Use N-M or N..M, e.g. 10-50"))
+        Err(anyhow!(
+            "Invalid line range format. Use N-M or N..M, e.g. 10-50"
+        ))
     }
 }
 
@@ -106,7 +120,10 @@ pub fn check_path_jail(path: &Path) -> Result<()> {
         || file_name.contains("id_ed25519")
         || file_name.contains("id_ecdsa")
         || file_name.contains("credentials")
-        || (file_name.contains("secret") && (file_name.ends_with(".json") || file_name.ends_with(".yaml") || file_name.ends_with(".yml")));
+        || (file_name.contains("secret")
+            && (file_name.ends_with(".json")
+                || file_name.ends_with(".yaml")
+                || file_name.ends_with(".yml")));
 
     if is_secret {
         return Err(anyhow!(
@@ -120,7 +137,9 @@ pub fn check_path_jail(path: &Path) -> Result<()> {
 // ── Session Read Cache ────────────────────────────────────────────────────────
 
 fn session_reads_path() -> PathBuf {
-    crate::prism_data_dir().join("cache").join("session_reads.json")
+    crate::prism_data_dir()
+        .join("cache")
+        .join("session_reads.json")
 }
 
 fn compute_sha256(data: &[u8]) -> String {
@@ -128,7 +147,11 @@ fn compute_sha256(data: &[u8]) -> String {
     hasher.update(data);
     // digest 0.11's `Array` output type dropped the blanket `LowerHex` impl the old
     // `generic-array` `GenericArray<u8, N>` had; hex-encode by hand instead.
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Checks if the file hash matches previous read in this session.
@@ -176,7 +199,8 @@ pub fn read_file(path: &Path, mode: ReadMode, line_numbers: bool) -> Result<Read
     let raw_bytes = std::fs::read(path).context("Failed to read file")?;
     let content = String::from_utf8_lossy(&raw_bytes).to_string();
     let total_lines = content.lines().count();
-    let orig_tokens = crate::analytics::count_tokens(&content, "gpt-4").unwrap_or(content.len() / 4);
+    let orig_tokens =
+        crate::analytics::count_tokens(&content, "gpt-4").unwrap_or(content.len() / 4);
 
     let (result_text, mode_name, is_cached) = match mode {
         ReadMode::Cached => {
@@ -224,8 +248,8 @@ pub fn read_file(path: &Path, mode: ReadMode, line_numbers: bool) -> Result<Read
         }
     };
 
-    let returned_tokens = crate::analytics::count_tokens(&result_text, "gpt-4")
-        .unwrap_or(result_text.len() / 4);
+    let returned_tokens =
+        crate::analytics::count_tokens(&result_text, "gpt-4").unwrap_or(result_text.len() / 4);
     let savings_pct = if orig_tokens > 0 && returned_tokens < orig_tokens {
         (1.0 - (returned_tokens as f64 / orig_tokens as f64)) * 100.0
     } else {
@@ -474,18 +498,41 @@ fn skeleton_rust(content: &str) -> String {
                 sig = Some((kind, acc));
                 continue;
             }
-            finish_item(kind, acc, before, depth, &indent, &mut out, &mut pending, &mut containers, &mut skips, &mut collect);
+            finish_item(
+                kind,
+                acc,
+                before,
+                depth,
+                &indent,
+                &mut out,
+                &mut pending,
+                &mut containers,
+                &mut skips,
+                &mut collect,
+            );
             continue;
         }
 
         match rust_item_kind(trimmed) {
             Some(kind) => {
-                let done = trimmed.contains('{') || trimmed.ends_with(';') || trimmed.ends_with(',');
+                let done =
+                    trimmed.contains('{') || trimmed.ends_with(';') || trimmed.ends_with(',');
                 if !done {
                     sig = Some((kind, trimmed.to_string()));
                     continue;
                 }
-                finish_item(kind, trimmed.to_string(), before, depth, &indent, &mut out, &mut pending, &mut containers, &mut skips, &mut collect);
+                finish_item(
+                    kind,
+                    trimmed.to_string(),
+                    before,
+                    depth,
+                    &indent,
+                    &mut out,
+                    &mut pending,
+                    &mut containers,
+                    &mut skips,
+                    &mut collect,
+                );
             }
             None => {
                 pending.clear();
@@ -573,7 +620,11 @@ fn summarize_body(kind: &RustItem, head: &str, body: &[String], _depth: usize) -
             }
         }
     }
-    let sep = if matches!(kind, RustItem::Struct) { ", " } else { " | " };
+    let sep = if matches!(kind, RustItem::Struct) {
+        ", "
+    } else {
+        " | "
+    };
     let limit = 12;
     let extra = shown.len().saturating_sub(limit);
     shown.truncate(limit);
@@ -624,7 +675,11 @@ fn skeleton_python(content: &str) -> String {
             continue;
         }
         if trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
-            let q = if trimmed.starts_with("\"\"\"") { "\"\"\"" } else { "'''" };
+            let q = if trimmed.starts_with("\"\"\"") {
+                "\"\"\""
+            } else {
+                "'''"
+            };
             let body = &trimmed[3..];
             if !doc_owner_shown {
                 let first = body.split(q).next().unwrap_or("").trim();
@@ -705,12 +760,7 @@ fn skeleton_python(content: &str) -> String {
         let names: Vec<String> = imports
             .iter()
             .take(8)
-            .map(|i| {
-                i.split_whitespace()
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string()
-            })
+            .map(|i| i.split_whitespace().nth(1).unwrap_or("").to_string())
             .collect();
         head.push(format!(
             "imports: {} lines ({}, +{} more)",
@@ -761,7 +811,11 @@ fn skeleton_typescript(content: &str) -> String {
             in_members = false;
             member_count = 0;
         }
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+        {
             continue;
         }
         let indent = " ".repeat(containers.len());
@@ -822,7 +876,11 @@ fn skeleton_typescript(content: &str) -> String {
             continue;
         }
         if is_fn || is_method {
-            out.push(format!("{}{}", indent, truncate_str(head.trim_end_matches(';'), 200)));
+            out.push(format!(
+                "{}{}",
+                indent,
+                truncate_str(head.trim_end_matches(';'), 200)
+            ));
             if depth > before {
                 skip_to = Some(before);
             }
@@ -845,7 +903,11 @@ fn skeleton_typescript(content: &str) -> String {
         if in_members {
             // interface / enum member
             if member_count < 20 {
-                out.push(format!("{}{}", indent, truncate_str(&squeeze(trimmed), 120)));
+                out.push(format!(
+                    "{}{}",
+                    indent,
+                    truncate_str(&squeeze(trimmed), 120)
+                ));
             } else if member_count == 20 {
                 out.push(format!("{}[+more members]", indent));
             }
@@ -918,7 +980,12 @@ fn skeleton_go(content: &str) -> String {
             } else {
                 if !trimmed.is_empty() && !trimmed.starts_with("//") {
                     let first = trimmed.split_whitespace().next().unwrap_or("");
-                    if first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    if first
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
                         fields.push(squeeze(trimmed));
                     } else {
                         hidden += 1;
@@ -950,7 +1017,12 @@ fn skeleton_go(content: &str) -> String {
             continue;
         }
         if trimmed.starts_with("type ") {
-            let head = trimmed.split('{').next().unwrap_or(trimmed).trim().to_string();
+            let head = trimmed
+                .split('{')
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
             if depth > before {
                 in_type = Some((head, Vec::new(), 0));
             } else {
@@ -959,7 +1031,10 @@ fn skeleton_go(content: &str) -> String {
             continue;
         }
         if trimmed.starts_with("func ") {
-            out.push(truncate_str(trimmed.split('{').next().unwrap_or(trimmed).trim(), 200));
+            out.push(truncate_str(
+                trimmed.split('{').next().unwrap_or(trimmed).trim(),
+                200,
+            ));
             if depth > before {
                 skip_to = Some(before);
             }
@@ -1001,7 +1076,11 @@ fn skeleton_markdown(content: &str) -> String {
         let t = line.trim();
         if let Some(f) = fence.clone() {
             if t.starts_with("```") {
-                out.push(format!("[code: {}, {} lines]", if f.is_empty() { "text" } else { &f }, fence_lines));
+                out.push(format!(
+                    "[code: {}, {} lines]",
+                    if f.is_empty() { "text" } else { &f },
+                    fence_lines
+                ));
                 fence = None;
                 fence_lines = 0;
             } else {
@@ -1031,7 +1110,8 @@ fn skeleton_markdown(content: &str) -> String {
             continue;
         }
         flush_table(&mut table, &mut out);
-        if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") || t.starts_with("1. ") {
+        if t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ") || t.starts_with("1. ")
+        {
             list_items += 1;
             if list_items <= 3 {
                 out.push(truncate_str(t, 120));
@@ -1266,7 +1346,10 @@ fn skeleton_makefile(content: &str) -> String {
 fn skeleton_generic(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let keep = 20.min(lines.len());
-    let mut out: Vec<String> = lines[..keep].iter().map(|l| l.trim_end().to_string()).collect();
+    let mut out: Vec<String> = lines[..keep]
+        .iter()
+        .map(|l| l.trim_end().to_string())
+        .collect();
     if lines.len() > keep {
         out.push(format!("[+{} more lines]", lines.len() - keep));
     }
@@ -1291,7 +1374,10 @@ fn generate_symbol_map(content: &str, path: &Path) -> String {
     for (idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         let before = depth;
-        if matches!(ext.as_str(), "rs" | "ts" | "tsx" | "js" | "jsx" | "go" | "c" | "cpp" | "h" | "java") {
+        if matches!(
+            ext.as_str(),
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "go" | "c" | "cpp" | "h" | "java"
+        ) {
             depth += brace_delta(line, &mut lex);
         }
         let level = if ext == "py" {
@@ -1302,17 +1388,34 @@ fn generate_symbol_map(content: &str, path: &Path) -> String {
         let name = if ext == "rs" {
             rust_item_kind(trimmed).and_then(|k| match k {
                 RustItem::Other => None,
-                _ => Some(trimmed.split('{').next().unwrap_or(trimmed).trim().to_string()),
+                _ => Some(
+                    trimmed
+                        .split('{')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                ),
             })
         } else if ext == "py" {
-            if trimmed.starts_with("def ") || trimmed.starts_with("async def ") || trimmed.starts_with("class ") {
+            if trimmed.starts_with("def ")
+                || trimmed.starts_with("async def ")
+                || trimmed.starts_with("class ")
+            {
                 Some(trimmed.trim_end_matches(':').to_string())
             } else {
                 None
             }
         } else if ext == "go" {
             if trimmed.starts_with("func ") || trimmed.starts_with("type ") {
-                Some(trimmed.split('{').next().unwrap_or(trimmed).trim().to_string())
+                Some(
+                    trimmed
+                        .split('{')
+                        .next()
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                )
             } else {
                 None
             }
@@ -1322,7 +1425,14 @@ fn generate_symbol_map(content: &str, path: &Path) -> String {
             || trimmed.starts_with("export interface ")
             || trimmed.starts_with("interface ")
         {
-            Some(trimmed.split('{').next().unwrap_or(trimmed).trim().to_string())
+            Some(
+                trimmed
+                    .split('{')
+                    .next()
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -1412,7 +1522,10 @@ fn git_diff_file(path: &Path) -> Result<String> {
         Ok(out) if out.status.success() => {
             let diff_str = String::from_utf8_lossy(&out.stdout).to_string();
             if diff_str.trim().is_empty() {
-                Ok(format!("(No unstaged or committed changes in git for {})", path.display()))
+                Ok(format!(
+                    "(No unstaged or committed changes in git for {})",
+                    path.display()
+                ))
             } else {
                 Ok(diff_str)
             }
@@ -1429,7 +1542,10 @@ fn slice_lines(content: &str, start: usize, end: usize, line_numbers: bool) -> S
     let end_idx = end.min(total);
 
     if start_idx >= end_idx {
-        return format!("(Line range {}-{} is outside file bounds of 1-{})", start, end, total);
+        return format!(
+            "(Line range {}-{} is outside file bounds of 1-{})",
+            start, end, total
+        );
     }
 
     let mut out = Vec::new();
@@ -1550,7 +1666,6 @@ export function startServer(cfg: Config): void {
         assert!(cleaned.contains("let x = 1;"));
     }
 
-
     #[test]
     fn skeleton_rust_keeps_nested_and_test_module_fns() {
         let code = r#"
@@ -1613,8 +1728,14 @@ mod tests {
 "#;
         let skel = skeleton_rust(code);
         for name in [
-            "fn new", "fn private_helper", "fn buried", "fn reload", "fn with_inner_fn",
-            "fn inner_helper", "fn nested_test_one", "fn nested_test_two",
+            "fn new",
+            "fn private_helper",
+            "fn buried",
+            "fn reload",
+            "fn with_inner_fn",
+            "fn inner_helper",
+            "fn nested_test_one",
+            "fn nested_test_two",
         ] {
             assert!(skel.contains(name), "missing {}\n{}", name, skel);
         }
@@ -1630,8 +1751,16 @@ mod tests {
         assert!(skel_fns >= src_fns, "{} < {}\n{}", skel_fns, src_fns, skel);
         // containers and fields
         assert!(skel.contains("mod inner"), "{}", skel);
-        assert!(skel.contains("pub struct Cfg { port: u16, host: String, … 1 private fields }"), "{}", skel);
-        assert!(skel.contains("pub enum Mode { Fast, Slow, Custom(u8) }"), "{}", skel); // single-line enum kept verbatim
+        assert!(
+            skel.contains("pub struct Cfg { port: u16, host: String, … 1 private fields }"),
+            "{}",
+            skel
+        );
+        assert!(
+            skel.contains("pub enum Mode { Fast, Slow, Custom(u8) }"),
+            "{}",
+            skel
+        ); // single-line enum kept verbatim
         assert!(skel.contains("//! Module docs."), "{}", skel);
         assert!(skel.contains("use std::sync::Mutex;"), "{}", skel);
         // bodies are gone
@@ -1656,8 +1785,16 @@ fn multi_line(
 fn after_both() -> bool { true }
 "#;
         let skel = skeleton_rust(code);
-        assert!(skel.contains("fn takes_static(x: &'static str) -> usize"), "{}", skel);
-        assert!(skel.contains("fn multi_line( a: u32, b: u32, ) -> u32"), "{}", skel);
+        assert!(
+            skel.contains("fn takes_static(x: &'static str) -> usize"),
+            "{}",
+            skel
+        );
+        assert!(
+            skel.contains("fn multi_line( a: u32, b: u32, ) -> u32"),
+            "{}",
+            skel
+        );
         assert!(skel.contains("fn after_both"), "{}", skel);
         assert!(!skel.contains("a + b"), "{}", skel);
     }
@@ -1690,7 +1827,16 @@ if __name__ == "__main__":
     Repo("/tmp")
 "#;
         let skel = skeleton_python(code);
-        for want in ["import os", "MAX_RETRIES = 5", "class Repo:", "def __init__", "async def fetch", "def _inner", "name: str", "if __name__"] {
+        for want in [
+            "import os",
+            "MAX_RETRIES = 5",
+            "class Repo:",
+            "def __init__",
+            "async def fetch",
+            "def _inner",
+            "name: str",
+            "if __name__",
+        ] {
             assert!(skel.contains(want), "missing {}\n{}", want, skel);
         }
         assert!(skel.contains("\"Storage for items.\""), "{}", skel);
@@ -1733,7 +1879,18 @@ describe("Service", () => {
 });
 "#;
         let skel = skeleton_typescript(code);
-        for want in ["export interface Config", "port: number", "host: string", "export type Mode", "export class Service", "async start()", "get ready()", "export const helper", "describe(\"Service\"", "it(\"starts\""] {
+        for want in [
+            "export interface Config",
+            "port: number",
+            "host: string",
+            "export type Mode",
+            "export class Service",
+            "async start()",
+            "get ready()",
+            "export const helper",
+            "describe(\"Service\"",
+            "it(\"starts\"",
+        ] {
             assert!(skel.contains(want), "missing {}\n{}", want, skel);
         }
         assert!(!skel.contains("this.cache.clear()"), "{}", skel);
@@ -1769,7 +1926,17 @@ func (s *Server) Start() error {
 }
 "#;
         let skel = skeleton_go(code);
-        for want in ["package main", "import (", "\"fmt\"", "var ( ErrMissing, debug )", "type Server struct", "Addr string", "unexported", "func NewServer", "func (s *Server) Start"] {
+        for want in [
+            "package main",
+            "import (",
+            "\"fmt\"",
+            "var ( ErrMissing, debug )",
+            "type Server struct",
+            "Addr string",
+            "unexported",
+            "func NewServer",
+            "func (s *Server) Start",
+        ] {
             assert!(skel.contains(want), "missing {}\n{}", want, skel);
         }
         assert!(!skel.contains("return nil"), "{}", skel);
@@ -1777,7 +1944,9 @@ func (s *Server) Start() error {
 
     #[test]
     fn skeleton_markdown_json_config_and_generic() {
-        let md = skeleton_markdown("# Title\n\nFirst sentence here. Second one ignored.\n\n## Usage\n\n```bash\nls\ncd\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- one\n- two\n- three\n- four\n");
+        let md = skeleton_markdown(
+            "# Title\n\nFirst sentence here. Second one ignored.\n\n## Usage\n\n```bash\nls\ncd\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- one\n- two\n- three\n- four\n",
+        );
         assert!(md.contains("# Title"), "{}", md);
         assert!(md.contains("First sentence here"), "{}", md);
         assert!(!md.contains("Second one ignored"), "{}", md);
@@ -1785,35 +1954,49 @@ func (s *Server) Start() error {
         assert!(md.contains("[table: 2 rows × 2 cols]"), "{}", md); // separator row counts as a row
         assert!(md.contains("[+1 more list items]"), "{}", md);
 
-        let js = skeleton_json("{\"name\":\"prism\",\"deps\":{\"a\":\"1\",\"b\":\"2\"},\"list\":[{\"x\":1},{\"x\":2}]}");
+        let js = skeleton_json(
+            "{\"name\":\"prism\",\"deps\":{\"a\":\"1\",\"b\":\"2\"},\"list\":[{\"x\":1},{\"x\":2}]}",
+        );
         assert!(js.contains("name: \"prism\""), "{}", js);
         assert!(js.contains("deps: {2 keys}"), "{}", js);
         assert!(js.contains("list: [2 objects]"), "{}", js);
 
-        let cfg = skeleton_config("[package]\nname = \"prism\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { version = \"1.0\", features = [\"derive\"] }\n");
+        let cfg = skeleton_config(
+            "[package]\nname = \"prism\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { version = \"1.0\", features = [\"derive\"] }\n",
+        );
         assert!(cfg.contains("[package]"), "{}", cfg);
         assert!(cfg.contains("name: prism"), "{}", cfg);
 
         let generic_out = skeleton_generic(&"x\n".repeat(50));
         assert!(generic_out.contains("[+30 more lines]"), "{}", generic_out);
-        assert!(generic_out.contains("lines: 50, bytes: 100"), "{}", generic_out);
+        assert!(
+            generic_out.contains("lines: 50, bytes: 100"),
+            "{}",
+            generic_out
+        );
     }
 
     #[test]
     fn skeleton_shell_dockerfile_makefile() {
-        let sh = skeleton_shell("#!/usr/bin/env bash\nset -euo pipefail\nOUT=/tmp\nrun() {\n  echo hi\n}\necho done\n");
+        let sh = skeleton_shell(
+            "#!/usr/bin/env bash\nset -euo pipefail\nOUT=/tmp\nrun() {\n  echo hi\n}\necho done\n",
+        );
         assert!(sh.contains("#!/usr/bin/env bash"), "{}", sh);
         assert!(sh.contains("set -euo pipefail"), "{}", sh);
         assert!(sh.contains("OUT="), "{}", sh);
         assert!(sh.contains("run()"), "{}", sh);
         assert!(sh.contains("more lines"), "{}", sh);
 
-        let df = skeleton_dockerfile("FROM rust:1.80 AS build\nWORKDIR /app\nRUN cargo build \\\n  --release\nCOPY . .\nEXPOSE 8080\nCMD [\"prism\"]\n");
+        let df = skeleton_dockerfile(
+            "FROM rust:1.80 AS build\nWORKDIR /app\nRUN cargo build \\\n  --release\nCOPY . .\nEXPOSE 8080\nCMD [\"prism\"]\n",
+        );
         assert!(df.contains("FROM rust:1.80 AS build"), "{}", df);
         assert!(df.contains("EXPOSE 8080"), "{}", df);
         assert!(df.contains("RUN/COPY lines"), "{}", df);
 
-        let mk = skeleton_makefile("VERSION = 1.0\nbuild: fmt vet\n\tcargo build\n\ttrue\ntest:\n\tcargo test\n");
+        let mk = skeleton_makefile(
+            "VERSION = 1.0\nbuild: fmt vet\n\tcargo build\n\ttrue\ntest:\n\tcargo test\n",
+        );
         assert!(mk.contains("VERSION="), "{}", mk);
         assert!(mk.contains("build: fmt vet"), "{}", mk);
         assert!(mk.contains("test:"), "{}", mk);
@@ -1865,7 +2048,9 @@ func (s *Server) Start() error {
     fn test_read_mode_parsing() {
         assert_eq!("skeleton".parse::<ReadMode>().unwrap(), ReadMode::Skeleton);
         assert_eq!("diff".parse::<ReadMode>().unwrap(), ReadMode::Diff);
-        assert_eq!("lines:10-50".parse::<ReadMode>().unwrap(), ReadMode::Lines { start: 10, end: 50 });
+        assert_eq!(
+            "lines:10-50".parse::<ReadMode>().unwrap(),
+            ReadMode::Lines { start: 10, end: 50 }
+        );
     }
 }
-

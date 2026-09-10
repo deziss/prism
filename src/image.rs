@@ -18,7 +18,7 @@
 //!   them costs nothing. Going below that — `target_edge` — is opt-in and every
 //!   rewrite is reported to the caller for logging.
 
-use flate2::{write::ZlibEncoder, Compression, Crc};
+use flate2::{Compression, Crc, write::ZlibEncoder};
 use serde_json::Value;
 use std::io::Write;
 
@@ -73,7 +73,12 @@ pub fn probe(data: &[u8]) -> Option<ImageInfo> {
         if data.get(12..16)? != b"IHDR" {
             return None;
         }
-        return Some(ImageInfo { format: Format::Png, width: be32(16)?, height: be32(20)?, bytes });
+        return Some(ImageInfo {
+            format: Format::Png,
+            width: be32(16)?,
+            height: be32(20)?,
+            bytes,
+        });
     }
 
     if data.starts_with(&[0xFF, 0xD8]) {
@@ -94,11 +99,19 @@ pub fn probe(data: &[u8]) -> Option<ImageInfo> {
                 continue;
             }
             let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-            let is_sof = (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
+            let is_sof = (0xC0..=0xCF).contains(&marker)
+                && marker != 0xC4
+                && marker != 0xC8
+                && marker != 0xCC;
             if is_sof {
                 let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
                 let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
-                return Some(ImageInfo { format: Format::Jpeg, width: w, height: h, bytes });
+                return Some(ImageInfo {
+                    format: Format::Jpeg,
+                    width: w,
+                    height: h,
+                    bytes,
+                });
             }
             i += 2 + len.max(2);
         }
@@ -117,7 +130,12 @@ pub fn probe(data: &[u8]) -> Option<ImageInfo> {
             b"VP8 " => {
                 let w = u16::from_le_bytes(data.get(26..28)?.try_into().ok()?) & 0x3FFF;
                 let h = u16::from_le_bytes(data.get(28..30)?.try_into().ok()?) & 0x3FFF;
-                Some(ImageInfo { format: Format::WebP, width: w as u32, height: h as u32, bytes })
+                Some(ImageInfo {
+                    format: Format::WebP,
+                    width: w as u32,
+                    height: h as u32,
+                    bytes,
+                })
             }
             b"VP8L" => {
                 let bits = le32(21)?;
@@ -135,7 +153,12 @@ pub fn probe(data: &[u8]) -> Option<ImageInfo> {
     if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
         let w = u16::from_le_bytes(data.get(6..8)?.try_into().ok()?) as u32;
         let h = u16::from_le_bytes(data.get(8..10)?.try_into().ok()?) as u32;
-        return Some(ImageInfo { format: Format::Gif, width: w, height: h, bytes });
+        return Some(ImageInfo {
+            format: Format::Gif,
+            width: w,
+            height: h,
+            bytes,
+        });
     }
 
     None
@@ -301,7 +324,12 @@ fn png_decode(data: &[u8]) -> Option<Png> {
                 2 => (px[0], px[1], px[2], 255),
                 3 => {
                     let p = palette.get(px[0] as usize).copied().unwrap_or([0, 0, 0]);
-                    (p[0], p[1], p[2], trns.get(px[0] as usize).copied().unwrap_or(255))
+                    (
+                        p[0],
+                        p[1],
+                        p[2],
+                        trns.get(px[0] as usize).copied().unwrap_or(255),
+                    )
                 }
                 4 => (px[0], px[0], px[0], px[1]),
                 _ => (px[0], px[1], px[2], px[3]),
@@ -310,7 +338,11 @@ fn png_decode(data: &[u8]) -> Option<Png> {
         }
         prev = cur;
     }
-    Some(Png { width, height, rgba: out })
+    Some(Png {
+        width,
+        height,
+        rgba: out,
+    })
 }
 
 /// `Read::read_to_end` on a decoder, but rejecting a truncated stream.
@@ -335,10 +367,14 @@ fn resize_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let yr = sh as f64 / dh as f64;
     for dy in 0..dh as usize {
         let y0 = (dy as f64 * yr).floor() as usize;
-        let y1 = (((dy + 1) as f64 * yr).ceil() as usize).min(sh as usize).max(y0 + 1);
+        let y1 = (((dy + 1) as f64 * yr).ceil() as usize)
+            .min(sh as usize)
+            .max(y0 + 1);
         for dx in 0..dw as usize {
             let x0 = (dx as f64 * xr).floor() as usize;
-            let x1 = (((dx + 1) as f64 * xr).ceil() as usize).min(sw as usize).max(x0 + 1);
+            let x1 = (((dx + 1) as f64 * xr).ceil() as usize)
+                .min(sw as usize)
+                .max(x0 + 1);
             let mut acc = [0u32; 4];
             let mut n = 0u32;
             for y in y0..y1 {
@@ -488,14 +524,22 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 
 fn b64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
         let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -538,14 +582,13 @@ fn walk(value: &mut Value, edge: u32, provider: &str, out: &mut Vec<Rightsized>)
             if let Some(Value::Object(iu)) = map.get_mut("image_url") {
                 if let Some(Value::String(url)) = iu.get_mut("url") {
                     if let Some(rest) = url.strip_prefix("data:") {
-                        if let Some((meta, b64)) = rest.split_once(";base64,") {
+                        if let Some((_meta, b64)) = rest.split_once(";base64,") {
                             if let Some((new_b64, report)) = rightsize_b64(b64, edge, provider) {
                                 if report.rewritten {
-                                    let mt = if meta.is_empty() {
-                                        report.format.media_type().to_string()
-                                    } else {
-                                        report.format.media_type().to_string()
-                                    };
+                                    // `_meta` (any charset=... etc. before `;base64,`) is
+                                    // deliberately dropped either way: the rewritten body
+                                    // is always `report.format`'s own media type.
+                                    let mt = report.format.media_type().to_string();
                                     *url = format!("data:{};base64,{}", mt, new_b64);
                                 }
                                 out.push(report);
@@ -574,7 +617,11 @@ fn rightsize_b64(b64: &str, edge: u32, provider: &str) -> Option<(String, Rights
     }
     let raw = b64_decode(b64)?;
     let (new_bytes, report) = rightsize(&raw, edge, provider)?;
-    let encoded = if report.rewritten { b64_encode(&new_bytes) } else { String::new() };
+    let encoded = if report.rewritten {
+        b64_encode(&new_bytes)
+    } else {
+        String::new()
+    };
     Some((encoded, report))
 }
 
@@ -687,8 +734,16 @@ mod tests {
         assert_eq!(r.to, (1568, 784));
         let info = probe(&out).expect("still a png");
         assert_eq!((info.width, info.height), (1568, 784));
-        assert!(out.len() < png.len(), "bytes grew: {} -> {}", png.len(), out.len());
-        assert_eq!(r.tokens_before, r.tokens_after, "billing is capped, so tokens are equal");
+        assert!(
+            out.len() < png.len(),
+            "bytes grew: {} -> {}",
+            png.len(),
+            out.len()
+        );
+        assert_eq!(
+            r.tokens_before, r.tokens_after,
+            "billing is capped, so tokens are equal"
+        );
         assert!(r.bytes_after < r.bytes_before);
     }
 
@@ -731,7 +786,14 @@ mod tests {
 
     #[test]
     fn base64_roundtrip() {
-        for case in [&b""[..], b"a", b"ab", b"abc", b"abcd", &[0u8, 255, 128, 7][..]] {
+        for case in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            &[0u8, 255, 128, 7][..],
+        ] {
             let enc = b64_encode(case);
             assert_eq!(b64_decode(&enc).as_deref(), Some(case), "{}", enc);
         }
@@ -752,12 +814,21 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert!(reports[0].rewritten);
         // 2400×1200 bills as 1568×784 (1640 tok); at a 1024 edge it is 700
-        assert!(reports[0].tokens_after * 2 < reports[0].tokens_before, "{:?}", reports[0]);
-        let data = anthropic["messages"][0]["content"][1]["source"]["data"].as_str().unwrap();
+        assert!(
+            reports[0].tokens_after * 2 < reports[0].tokens_before,
+            "{:?}",
+            reports[0]
+        );
+        let data = anthropic["messages"][0]["content"][1]["source"]["data"]
+            .as_str()
+            .unwrap();
         let info = probe(&b64_decode(data).unwrap()).unwrap();
         assert_eq!(info.width, 1024);
         // the prose is untouched
-        assert_eq!(anthropic["messages"][0]["content"][0]["text"], "what is this?");
+        assert_eq!(
+            anthropic["messages"][0]["content"][0]["text"],
+            "what is this?"
+        );
 
         let mut openai = serde_json::json!({
             "messages": [{"role": "user", "content": [
@@ -767,7 +838,9 @@ mod tests {
         let reports = rightsize_value(&mut openai, 1024, "openai");
         assert_eq!(reports.len(), 1);
         assert!(reports[0].rewritten);
-        let url = openai["messages"][0]["content"][0]["image_url"]["url"].as_str().unwrap();
+        let url = openai["messages"][0]["content"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap();
         assert!(url.starts_with("data:image/png;base64,"), "{}", &url[..40]);
         let info = probe(&b64_decode(url.split(',').nth(1).unwrap()).unwrap()).unwrap();
         assert_eq!(info.width, 1024);
@@ -798,11 +871,11 @@ mod tests {
     #[test]
     fn malformed_images_never_panic() {
         for bad in [
-            &b"\x89PNG\r\n\x1a\n"[..],                       // header only
-            &b"\x89PNG\r\n\x1a\nIHDRnope"[..],               // truncated IHDR
-            &[0xFF, 0xD8, 0xFF, 0xC0, 0x00][..],             // truncated SOF
-            &b"RIFF\0\0\0\0WEBP"[..],                        // no chunk
-            &b"GIF89a"[..],                                  // no size
+            &b"\x89PNG\r\n\x1a\n"[..],           // header only
+            &b"\x89PNG\r\n\x1a\nIHDRnope"[..],   // truncated IHDR
+            &[0xFF, 0xD8, 0xFF, 0xC0, 0x00][..], // truncated SOF
+            &b"RIFF\0\0\0\0WEBP"[..],            // no chunk
+            &b"GIF89a"[..],                      // no size
         ] {
             let _ = probe(bad);
             let _ = rightsize(bad, DEFAULT_MAX_EDGE, "anthropic");

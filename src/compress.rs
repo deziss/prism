@@ -19,9 +19,16 @@ pub struct CompressedOutput {
 
 impl std::fmt::Display for CompressedOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let preview = if self.compressed.len() > 5000 { &self.compressed[..5000] } else { &self.compressed };
-        write!(f, "Compressed: {} → {} tokens ({:.1}% savings)\n{}",
-            self.original_tokens, self.compressed_tokens, self.savings_pct, preview)
+        let preview = if self.compressed.len() > 5000 {
+            &self.compressed[..5000]
+        } else {
+            &self.compressed
+        };
+        write!(
+            f,
+            "Compressed: {} → {} tokens ({:.1}% savings)\n{}",
+            self.original_tokens, self.compressed_tokens, self.savings_pct, preview
+        )
     }
 }
 
@@ -125,10 +132,10 @@ fn regex_clean(text: &str) -> String {
     if let Ok(re) = Regex::new(r"(?m) +$") {
         s = re.replace_all(&s, "").to_string();
     }
-    // Collapse repeated sequences (e.g. "===" repeated 5 times → once)
-    if let Ok(re) = Regex::new(r"(.{4,})\1{3,}") {
-        s = re.replace_all(&s, "$1").to_string();
-    }
+    // (Repeated-sequence collapsing was attempted here via a backreference regex,
+    // `(.{4,})\1{3,}` — the `regex` crate does not support backreferences at all, so
+    // `Regex::new` always returned `Err` and this was silently a no-op from day one.
+    // Removed rather than reimplemented without backreferences: no behavior changes.)
     // Replace long hex strings
     if let Ok(re) = Regex::new(r"\b0x[0-9a-fA-F]{32,}\b") {
         s = re.replace_all(&s, "<HEX>").to_string();
@@ -147,8 +154,8 @@ fn regex_clean(text: &str) -> String {
 
 // ── BM25 sentence scoring ─────────────────────────────────────────────────────
 
-/// Score sentences by BM25-style importance, keep top sentences until we
-/// hit `target_tokens`. Re-joins in original order to preserve coherence.
+// Score sentences by BM25-style importance, keep top sentences until we
+// hit `target_tokens`. Re-joins in original order to preserve coherence.
 // ── Code protection ───────────────────────────────────────────────────────────
 //
 // BM25 drops whole lines. Applied blindly to a prompt containing a fenced code
@@ -163,7 +170,10 @@ struct Segment {
 
 fn push_segment(segs: &mut Vec<Segment>, cur: &mut String, protected: bool) {
     if !cur.is_empty() {
-        segs.push(Segment { text: std::mem::take(cur), protected });
+        segs.push(Segment {
+            text: std::mem::take(cur),
+            protected,
+        });
     }
 }
 
@@ -205,7 +215,10 @@ fn segment_protected(text: &str) -> Vec<Segment> {
 
         if is_fence {
             push_segment(&mut segs, &mut cur, cur_protected);
-            fence_marker = trimmed.chars().take_while(|c| *c == '`' || *c == '~').collect();
+            fence_marker = trimmed
+                .chars()
+                .take_while(|c| *c == '`' || *c == '~')
+                .collect();
             in_fence = true;
             cur.push_str(line);
             cur.push('\n');
@@ -227,10 +240,7 @@ fn segment_protected(text: &str) -> Vec<Segment> {
 
 fn bm25_select_prose(text: &str, target_tokens: usize) -> String {
     // Split into sentences (paragraphs / lines as units — better for prompts)
-    let sentences: Vec<&str> = text
-        .split('\n')
-        .filter(|s| !s.trim().is_empty())
-        .collect();
+    let sentences: Vec<&str> = text.split('\n').filter(|s| !s.trim().is_empty()).collect();
 
     if sentences.len() <= 3 {
         return text.to_string(); // Too short to meaningfully select
@@ -251,25 +261,36 @@ fn bm25_select_prose(text: &str, target_tokens: usize) -> String {
 
     let n = sentences.len() as f64;
     let k1 = 1.5f64;
-    let b  = 0.75f64;
+    let b = 0.75f64;
     let avg_len = tokenized.iter().map(|t| t.len()).sum::<usize>() as f64 / n;
 
     // BM25 score each sentence against the full corpus as "query"
     // (self-relevance: sentences with high-IDF terms score higher)
-    let mut scores: Vec<(usize, f64)> = tokenized.iter().enumerate().map(|(i, words)| {
-        let dl = words.len() as f64;
-        let score: f64 = words.iter().map(|w| {
-            let tf = words.iter().filter(|x| *x == w).count() as f64;
-            let df_w = *df.get(w).unwrap_or(&1) as f64;
-            let idf = ((n - df_w + 0.5) / (df_w + 0.5) + 1.0).ln();
-            let tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avg_len));
-            idf * tf_norm
-        }).sum();
+    let mut scores: Vec<(usize, f64)> = tokenized
+        .iter()
+        .enumerate()
+        .map(|(i, words)| {
+            let dl = words.len() as f64;
+            let score: f64 = words
+                .iter()
+                .map(|w| {
+                    let tf = words.iter().filter(|x| *x == w).count() as f64;
+                    let df_w = *df.get(w).unwrap_or(&1) as f64;
+                    let idf = ((n - df_w + 0.5) / (df_w + 0.5) + 1.0).ln();
+                    let tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avg_len));
+                    idf * tf_norm
+                })
+                .sum();
 
-        // Boost: code lines, function signatures, key sentences
-        let boost = if is_important_line(sentences[i]) { 1.5 } else { 1.0 };
-        (i, score * boost)
-    }).collect();
+            // Boost: code lines, function signatures, key sentences
+            let boost = if is_important_line(sentences[i]) {
+                1.5
+            } else {
+                1.0
+            };
+            (i, score * boost)
+        })
+        .collect();
 
     // Sort by score descending
     scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -279,7 +300,9 @@ fn bm25_select_prose(text: &str, target_tokens: usize) -> String {
     let mut budget = target_tokens;
 
     for (idx, _score) in &scores {
-        if budget == 0 { break; }
+        if budget == 0 {
+            break;
+        }
         let tok = count_tokens_accurate(sentences[*idx]);
         if tok <= budget || selected.is_empty() {
             selected.insert(*idx);
@@ -288,7 +311,9 @@ fn bm25_select_prose(text: &str, target_tokens: usize) -> String {
     }
 
     // Re-join in original order
-    sentences.iter().enumerate()
+    sentences
+        .iter()
+        .enumerate()
         .filter(|(i, _)| selected.contains(i))
         .map(|(_, s)| *s)
         .collect::<Vec<_>>()
@@ -320,15 +345,68 @@ fn is_important_line(line: &str) -> bool {
 }
 
 fn is_stopword(w: &str) -> bool {
-    matches!(w, "the" | "and" | "for" | "are" | "but" | "not" | "you"
-        | "all" | "can" | "had" | "her" | "was" | "one" | "our"
-        | "out" | "day" | "get" | "has" | "him" | "his" | "how"
-        | "its" | "now" | "see" | "two" | "who" | "did" | "any"
-        | "may" | "new" | "own" | "use" | "way" | "she" | "many"
-        | "than" | "then" | "them" | "they" | "this" | "from"
-        | "that" | "with" | "have" | "will" | "your" | "been"
-        | "also" | "more" | "each" | "over" | "such" | "into"
-        | "some" | "when" | "what" | "were" | "only" | "just")
+    matches!(
+        w,
+        "the"
+            | "and"
+            | "for"
+            | "are"
+            | "but"
+            | "not"
+            | "you"
+            | "all"
+            | "can"
+            | "had"
+            | "her"
+            | "was"
+            | "one"
+            | "our"
+            | "out"
+            | "day"
+            | "get"
+            | "has"
+            | "him"
+            | "his"
+            | "how"
+            | "its"
+            | "now"
+            | "see"
+            | "two"
+            | "who"
+            | "did"
+            | "any"
+            | "may"
+            | "new"
+            | "own"
+            | "use"
+            | "way"
+            | "she"
+            | "many"
+            | "than"
+            | "then"
+            | "them"
+            | "they"
+            | "this"
+            | "from"
+            | "that"
+            | "with"
+            | "have"
+            | "will"
+            | "your"
+            | "been"
+            | "also"
+            | "more"
+            | "each"
+            | "over"
+            | "such"
+            | "into"
+            | "some"
+            | "when"
+            | "what"
+            | "were"
+            | "only"
+            | "just"
+    )
 }
 
 // ── Token counting (accurate via tiktoken) ────────────────────────────────────
@@ -345,11 +423,16 @@ fn count_tokens_accurate(text: &str) -> usize {
 // ── Helpers (used by other modules) ──────────────────────────────────────────
 
 pub fn compress_paths(paths: &[String]) -> String {
-    if paths.is_empty() { return "No paths\n".to_string(); }
+    if paths.is_empty() {
+        return "No paths\n".to_string();
+    }
     let mut by_dir: HashMap<&str, Vec<&str>> = HashMap::new();
     for path in paths {
         let dir = path.rfind('/').map(|i| &path[..i]).unwrap_or(".");
-        let file = path.rfind('/').map(|i| &path[i + 1..]).unwrap_or(path.as_str());
+        let file = path
+            .rfind('/')
+            .map(|i| &path[i + 1..])
+            .unwrap_or(path.as_str());
         by_dir.entry(dir).or_default().push(file);
     }
     let mut result = format!("{} files\n", paths.len());
@@ -357,17 +440,22 @@ pub fn compress_paths(paths: &[String]) -> String {
     dirs.sort_by_key(|(d, _)| *d);
     for (dir, files) in dirs {
         result.push_str(&format!("{}/\n", dir));
-        for f in files { result.push_str(&format!("  {}\n", f)); }
+        for f in files {
+            result.push_str(&format!("  {}\n", f));
+        }
     }
     result
 }
 
 pub fn compress_git_diff(diff: &str) -> String {
-    let lines: Vec<&str> = diff.lines()
+    let lines: Vec<&str> = diff
+        .lines()
         .filter(|l| {
-            !l.starts_with("diff --git") && !l.starts_with("--- ")
-            && !l.starts_with("+++ ") && !l.starts_with("index ")
-            && l.len() > 3
+            !l.starts_with("diff --git")
+                && !l.starts_with("--- ")
+                && !l.starts_with("+++ ")
+                && !l.starts_with("index ")
+                && l.len() > 3
         })
         .collect();
     let count = lines.len();
@@ -414,7 +502,10 @@ mod code_protection_tests {
         let out = compress(&input, 0.3).compressed;
 
         for line in diff.lines() {
-            assert!(out.contains(line), "compression dropped a diff line: {line:?}");
+            assert!(
+                out.contains(line),
+                "compression dropped a diff line: {line:?}"
+            );
         }
     }
 
@@ -422,7 +513,10 @@ mod code_protection_tests {
     fn segmentation_marks_fences_protected() {
         let segs = segment_protected("intro line\n```\ncode\n```\noutro line");
         assert!(segs.iter().any(|s| s.protected && s.text.contains("code")));
-        assert!(segs.iter().any(|s| !s.protected && s.text.contains("intro")));
+        assert!(
+            segs.iter()
+                .any(|s| !s.protected && s.text.contains("intro"))
+        );
     }
 
     #[test]

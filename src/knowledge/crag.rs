@@ -22,7 +22,11 @@ pub enum CragSource {
 
 /// Main CRAG entry point: retrieve → evaluate → conditionally re-retrieve.
 pub async fn corrective_retrieve(query: &str, threshold: f32) -> Result<Vec<CragResult>> {
-    let threshold = if threshold <= 0.0 { DEFAULT_THRESHOLD } else { threshold };
+    let threshold = if threshold <= 0.0 {
+        DEFAULT_THRESHOLD
+    } else {
+        threshold
+    };
 
     // Step 1: initial retrieval
     let initial = retrieve_from_graph(query)?;
@@ -77,7 +81,10 @@ pub fn evaluate_relevance(query: &str, results: &[String]) -> f32 {
         .iter()
         .map(|result| {
             let rl = result.to_lowercase();
-            let matched = query_terms.iter().filter(|t| rl.contains(t.as_str())).count();
+            let matched = query_terms
+                .iter()
+                .filter(|t| rl.contains(t.as_str()))
+                .count();
             matched as f32 / query_terms.len() as f32
         })
         .sum();
@@ -137,7 +144,15 @@ mod tests {
     async fn test_corrective_rewrite_expands_synonyms() {
         let query = "find function in module";
         let rewritten = corrective_rewrite(query).await;
-        assert!(rewritten.contains("method") || rewritten.contains("fn") || rewritten.contains("function"));
-        assert!(rewritten.contains("file") || rewritten.contains("path") || rewritten.contains("module"));
+        assert!(
+            rewritten.contains("method")
+                || rewritten.contains("fn")
+                || rewritten.contains("function")
+        );
+        assert!(
+            rewritten.contains("file")
+                || rewritten.contains("path")
+                || rewritten.contains("module")
+        );
     }
 }

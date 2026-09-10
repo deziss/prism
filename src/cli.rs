@@ -12,7 +12,10 @@ pub enum MemoryCmd {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    Save { key: String, value: String },
+    Save {
+        key: String,
+        value: String,
+    },
     List,
     Stats {
         #[arg(long, default_value_t = false)]
@@ -58,8 +61,12 @@ pub enum GraphCmd {
     Import {
         path: std::path::PathBuf,
     },
-    Extract { source: String },
-    Export { output: String },
+    Extract {
+        source: String,
+    },
+    Export {
+        output: String,
+    },
     Stats {
         #[arg(short, long)]
         graph: Option<std::path::PathBuf>,
@@ -79,7 +86,9 @@ pub enum CacheCmd {
         json: bool,
     },
     Clear,
-    Query { query: String },
+    Query {
+        query: String,
+    },
     Put {
         #[arg(short, long)]
         prompt: String,
@@ -180,7 +189,10 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
         println!("  CA bundle:    {}", bundle.display());
 
         // Write env vars to shell rc files
-        write_shell_env(ca_path.to_str().unwrap_or(""), bundle.to_str().unwrap_or(""))?;
+        write_shell_env(
+            ca_path.to_str().unwrap_or(""),
+            bundle.to_str().unwrap_or(""),
+        )?;
 
         // Chromium/Electron apps (VS Code, Antigravity, …) and Firefox read NSS, not
         // the system store — without this they reject every intercepted host.
@@ -199,8 +211,14 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
             Ok(msg) => println!("  System trust: {}", msg),
             Err(_) => {
                 println!("  System trust: manual install required:");
-                println!("    Linux: sudo cp {} /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates", ca_path.display());
-                println!("    macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}", ca_path.display());
+                println!(
+                    "    Linux: sudo cp {} /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates",
+                    ca_path.display()
+                );
+                println!(
+                    "    macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                    ca_path.display()
+                );
             }
         }
 
@@ -208,26 +226,34 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
         write_claude_mcp_config()?;
     }
 
-    println!("
-PRISM initialized ({scope}).");
+    println!(
+        "
+PRISM initialized ({scope})."
+    );
     println!("  Data dir:     {}", data_dir().display());
-    println!("
-Next steps:");
+    println!(
+        "
+Next steps:"
+    );
     println!("  prism serve --port 27181    # start transparent LLM proxy");
     println!("  prism mcp   --stdio         # MCP server for a local agent (already");
     println!("                                registered in ~/.claude.json if --global)");
     if global {
         println!("  source ~/.bashrc           # reload shell env vars");
     }
-    println!("
-Run prism gain to see token savings.");
+    println!(
+        "
+Run prism gain to see token savings."
+    );
 
     if guide {
         crate::guide::show_guide(None);
     } else {
         use std::io::Write;
-        print!("
-  [?] Explore the PRISM Interactive User Guide now? [y/N]: ");
+        print!(
+            "
+  [?] Explore the PRISM Interactive User Guide now? [y/N]: "
+        );
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_ok() {
@@ -326,7 +352,8 @@ fn write_claude_mcp_config() -> Result<()> {
     }
 
     let root = config.as_object_mut().expect("config is an object");
-    root.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+    root.entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
 
     let Some(servers) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) else {
         anyhow::bail!("~/.claude.json has a non-object mcpServers field; leaving it alone");
@@ -348,7 +375,9 @@ fn write_claude_mcp_config() -> Result<()> {
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
     println!("  Claude MCP:   registered in ~/.claude.json (stdio transport)");
-    println!("                alternative for a remote/hub client: {{\"type\": \"http\", \"url\": \"http://localhost:27182/mcp\"}}");
+    println!(
+        "                alternative for a remote/hub client: {{\"type\": \"http\", \"url\": \"http://localhost:27182/mcp\"}}"
+    );
     Ok(())
 }
 
@@ -393,13 +422,21 @@ pub async fn memory(cmd: MemoryCmd) -> Result<()> {
 // --- graph ---
 pub async fn graph(cmd: GraphCmd) -> Result<()> {
     match cmd {
-        GraphCmd::Query { query, graph, graphify, json } => {
+        GraphCmd::Query {
+            query,
+            graph,
+            graphify,
+            json,
+        } => {
             if json {
                 let data = crate::knowledge::query_graph_data(&query, 8, graph.as_deref());
-                println!("{}", serde_json::to_string_pretty(&data.map(|(p, n)| serde_json::json!({
-                    "source": p.display().to_string(),
-                    "nodes": n,
-                })))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data.map(|(p, n)| serde_json::json!({
+                        "source": p.display().to_string(),
+                        "nodes": n,
+                    })))?
+                );
                 Ok(())
             } else if graphify {
                 crate::knowledge::explain_node(&query, graph.as_deref()).await
@@ -410,24 +447,35 @@ pub async fn graph(cmd: GraphCmd) -> Result<()> {
         GraphCmd::Explain { node, graph, json } => {
             if json {
                 let data = crate::knowledge::explain_node_data(&node, graph.as_deref());
-                println!("{}", serde_json::to_string_pretty(&data.map(|(p, exp)| serde_json::json!({
-                    "source": p.display().to_string(),
-                    "node": exp.node,
-                    "outgoing": exp.outgoing,
-                    "incoming": exp.incoming,
-                })))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data.map(|(p, exp)| serde_json::json!({
+                        "source": p.display().to_string(),
+                        "node": exp.node,
+                        "outgoing": exp.outgoing,
+                        "incoming": exp.incoming,
+                    })))?
+                );
                 Ok(())
             } else {
                 crate::knowledge::explain_node(&node, graph.as_deref()).await
             }
         }
-        GraphCmd::Path { from, to, graph, json } => {
+        GraphCmd::Path {
+            from,
+            to,
+            graph,
+            json,
+        } => {
             if json {
                 let data = crate::knowledge::shortest_path_data(&from, &to, graph.as_deref());
-                println!("{}", serde_json::to_string_pretty(&data.map(|(p, steps)| serde_json::json!({
-                    "source": p.display().to_string(),
-                    "steps": steps,
-                })))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data.map(|(p, steps)| serde_json::json!({
+                        "source": p.display().to_string(),
+                        "steps": steps,
+                    })))?
+                );
                 Ok(())
             } else {
                 crate::knowledge::shortest_path(&from, &to, graph.as_deref()).await
@@ -436,22 +484,26 @@ pub async fn graph(cmd: GraphCmd) -> Result<()> {
         GraphCmd::GodNodes { top, graph, json } => {
             if json {
                 let data = crate::knowledge::god_nodes_data(top, graph.as_deref());
-                println!("{}", serde_json::to_string_pretty(&data.map(|(p, nodes)| serde_json::json!({
-                    "source": p.display().to_string(),
-                    "nodes": nodes,
-                })))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&data.map(|(p, nodes)| serde_json::json!({
+                        "source": p.display().to_string(),
+                        "nodes": nodes,
+                    })))?
+                );
                 Ok(())
             } else {
                 crate::knowledge::god_nodes(top, graph.as_deref()).await
             }
         }
-        GraphCmd::Import { path } => {
-            crate::knowledge::import_graph(&path).await
-        }
+        GraphCmd::Import { path } => crate::knowledge::import_graph(&path).await,
         GraphCmd::Extract { source } => crate::knowledge::extract_from_source(&source).await,
         GraphCmd::Export { output } => crate::knowledge::export_to_obsidian(&output).await,
         GraphCmd::Stats { graph } => crate::knowledge::graph_stats(graph.as_deref()).await,
-        GraphCmd::Index { path, from_graphify } => {
+        GraphCmd::Index {
+            path,
+            from_graphify,
+        } => {
             if let Some(gf) = from_graphify {
                 crate::knowledge::import_graph(&gf).await
             } else {
@@ -479,7 +531,11 @@ pub async fn read(
     if !out.is_cached_receipt {
         eprintln!(
             "[prism read] {} ({}) — {} -> {} tokens ({:.1}% saved)",
-            path.display(), out.mode_used, out.original_tokens, out.returned_tokens, out.savings_pct
+            path.display(),
+            out.mode_used,
+            out.original_tokens,
+            out.returned_tokens,
+            out.savings_pct
         );
     }
     Ok(())
@@ -519,8 +575,18 @@ pub async fn cache(cmd: CacheCmd) -> Result<()> {
                 println!("Cache matches for '{}':\n", query);
                 for (i, hit) in results.iter().enumerate() {
                     let entry = &hit.entry;
-                    println!("  [{}] {:.0}% match | hash: {} | model: {}", i + 1, hit.score * 100.0, entry.key_hash, entry.model.as_deref().unwrap_or("unknown"));
-                    let preview = if entry.response.len() > 150 { &entry.response[..150] } else { &entry.response };
+                    println!(
+                        "  [{}] {:.0}% match | hash: {} | model: {}",
+                        i + 1,
+                        hit.score * 100.0,
+                        entry.key_hash,
+                        entry.model.as_deref().unwrap_or("unknown")
+                    );
+                    let preview = if entry.response.len() > 150 {
+                        &entry.response[..150]
+                    } else {
+                        &entry.response
+                    };
                     println!("      {}\n", preview);
                 }
             }
@@ -567,7 +633,10 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
                 cfg.tiktoken_model = Some(val.clone());
             }
             _ => {
-                println!("Unknown config key: {}. (Supported: compression_ratio, cache_enabled, toon_enabled, proxy_port, mcp_port, tiktoken_model)", key);
+                println!(
+                    "Unknown config key: {}. (Supported: compression_ratio, cache_enabled, toon_enabled, proxy_port, mcp_port, tiktoken_model)",
+                    key
+                );
                 return Ok(());
             }
         }
@@ -643,12 +712,20 @@ pub async fn hub(cmd: HubCmd) -> Result<()> {
                 println!("\n  PRISM Hub Status");
                 println!("  {}", "═".repeat(40));
                 println!("  Enrolled:      {}", status.enrolled);
-                println!("  Hub URL:       {}", status.hub_url.as_deref().unwrap_or("(none)"));
-                println!("  Agent ID:      {}", status.agent_id.as_deref().unwrap_or("(none)"));
+                println!(
+                    "  Hub URL:       {}",
+                    status.hub_url.as_deref().unwrap_or("(none)")
+                );
+                println!(
+                    "  Agent ID:      {}",
+                    status.agent_id.as_deref().unwrap_or("(none)")
+                );
                 println!("  Spool events:  {}", status.spool_events);
                 println!("  Spool bytes:   {}", status.spool_bytes);
                 if !status.enrolled {
-                    println!("\n  Not enrolled — run `prism hub enroll --url <hub> --token <join-token>`.");
+                    println!(
+                        "\n  Not enrolled — run `prism hub enroll --url <hub> --token <join-token>`."
+                    );
                 }
             }
         }
@@ -660,7 +737,11 @@ pub async fn hub(cmd: HubCmd) -> Result<()> {
                 "Flushed {} event(s) in {} batch(es){}",
                 outcome.sent,
                 outcome.batches,
-                if outcome.failed { " — hub unreachable; spool restored for a later retry" } else { "" }
+                if outcome.failed {
+                    " — hub unreachable; spool restored for a later retry"
+                } else {
+                    ""
+                }
             );
         }
         HubCmd::Config => {
@@ -827,13 +908,16 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
     // already visible to the caller through the process status.
     if failed && !truncated {
         if let Some(p) = &tee_path {
-            eprintln!("[prism] exit {}; raw: {}", output.status.code().unwrap_or(-1), p.display());
+            eprintln!(
+                "[prism] exit {}; raw: {}",
+                output.status.code().unwrap_or(-1),
+                p.display()
+            );
         }
     }
 
     std::process::exit(output.status.code().unwrap_or(if failed { 1 } else { 0 }))
 }
-
 
 /// Build the child process for `prism cmd`.
 ///
@@ -854,7 +938,13 @@ fn child_command(cmd: &str, rest: &[String]) -> Command {
 
 /// Write raw stdout/stderr to `<data>/tee/<unix_ts>_<cmd>_<args>.log`, keeping at most
 /// `TEE_MAX_FILES` files. Returns the path on success.
-fn tee_raw(cmd: &str, args: &[String], code: Option<i32>, stdout: &str, stderr: &str) -> Option<std::path::PathBuf> {
+fn tee_raw(
+    cmd: &str,
+    args: &[String],
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Option<std::path::PathBuf> {
     const TEE_MAX_FILES: usize = 50;
     let tee_dir = crate::prism_data_dir().join("tee");
     std::fs::create_dir_all(&tee_dir).ok()?;
@@ -868,7 +958,13 @@ fn tee_raw(cmd: &str, args: &[String], code: Option<i32>, stdout: &str, stderr: 
         .collect::<Vec<_>>()
         .join("_")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     slug.truncate(60);
     let path = tee_dir.join(format!("{}_{}.log", ts, slug.trim_matches('_')));
@@ -877,12 +973,18 @@ fn tee_raw(cmd: &str, args: &[String], code: Option<i32>, stdout: &str, stderr: 
         "# prism cmd {} {}\n# exit: {}\n",
         cmd,
         args.join(" "),
-        code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+        code.map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into())
     );
     let body = if stderr.is_empty() {
         format!("{}{}", header, stdout)
     } else {
-        format!("{}{}\n# --- stderr ---\n{}", header, stdout.trim_end_matches('\n'), stderr)
+        format!(
+            "{}{}\n# --- stderr ---\n{}",
+            header,
+            stdout.trim_end_matches('\n'),
+            stderr
+        )
     };
     std::fs::write(&path, body).ok()?;
 
@@ -942,7 +1044,9 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
             crate::hook::install(true).await?;
             let st = sh::status();
             println!("  Mode:         {:?} (PRISM_SHIM=auto|always|off)", st.mode);
-            println!("  auto filters only when stdout is a pipe, so your own terminal keeps raw output.");
+            println!(
+                "  auto filters only when stdout is a pipe, so your own terminal keeps raw output."
+            );
         }
         ShimCmd::Install { path: false } => {
             let r = sh::install()?;
@@ -953,7 +1057,10 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
                 println!("    {}", vol.display());
                 println!("  `cargo clean` or moving the repo breaks every shimmed command.");
                 println!("  Install to a stable path first:");
-                println!("    cp {} ~/.local/bin/prism && ~/.local/bin/prism shim install --path", vol.display());
+                println!(
+                    "    cp {} ~/.local/bin/prism && ~/.local/bin/prism shim install --path",
+                    vol.display()
+                );
             }
             if !r.absent.is_empty() {
                 println!("  skipped {} tools not installed here", r.absent.len());
@@ -963,22 +1070,36 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
                 println!("  PATH: active");
             } else {
                 println!();
-                println!("  Not yet active — the shims must come first on PATH. Add this to your shell rc:");
+                println!(
+                    "  Not yet active — the shims must come first on PATH. Add this to your shell rc:"
+                );
                 println!("    {}", sh::path_line());
                 println!();
-                println!("  GUI-launched editors do not read your shell rc. Set it in the client instead:");
-                println!("    Claude Code    ~/.claude/settings.json   {{\"env\": {{\"PATH\": \"{}:${{PATH}}\"}}}}", sh::shim_dir().display());
-                println!("    Cursor/VS Code settings.json             \"terminal.integrated.env.linux\": {{\"PATH\": \"{}:${{env:PATH}}\"}}", sh::shim_dir().display());
+                println!(
+                    "  GUI-launched editors do not read your shell rc. Set it in the client instead:"
+                );
+                println!(
+                    "    Claude Code    ~/.claude/settings.json   {{\"env\": {{\"PATH\": \"{}:${{PATH}}\"}}}}",
+                    sh::shim_dir().display()
+                );
+                println!(
+                    "    Cursor/VS Code settings.json             \"terminal.integrated.env.linux\": {{\"PATH\": \"{}:${{env:PATH}}\"}}",
+                    sh::shim_dir().display()
+                );
                 println!("    anything else  export PATH before launching it");
             }
             println!();
             println!("  Mode: {:?} (PRISM_SHIM=auto|always|off).", sh::mode());
-            println!("  auto filters only when stdout is a pipe, so your own terminal keeps raw output.");
+            println!(
+                "  auto filters only when stdout is a pipe, so your own terminal keeps raw output."
+            );
         }
         ShimCmd::Uninstall => {
             let n = sh::uninstall()?;
             println!("Removed {n} shims.");
-            println!("Also remove the PATH line from your shell rc / client config if you added one.");
+            println!(
+                "Also remove the PATH line from your shell rc / client config if you added one."
+            );
         }
         ShimCmd::Status => {
             let st = sh::status();
@@ -986,7 +1107,14 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
             println!("  {}", "═".repeat(40));
             println!("  Directory: {}", st.dir.display());
             println!("  Installed: {}", st.installed);
-            println!("  On PATH:   {}", if st.active { "yes (first — shims win)" } else { "no (or not first — shims are inert)" });
+            println!(
+                "  On PATH:   {}",
+                if st.active {
+                    "yes (first — shims win)"
+                } else {
+                    "no (or not first — shims are inert)"
+                }
+            );
             println!("  Mode:      {:?}", st.mode);
             if st.installed > 0 && !st.active {
                 println!();

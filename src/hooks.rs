@@ -15,6 +15,12 @@ pub struct SessionState {
     pub writes_validated: u32,
 }
 
+impl Default for SessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionState {
     pub fn new() -> Self {
         Self {
@@ -28,11 +34,7 @@ impl SessionState {
     pub fn on_read(&mut self, path: &Path) -> Option<u32> {
         let count = self.read_counts.entry(path.to_path_buf()).or_insert(0);
         *count += 1;
-        if *count > 2 {
-            Some(*count)
-        } else {
-            None
-        }
+        if *count > 2 { Some(*count) } else { None }
     }
 
     /// Check whether a file read should be blocked.
@@ -65,10 +67,7 @@ impl SessionState {
         let unique_reads = self.read_counts.len();
         format!(
             "HOOK Session: {} unique reads, {} total reads, {} blocked, {} writes validated",
-            unique_reads,
-            total_reads,
-            self.reads_blocked,
-            self.writes_validated
+            unique_reads, total_reads, self.reads_blocked, self.writes_validated
         )
     }
 }
@@ -318,10 +317,7 @@ pub fn hook_audit_stats(hook_dir: &Path) -> String {
     }
 
     // Find most accessed files
-    let mut items: Vec<_> = dup_counts
-        .iter()
-        .filter(|(_, c)| **c > 1)
-        .collect();
+    let mut items: Vec<_> = dup_counts.iter().filter(|(_, c)| **c > 1).collect();
     items.sort_by(|a, b| b.1.cmp(a.1));
     let top: Vec<String> = items
         .iter()
@@ -334,7 +330,11 @@ pub fn hook_audit_stats(hook_dir: &Path) -> String {
          Most accessed files:\n{}",
         seen.len(),
         blocked,
-        if top.is_empty() {"  (none -- all reads were unique)".to_string()} else {top.join("\n")}
+        if top.is_empty() {
+            "  (none -- all reads were unique)".to_string()
+        } else {
+            top.join("\n")
+        }
     )
 }
 
@@ -354,7 +354,10 @@ pub fn check_do_not_repeat(hook_dir: &Path) -> Vec<String> {
     }
     let start: usize = dnr_start.unwrap();
     let dnr_text = &cereb[start..];
-    let end = dnr_text.find("\n## ").map(|i| start + i).unwrap_or(cereb.len());
+    let end = dnr_text
+        .find("\n## ")
+        .map(|i| start + i)
+        .unwrap_or(cereb.len());
     let dnr_section = &cereb[start..end.min(cereb.len())];
 
     let mut matches: Vec<String> = Vec::new();

@@ -93,7 +93,9 @@ impl FilterLimits {
     pub fn apply_env(&mut self) {
         let set = |name: &str, slot: &mut usize| {
             if let Ok(v) = std::env::var(format!("PRISM_FILTER_{}", name.to_ascii_uppercase())) {
-                if let Ok(n) = v.trim().parse::<usize>() { *slot = n }
+                if let Ok(n) = v.trim().parse::<usize>() {
+                    *slot = n
+                }
             }
         };
         set("grep_max_per_file", &mut self.grep_max_per_file);
@@ -182,7 +184,11 @@ pub fn load_hub() -> Option<PrismConfig> {
         Ok(s) => match serde_yaml::from_str::<PrismConfig>(&s) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
-                eprintln!("prism: warning: {} did not parse as YAML: {}", file.display(), e);
+                eprintln!(
+                    "prism: warning: {} did not parse as YAML: {}",
+                    file.display(),
+                    e
+                );
                 None
             }
         },
@@ -219,26 +225,54 @@ pub fn resolve() -> PrismConfig {
 pub fn merge_config(global: &PrismConfig, project: &PrismConfig) -> PrismConfig {
     let default = PrismConfig::default();
     PrismConfig {
-        data_dir: if project.data_dir.as_os_str().is_empty() && global.data_dir.as_os_str().is_empty() {
+        data_dir: if project.data_dir.as_os_str().is_empty()
+            && global.data_dir.as_os_str().is_empty()
+        {
             default.data_dir
         } else if project.data_dir.as_os_str().is_empty() {
             global.data_dir.clone()
         } else {
             project.data_dir.clone()
         },
-        toon_enabled: if project.toon_enabled { project.toon_enabled } else { global.toon_enabled },
-        tron_enabled: if project.tron_enabled { project.tron_enabled } else { global.tron_enabled },
-        graph_enabled: if project.graph_enabled { project.graph_enabled } else { global.graph_enabled },
+        toon_enabled: if project.toon_enabled {
+            project.toon_enabled
+        } else {
+            global.toon_enabled
+        },
+        tron_enabled: if project.tron_enabled {
+            project.tron_enabled
+        } else {
+            global.tron_enabled
+        },
+        graph_enabled: if project.graph_enabled {
+            project.graph_enabled
+        } else {
+            global.graph_enabled
+        },
         compression_ratio: project.compression_ratio.or(global.compression_ratio),
-        cache_enabled: if project.cache_enabled { project.cache_enabled } else { global.cache_enabled },
+        cache_enabled: if project.cache_enabled {
+            project.cache_enabled
+        } else {
+            global.cache_enabled
+        },
         cache_dir: project.cache_dir.clone().or(global.cache_dir.clone()),
         proxy_port: project.proxy_port.or(global.proxy_port),
         mcp_port: project.mcp_port.or(global.mcp_port),
-        tiktoken_model: project.tiktoken_model.clone().or(global.tiktoken_model.clone()),
-        llmlingua_path: project.llmlingua_path.clone().or(global.llmlingua_path.clone()),
+        tiktoken_model: project
+            .tiktoken_model
+            .clone()
+            .or(global.tiktoken_model.clone()),
+        llmlingua_path: project
+            .llmlingua_path
+            .clone()
+            .or(global.llmlingua_path.clone()),
         memory_tier: project.memory_tier.clone().or(global.memory_tier.clone()),
         log_level: project.log_level.clone().or(global.log_level.clone()),
-        filters: if project.filters != FilterLimits::default() { project.filters.clone() } else { global.filters.clone() },
+        filters: if project.filters != FilterLimits::default() {
+            project.filters.clone()
+        } else {
+            global.filters.clone()
+        },
     }
 }
 
@@ -253,39 +287,32 @@ pub fn save_global(cfg: &PrismConfig) -> std::io::Result<()> {
 
 /// Initialize ~/.prism directory
 pub fn init_global(data_dir: &Option<PathBuf>) -> std::io::Result<()> {
-    let dir = data_dir
-        .clone()
-        .unwrap_or_else(|| default_config_dir());
+    let dir = data_dir.clone().unwrap_or_else(default_config_dir);
     ensure_config_dir(&dir)?;
     let layers = ["recall", "core", "archive", "cache", "graphs", "sessions"];
     for layer in layers {
         std::fs::create_dir_all(dir.join(layer))?;
     }
     let cfg = PrismConfig::default();
-    let yaml = serde_yaml::to_string(&cfg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let yaml = serde_yaml::to_string(&cfg).map_err(std::io::Error::other)?;
     std::fs::write(dir.join("config.yaml"), yaml)?;
     Ok(())
 }
 
 /// Get default data directory
 pub fn default_data_dir() -> PathBuf {
-    let mut d = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let mut d = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     d.push("prism");
     d
 }
 
 pub fn is_initialized(data_dir: &Option<PathBuf>) -> bool {
-    let dir = data_dir
-        .clone()
-        .unwrap_or_else(|| default_config_dir());
+    let dir = data_dir.clone().unwrap_or_else(default_config_dir);
     dir.join("config.yaml").is_file()
 }
 
 fn default_config_dir() -> PathBuf {
-    let mut d = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let mut d = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     d.push("prism");
     d
 }

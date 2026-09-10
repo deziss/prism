@@ -3,7 +3,11 @@
 use super::common::*;
 
 fn plural(n: usize, noun: &str) -> String {
-    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
 }
 
 /// Group `path:line[:col]: message` diagnostics under one header per file.
@@ -28,11 +32,24 @@ fn group_file_diags(tool: &str, output: &str) -> String {
         let ln = it.next().unwrap_or("").trim();
         if !path.is_empty() && !ln.is_empty() && ln.chars().all(|c| c.is_ascii_digit()) {
             let third = it.next().unwrap_or("");
-            let (pos, msg) = if third.trim().chars().all(|c| c.is_ascii_digit()) && !third.trim().is_empty() {
-                (format!("{}:{}", ln, third.trim()), it.next().unwrap_or("").trim().to_string())
-            } else {
-                (ln.to_string(), format!("{}{}", third, it.next().map(|r| format!(":{}", r)).unwrap_or_default()).trim().to_string())
-            };
+            let (pos, msg) =
+                if third.trim().chars().all(|c| c.is_ascii_digit()) && !third.trim().is_empty() {
+                    (
+                        format!("{}:{}", ln, third.trim()),
+                        it.next().unwrap_or("").trim().to_string(),
+                    )
+                } else {
+                    (
+                        ln.to_string(),
+                        format!(
+                            "{}{}",
+                            third,
+                            it.next().map(|r| format!(":{}", r)).unwrap_or_default()
+                        )
+                        .trim()
+                        .to_string(),
+                    )
+                };
             count += 1;
             let entry = format!("  {}  {}", pos, truncate(&squeeze_ws(&msg), 200));
             match files.iter_mut().find(|(p, _)| *p == path) {
@@ -75,7 +92,12 @@ fn group_file_diags(tool: &str, output: &str) -> String {
         out.push(more(dropped, "diagnostics"));
     }
     out.extend(cap_vec(other, 10, "lines"));
-    out.push(format!("{}: {} in {}", tool, plural(count, "issue"), plural(files.len(), "file")));
+    out.push(format!(
+        "{}: {} in {}",
+        tool,
+        plural(count, "issue"),
+        plural(files.len(), "file")
+    ));
     out.join("\n")
 }
 
@@ -99,7 +121,11 @@ pub(crate) fn filter_go_test(output: &str) -> String {
         if tt.is_empty() {
             continue;
         }
-        if tt.starts_with("=== RUN") || tt.starts_with("=== PAUSE") || tt.starts_with("=== CONT") || tt.starts_with("--- PASS") {
+        if tt.starts_with("=== RUN")
+            || tt.starts_with("=== PAUSE")
+            || tt.starts_with("=== CONT")
+            || tt.starts_with("--- PASS")
+        {
             continue;
         }
         if let Some(rest) = tt.strip_prefix("--- FAIL: ") {
@@ -119,7 +145,10 @@ pub(crate) fn filter_go_test(output: &str) -> String {
             no_test += 1;
             continue;
         }
-        if let Some(rest) = tt.strip_prefix("FAIL\t").or_else(|| tt.strip_prefix("FAIL    ")) {
+        if let Some(rest) = tt
+            .strip_prefix("FAIL\t")
+            .or_else(|| tt.strip_prefix("FAIL    "))
+        {
             fail_pkgs.push(rest.split_whitespace().next().unwrap_or(rest).to_string());
             continue;
         }
@@ -204,7 +233,10 @@ pub(crate) fn filter_go_mod(args: &[&str], output: &str) -> String {
                 if t.is_empty() {
                     continue;
                 }
-                if t.starts_with("go: downloading") || t.starts_with("go: finding") || t.starts_with("go: extracting") {
+                if t.starts_with("go: downloading")
+                    || t.starts_with("go: finding")
+                    || t.starts_with("go: extracting")
+                {
                     fetched += 1;
                     continue;
                 }
@@ -218,9 +250,11 @@ pub(crate) fn filter_go_mod(args: &[&str], output: &str) -> String {
             }
             out.join("\n")
         }
-        Some(&"graph") | Some(&"why") | Some(&"edit") => {
-            cap_lines(output.lines().filter(|l| !l.trim().is_empty()), l.list_max_lines, "lines")
-        }
+        Some(&"graph") | Some(&"why") | Some(&"edit") => cap_lines(
+            output.lines().filter(|l| !l.trim().is_empty()),
+            l.list_max_lines,
+            "lines",
+        ),
         _ => generic(output),
     }
 }
@@ -244,17 +278,26 @@ pub(crate) fn filter_go(args: &[&str], output: &str) -> String {
         Some("build") | Some("install") | Some("generate") => filter_go_build(output),
         Some("vet") => filter_go_vet(output),
         Some("mod") => {
-            let rest: Vec<&str> = args.iter().copied().skip_while(|a| *a != "mod").skip(1).collect();
+            let rest: Vec<&str> = args
+                .iter()
+                .copied()
+                .skip_while(|a| *a != "mod")
+                .skip(1)
+                .collect();
             filter_go_mod(&rest, output)
         }
         Some("fmt") => {
-            let files: Vec<&str> = output.lines().map(|l| l.trim()).filter(|t| !t.is_empty()).collect();
+            let files: Vec<&str> = output
+                .lines()
+                .map(|l| l.trim())
+                .filter(|t| !t.is_empty())
+                .collect();
             if files.is_empty() {
                 "go fmt: ok".to_string()
             } else {
                 let n = files.len();
                 let mut out = vec![format!("go fmt: {} reformatted:", plural(n, "file"))];
-                out.push(cap_lines(files.into_iter(), l.list_max_lines, "files"));
+                out.push(cap_lines(files, l.list_max_lines, "files"));
                 out.join("\n")
             }
         }
@@ -291,7 +334,11 @@ pub(crate) fn filter_go(args: &[&str], output: &str) -> String {
             }
             out.join("\n")
         }
-        Some("run") => cap_lines(collapse_blank(output).lines(), l.passthrough_max_lines, "lines"),
+        Some("run") => cap_lines(
+            collapse_blank(output).lines(),
+            l.passthrough_max_lines,
+            "lines",
+        ),
         Some("version") => output.trim().to_string(),
         _ => generic(output),
     }
@@ -326,7 +373,11 @@ coverage: 81.2% of statements";
         assert!(out.starts_with("go test: 1 ok, 1 failed"), "{}", out);
         assert!(out.contains("FAIL: github.com/x/math"), "{}", out);
         assert!(out.contains("FAIL TestSub"), "{}", out);
-        assert!(out.contains("math_test.go:22: expected 4, got 5"), "{}", out);
+        assert!(
+            out.contains("math_test.go:22: expected 4, got 5"),
+            "{}",
+            out
+        );
         assert!(out.contains("coverage: 81.2% of statements"), "{}", out);
         assert!(!out.contains("=== RUN"), "{}", out);
         assert!(!out.contains("--- PASS"), "{}", out);
@@ -336,7 +387,11 @@ coverage: 81.2% of statements";
     fn go_test_panic_keeps_message_and_first_frames() {
         let raw = "panic: runtime error: index out of range [3] with length 2\n\ngoroutine 1 [running]:\nmain.boom(...)\n\t/app/main.go:12 +0x1d\nmain.main()\n\t/app/main.go:20 +0x5\nruntime.goexit()\n\t/usr/local/go/src/runtime/asm_amd64.s:1650 +0x1\nFAIL\tgithub.com/x/app\t0.002s";
         let out = filter_go(&["test"], raw);
-        assert!(out.contains("panic: runtime error: index out of range"), "{}", out);
+        assert!(
+            out.contains("panic: runtime error: index out of range"),
+            "{}",
+            out
+        );
         assert!(out.contains("/app/main.go:12"), "{}", out);
         assert!(!out.contains("asm_amd64.s"), "{}", out);
     }
@@ -345,7 +400,10 @@ coverage: 81.2% of statements";
     fn go_test_failure_cap_is_announced() {
         let mut raw = String::new();
         for i in 0..40 {
-            raw.push_str(&format!("--- FAIL: Test{} (0.00s)\n    x_test.go:{}: boom {}\n", i, i, i));
+            raw.push_str(&format!(
+                "--- FAIL: Test{} (0.00s)\n    x_test.go:{}: boom {}\n",
+                i, i, i
+            ));
         }
         raw.push_str("FAIL\tgithub.com/x/y\t0.1s");
         let out = filter_go(&["test"], &raw);
@@ -372,13 +430,19 @@ coverage: 81.2% of statements";
             "go: downloading github.com/a/b v1.2.3\ngo: downloading github.com/c/d v0.1.0\ngo: finding module for package x",
         );
         assert_eq!(out, "go mod: ok (3 modules fetched)");
-        let err = filter_go(&["mod", "tidy"], "go: updates to go.mod needed; to update it:\n\tgo mod tidy");
+        let err = filter_go(
+            &["mod", "tidy"],
+            "go: updates to go.mod needed; to update it:\n\tgo mod tidy",
+        );
         assert!(err.contains("updates to go.mod needed"), "{}", err);
     }
 
     #[test]
     fn go_env_drops_empty_vars_and_counts_them() {
-        let out = filter_go(&["env"], "GOARCH=\"amd64\"\nGOBIN=\"\"\nGOCACHE=\"/home/u/.cache/go-build\"\nGOFLAGS=\"\"");
+        let out = filter_go(
+            &["env"],
+            "GOARCH=\"amd64\"\nGOBIN=\"\"\nGOCACHE=\"/home/u/.cache/go-build\"\nGOFLAGS=\"\"",
+        );
         assert!(out.contains("GOARCH=amd64"), "{}", out);
         assert!(out.contains("GOCACHE=/home/u/.cache/go-build"), "{}", out);
         assert!(out.contains("(2 empty vars omitted)"), "{}", out);
@@ -391,7 +455,10 @@ coverage: 81.2% of statements";
         let fmt = filter_go(&["fmt", "./..."], "main.go\nhelper.go");
         assert!(fmt.starts_with("go fmt: 2 files reformatted:"), "{}", fmt);
         assert_eq!(filter_go(&["fmt"], ""), "go fmt: ok");
-        assert_eq!(filter_go(&["version"], "go version go1.24.1 linux/amd64\n"), "go version go1.24.1 linux/amd64");
+        assert_eq!(
+            filter_go(&["version"], "go version go1.24.1 linux/amd64\n"),
+            "go version go1.24.1 linux/amd64"
+        );
     }
 
     #[test]
@@ -399,7 +466,11 @@ coverage: 81.2% of statements";
         let out = filter_golangci(
             "level=info msg=\"[config_reader] Used config file .golangci.yml\"\nmain.go:12:6: `foo` is unused (unused)\ntime=2026-09-09 level=info msg=done",
         );
-        assert!(out.contains("main.go\n  12:6  `foo` is unused (unused)"), "{}", out);
+        assert!(
+            out.contains("main.go\n  12:6  `foo` is unused (unused)"),
+            "{}",
+            out
+        );
         assert!(!out.contains("level=info"), "{}", out);
         assert_eq!(filter_golangci("level=info msg=ok"), "golangci-lint: ok");
     }

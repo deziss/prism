@@ -193,6 +193,7 @@ async function runPrism(subcommand, args) {
 function deactivate() {}
 
 module.exports = { activate, deactivate };
-"#.to_string()
+"#
+        .to_string()
     }
 }

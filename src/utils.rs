@@ -27,7 +27,13 @@ pub fn list_files(root: &Path, extensions: &[&str]) -> Result<Vec<String>, std::
 /// Sanitize a filename (remove special chars)
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

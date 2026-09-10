@@ -3,15 +3,15 @@
 //! One submodule per tool family; `common` holds the shared helpers and the
 //! fidelity contract (announced truncation via `[+N more …]`, config-driven caps).
 
-pub mod common;
 mod cloud;
+pub mod common;
 mod containers;
 mod db;
 mod files;
 mod golang;
 mod iac;
-mod jvm_misc;
 mod js;
+mod jvm_misc;
 mod misc;
 mod python;
 mod rules;
@@ -20,7 +20,7 @@ mod security;
 mod vcs;
 
 pub use common::{has_truncation, limits};
-pub use rules::{loaded as loaded_rules, Rules};
+pub use rules::{Rules, loaded as loaded_rules};
 
 use cloud::*;
 use common::*;
@@ -29,8 +29,8 @@ use db::*;
 use files::*;
 use golang::*;
 use iac::*;
-use jvm_misc::*;
 use js::*;
+use jvm_misc::*;
 use misc::*;
 use python::*;
 use rust::*;
@@ -47,34 +47,121 @@ use std::borrow::Cow;
 /// `./gradlew` and `./mvnw` are dispatched but deliberately absent: they are relative
 /// paths, not PATH lookups, so a shim could never intercept them.
 pub const FILTERED_TOOLS: &[&str] = &[
-    "git", "gh", "glab", "jj", "cargo", "nextest",
-    "cargo-nextest", "pytest", "py.test", "mypy", "pyright", "ruff",
-    "black", "isort", "flake8", "bandit", "pip", "uv",
-    "poetry", "go", "golangci-lint", "tsc", "eslint", "biome",
-    "prettier", "jest", "vitest", "npm", "pnpm", "yarn",
-    "bun", "deno", "next", "rake", "rubocop", "rspec",
-    "dotnet", "gradle", "gradlew", "mvn", "mvnw", "make",
-    "docker", "podman", "kubectl", "helm", "stern", "k9s",
-    "terraform", "tofu", "tf", "pulumi", "aws", "gcloud",
-    "az", "psql", "mysql", "sqlite3", "redis-cli", "mongosh",
-    "prisma", "semgrep", "trivy", "hadolint", "grep", "rg",
-    "ripgrep", "find", "fd", "ls", "eza", "exa",
-    "jq", "act", "phpunit", "pest", "phpstan", "composer",
-    "sbt", "npx", "playwright", "docker-compose", "podman-compose", "oc",
-    "ansible", "ansible-playbook", "tree", "curl", "wget", "ping",
-    "ps", "ss", "netstat", "df", "du", "free",
-    "systemctl", "journalctl", "env", "printenv", "man", "lint"
+    "git",
+    "gh",
+    "glab",
+    "jj",
+    "cargo",
+    "nextest",
+    "cargo-nextest",
+    "pytest",
+    "py.test",
+    "mypy",
+    "pyright",
+    "ruff",
+    "black",
+    "isort",
+    "flake8",
+    "bandit",
+    "pip",
+    "uv",
+    "poetry",
+    "go",
+    "golangci-lint",
+    "tsc",
+    "eslint",
+    "biome",
+    "prettier",
+    "jest",
+    "vitest",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "deno",
+    "next",
+    "rake",
+    "rubocop",
+    "rspec",
+    "dotnet",
+    "gradle",
+    "gradlew",
+    "mvn",
+    "mvnw",
+    "make",
+    "docker",
+    "podman",
+    "kubectl",
+    "helm",
+    "stern",
+    "k9s",
+    "terraform",
+    "tofu",
+    "tf",
+    "pulumi",
+    "aws",
+    "gcloud",
+    "az",
+    "psql",
+    "mysql",
+    "sqlite3",
+    "redis-cli",
+    "mongosh",
+    "prisma",
+    "semgrep",
+    "trivy",
+    "hadolint",
+    "grep",
+    "rg",
+    "ripgrep",
+    "find",
+    "fd",
+    "ls",
+    "eza",
+    "exa",
+    "jq",
+    "act",
+    "phpunit",
+    "pest",
+    "phpstan",
+    "composer",
+    "sbt",
+    "npx",
+    "playwright",
+    "docker-compose",
+    "podman-compose",
+    "oc",
+    "ansible",
+    "ansible-playbook",
+    "tree",
+    "curl",
+    "wget",
+    "ping",
+    "ps",
+    "ss",
+    "netstat",
+    "df",
+    "du",
+    "free",
+    "systemctl",
+    "journalctl",
+    "env",
+    "printenv",
+    "man",
+    "lint",
 ];
 
 /// Dispatch names that intentionally have no shim.
 pub const UNSHIMMABLE: &[&str] = &["./gradlew", "./mvnw"];
 
-
 /// Route `output` of `cmd args…` through the matching filter.
 /// Unknown commands get the conservative [`common::generic`] passthrough.
 pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a, str> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let cmd = std::path::Path::new(cmd).file_name().and_then(|s| s.to_str()).unwrap_or(cmd);
+    let cmd = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(cmd);
     let raw = output; // kept for the never-inflate escape below
     let cleaned = strip_ansi(output);
     let output: &str = &cleaned;
@@ -85,137 +172,137 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
         Some(out) => out,
         None => match cmd {
             // --- VCS ---
-            "git"                              => filter_git(&a, output),
-            "gh"                               => filter_gh(&a, output),
-            "glab"                             => filter_glab(&a, output),
-            "jj"                               => filter_jj(&a, output),
+            "git" => filter_git(&a, output),
+            "gh" => filter_gh(&a, output),
+            "glab" => filter_glab(&a, output),
+            "jj" => filter_jj(&a, output),
 
             // --- Rust ---
-            "cargo"                            => filter_cargo(&a, output),
-            "nextest" | "cargo-nextest"        => filter_nextest(output),
+            "cargo" => filter_cargo(&a, output),
+            "nextest" | "cargo-nextest" => filter_nextest(output),
 
             // --- Python ---
-            "pytest" | "py.test"               => filter_pytest(&a, output),
-            "mypy"                             => filter_mypy(output),
-            "pyright"                          => filter_pyright(output),
-            "ruff"                             => filter_ruff(output),
-            "black"                            => filter_black(output),
-            "isort"                            => filter_isort(output),
-            "flake8"                           => filter_flake8(output),
-            "bandit"                           => filter_bandit(output),
-            "pip"                              => filter_pip(&a, output),
-            "uv"                               => filter_uv(&a, output),
-            "poetry"                           => filter_poetry(&a, output),
+            "pytest" | "py.test" => filter_pytest(&a, output),
+            "mypy" => filter_mypy(output),
+            "pyright" => filter_pyright(output),
+            "ruff" => filter_ruff(output),
+            "black" => filter_black(output),
+            "isort" => filter_isort(output),
+            "flake8" => filter_flake8(output),
+            "bandit" => filter_bandit(output),
+            "pip" => filter_pip(&a, output),
+            "uv" => filter_uv(&a, output),
+            "poetry" => filter_poetry(&a, output),
 
             // --- Go ---
-            "go"                               => filter_go(&a, output),
-            "golangci-lint"                    => filter_golangci(output),
+            "go" => filter_go(&a, output),
+            "golangci-lint" => filter_golangci(output),
 
             // --- JavaScript / TypeScript ---
-            "tsc"                              => filter_tsc(output),
-            "eslint"                           => filter_eslint(output),
-            "biome"                            => filter_biome(&a, output),
-            "prettier"                         => filter_prettier(output),
-            "jest"                             => filter_jest(output),
-            "vitest"                           => filter_vitest(output),
-            "npm" | "pnpm" | "yarn"            => filter_npm(&a, output),
-            "bun"                              => filter_bun(&a, output),
-            "deno"                             => filter_deno(&a, output),
-            "next"                             => filter_next(&a, output),
+            "tsc" => filter_tsc(output),
+            "eslint" => filter_eslint(output),
+            "biome" => filter_biome(&a, output),
+            "prettier" => filter_prettier(output),
+            "jest" => filter_jest(output),
+            "vitest" => filter_vitest(output),
+            "npm" | "pnpm" | "yarn" => filter_npm(&a, output),
+            "bun" => filter_bun(&a, output),
+            "deno" => filter_deno(&a, output),
+            "next" => filter_next(&a, output),
 
             // --- Ruby ---
-            "rake"                             => filter_rake(output),
-            "rubocop"                          => filter_rubocop(output),
-            "rspec"                            => filter_rspec(output),
+            "rake" => filter_rake(output),
+            "rubocop" => filter_rubocop(output),
+            "rspec" => filter_rspec(output),
 
             // --- .NET ---
-            "dotnet"                           => filter_dotnet(&a, output),
+            "dotnet" => filter_dotnet(&a, output),
 
             // --- JVM ---
             "gradle" | "gradlew" | "./gradlew" => filter_gradle(&a, output),
-            "mvn" | "mvnw" | "./mvnw"          => filter_mvn(output),
+            "mvn" | "mvnw" | "./mvnw" => filter_mvn(output),
 
             // --- Build ---
-            "make"                             => filter_make(output),
+            "make" => filter_make(output),
 
             // --- Containers ---
-            "docker" | "podman"                => filter_docker(&a, output),
+            "docker" | "podman" => filter_docker(&a, output),
 
             // --- Kubernetes ---
-            "kubectl"                          => filter_kubectl(&a, output),
-            "helm"                             => filter_helm(&a, output),
-            "stern"                            => filter_stern(output),
-            "k9s"                              => filter_k9s(output),
+            "kubectl" => filter_kubectl(&a, output),
+            "helm" => filter_helm(&a, output),
+            "stern" => filter_stern(output),
+            "k9s" => filter_k9s(output),
 
             // --- IaC ---
-            "terraform" | "tofu" | "tf"        => filter_terraform(&a, output),
-            "pulumi"                           => filter_pulumi(&a, output),
+            "terraform" | "tofu" | "tf" => filter_terraform(&a, output),
+            "pulumi" => filter_pulumi(&a, output),
 
             // --- Cloud CLIs ---
-            "aws"                              => filter_aws(&a, output),
-            "gcloud"                           => filter_gcloud(&a, output),
-            "az"                               => filter_az(&a, output),
+            "aws" => filter_aws(&a, output),
+            "gcloud" => filter_gcloud(&a, output),
+            "az" => filter_az(&a, output),
 
             // --- Databases ---
-            "psql"                             => filter_psql(output),
-            "mysql"                            => filter_mysql(output),
-            "sqlite3"                          => filter_sqlite3(output),
-            "redis-cli"                        => filter_redis(output),
-            "mongosh"                          => filter_mongosh(output),
-            "prisma"                           => filter_prisma(&a, output),
+            "psql" => filter_psql(output),
+            "mysql" => filter_mysql(output),
+            "sqlite3" => filter_sqlite3(output),
+            "redis-cli" => filter_redis(output),
+            "mongosh" => filter_mongosh(output),
+            "prisma" => filter_prisma(&a, output),
 
             // --- Security / SAST ---
-            "semgrep"                          => filter_semgrep(output),
-            "trivy"                            => filter_trivy(output),
-            "hadolint"                         => filter_hadolint(output),
+            "semgrep" => filter_semgrep(output),
+            "trivy" => filter_trivy(output),
+            "hadolint" => filter_hadolint(output),
 
             // --- Search / Files ---
-            "grep" | "rg" | "ripgrep"          => filter_grep(&a, output),
-            "find" | "fd"                      => filter_find(&a, output),
-            "ls" | "eza" | "exa"               => filter_ls(&a, output),
-            "jq"                               => filter_jq(output),
+            "grep" | "rg" | "ripgrep" => filter_grep(&a, output),
+            "find" | "fd" => filter_find(&a, output),
+            "ls" | "eza" | "exa" => filter_ls(&a, output),
+            "jq" => filter_jq(output),
 
             // --- CI / local ---
-            "act"                              => filter_act(output),
+            "act" => filter_act(output),
 
             // --- PHP / Scala ---
-            "phpunit" | "pest"                 => filter_phpunit(output),
-            "phpstan"                          => filter_phpstan(output),
-            "composer"                         => filter_composer(&a, output),
-            "sbt"                              => filter_sbt(output),
+            "phpunit" | "pest" => filter_phpunit(output),
+            "phpstan" => filter_phpstan(output),
+            "composer" => filter_composer(&a, output),
+            "sbt" => filter_sbt(output),
 
             // --- JS extras ---
-            "npx"                              => filter_npx(&a, output),
-            "playwright"                       => filter_playwright(output),
+            "npx" => filter_npx(&a, output),
+            "playwright" => filter_playwright(output),
 
             // --- Containers extras ---
             "docker-compose" | "podman-compose" => filter_compose(&a, output),
-            "oc"                               => filter_kubectl(&a, output),
+            "oc" => filter_kubectl(&a, output),
 
             // --- IaC extras ---
-            "ansible" | "ansible-playbook"     => filter_ansible(output),
+            "ansible" | "ansible-playbook" => filter_ansible(output),
 
             // --- Files extras ---
-            "tree"                             => filter_tree(output),
+            "tree" => filter_tree(output),
 
             // --- Network ---
-            "curl"                             => filter_curl(&a, output),
-            "wget"                             => filter_wget(output),
-            "ping"                             => filter_ping(output),
+            "curl" => filter_curl(&a, output),
+            "wget" => filter_wget(output),
+            "ping" => filter_ping(output),
 
             // --- System ---
-            "ps"                               => filter_ps(&a, output),
-            "ss" | "netstat"                   => filter_ss(output),
-            "df"                               => filter_df(output),
-            "du"                               => filter_du(output),
-            "free"                             => filter_free(output),
-            "systemctl"                        => filter_systemctl(&a, output),
-            "journalctl"                       => filter_journalctl(output),
-            "env" | "printenv"                 => filter_env(output),
-            "man"                              => filter_man(output),
+            "ps" => filter_ps(&a, output),
+            "ss" | "netstat" => filter_ss(output),
+            "df" => filter_df(output),
+            "du" => filter_du(output),
+            "free" => filter_free(output),
+            "systemctl" => filter_systemctl(&a, output),
+            "journalctl" => filter_journalctl(output),
+            "env" | "printenv" => filter_env(output),
+            "man" => filter_man(output),
 
             // --- Generic ---
-            "lint"                             => filter_lint(output),
+            "lint" => filter_lint(output),
 
             _ => rules::apply(cmd, &a, output, false).unwrap_or_else(|| generic(output)),
         },
@@ -258,7 +345,9 @@ mod dispatch_tests {
             .unwrap();
         let mut dispatched: Vec<String> = Vec::new();
         for line in body.lines() {
-            let Some((lhs, _)) = line.split_once("=>") else { continue };
+            let Some((lhs, _)) = line.split_once("=>") else {
+                continue;
+            };
             let mut rest = lhs;
             while let Some(open) = rest.find('"') {
                 let after = &rest[open + 1..];
@@ -267,22 +356,36 @@ mod dispatch_tests {
                 rest = &after[close + 1..];
             }
         }
-        assert!(dispatched.len() > 90, "parsed only {} arms", dispatched.len());
+        assert!(
+            dispatched.len() > 90,
+            "parsed only {} arms",
+            dispatched.len()
+        );
 
         let listed: std::collections::BTreeSet<&str> = FILTERED_TOOLS.iter().copied().collect();
         let skipped: std::collections::BTreeSet<&str> = UNSHIMMABLE.iter().copied().collect();
-        assert_eq!(listed.len(), FILTERED_TOOLS.len(), "FILTERED_TOOLS has duplicates");
+        assert_eq!(
+            listed.len(),
+            FILTERED_TOOLS.len(),
+            "FILTERED_TOOLS has duplicates"
+        );
 
         let missing: Vec<&String> = dispatched
             .iter()
             .filter(|n| !listed.contains(n.as_str()) && !skipped.contains(n.as_str()))
             .collect();
-        assert!(missing.is_empty(), "dispatched but not in FILTERED_TOOLS: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "dispatched but not in FILTERED_TOOLS: {missing:?}"
+        );
 
         let extra: Vec<&&str> = FILTERED_TOOLS
             .iter()
             .filter(|n| !dispatched.iter().any(|d| d == *n))
             .collect();
-        assert!(extra.is_empty(), "in FILTERED_TOOLS but never dispatched: {extra:?}");
+        assert!(
+            extra.is_empty(),
+            "in FILTERED_TOOLS but never dispatched: {extra:?}"
+        );
     }
 }

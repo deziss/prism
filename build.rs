@@ -3,12 +3,16 @@
 // openblas-src emits cargo:rustc-link-lib=openblas but may not set search path.
 // This build.rs emits both search path AND link lib, which only affects the final
 // binary (not build script binaries), avoiding the chicken-and-egg problem.
-use std::{env, path::PathBuf, fs};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     // 1. pkg-config openblas — works on servers with libopenblas-dev
-    if try_pkg_config("openblas") { return; }
-    if try_pkg_config("cblas") { return; }
+    if try_pkg_config("openblas") {
+        return;
+    }
+    if try_pkg_config("cblas") {
+        return;
+    }
 
     // 2. Fallback: create .blas-link/libopenblas.so symlink → libgslcblas / libblas
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -27,7 +31,9 @@ fn main() {
         for candidate in &candidates {
             if std::path::Path::new(candidate).exists() {
                 #[cfg(unix)]
-                { std::os::unix::fs::symlink(candidate, &link_so).ok(); }
+                {
+                    std::os::unix::fs::symlink(candidate, &link_so).ok();
+                }
                 break;
             }
         }

@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
+/// One hop of a shortest-path result: (from-node, relation label, to-node).
+pub type GraphPathStep = (GraphNode, String, GraphNode);
+
 pub fn graph_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -47,7 +50,11 @@ pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
 /// Struct-returning graph query, shared by the CLI's `--json` mode and the MCP
 /// `prism_graph_query` tool. `None` means no active graph was found (custom path,
 /// local `graphify-out/graph.json`, or the PRISM default all missed).
-pub fn query_graph_data(query: &str, top_k: usize, custom_path: Option<&Path>) -> Option<(PathBuf, Vec<GraphNode>)> {
+pub fn query_graph_data(
+    query: &str,
+    top_k: usize,
+    custom_path: Option<&Path>,
+) -> Option<(PathBuf, Vec<GraphNode>)> {
     let (path, rag) = find_active_graph(custom_path)?;
     let matches = rag.query(query, top_k);
     Some((path, matches))
@@ -59,8 +66,14 @@ pub async fn query_graph(query: &str, custom_path: Option<&Path>) -> Result<()> 
             println!("\n  Graph Query Results (Source: {})", path.display());
             println!("  {}", "═".repeat(60));
             for node in &matches {
-                let comm_str = node.community.map(|c| format!(" | comm: {}", c)).unwrap_or_default();
-                println!("  • [{}] {} (path: {}{})", node.kind, node.label, node.path, comm_str);
+                let comm_str = node
+                    .community
+                    .map(|c| format!(" | comm: {}", c))
+                    .unwrap_or_default();
+                println!(
+                    "  • [{}] {} (path: {}{})",
+                    node.kind, node.label, node.path, comm_str
+                );
             }
             println!();
             return Ok(());
@@ -85,7 +98,10 @@ pub async fn query_graph(query: &str, custom_path: Option<&Path>) -> Result<()> 
 
 /// Struct-returning node explanation, shared by the CLI's `--json` mode and the MCP
 /// `prism_graph_explain` tool.
-pub fn explain_node_data(node_name: &str, custom_path: Option<&Path>) -> Option<(PathBuf, NodeExplanationOwned)> {
+pub fn explain_node_data(
+    node_name: &str,
+    custom_path: Option<&Path>,
+) -> Option<(PathBuf, NodeExplanationOwned)> {
     let (path, rag) = find_active_graph(custom_path)?;
     let exp = rag.explain_node(node_name)?;
     Some((path, exp.into()))
@@ -112,19 +128,34 @@ pub async fn explain_node(node_name: &str, custom_path: Option<&Path>) -> Result
     if let Some(comm) = exp.node.community {
         println!("  Community:     {}", comm);
     }
-    println!("  Degree:        {}", exp.outgoing.len() + exp.incoming.len());
+    println!(
+        "  Degree:        {}",
+        exp.outgoing.len() + exp.incoming.len()
+    );
 
     if !exp.outgoing.is_empty() {
         println!("\n  Outgoing Connections ({}):", exp.outgoing.len());
         for (target, kind, weight) in exp.outgoing.iter().take(15) {
-            println!("    --> {} [{}] (w: {:.1}) in {}", target.label.yellow(), kind, weight, target.path);
+            println!(
+                "    --> {} [{}] (w: {:.1}) in {}",
+                target.label.yellow(),
+                kind,
+                weight,
+                target.path
+            );
         }
     }
 
     if !exp.incoming.is_empty() {
         println!("\n  Incoming Connections ({}):", exp.incoming.len());
         for (source, kind, weight) in exp.incoming.iter().take(15) {
-            println!("    <-- {} [{}] (w: {:.1}) in {}", source.label.cyan(), kind, weight, source.path);
+            println!(
+                "    <-- {} [{}] (w: {:.1}) in {}",
+                source.label.cyan(),
+                kind,
+                weight,
+                source.path
+            );
         }
     }
     println!();
@@ -137,7 +168,7 @@ pub fn shortest_path_data(
     from: &str,
     to: &str,
     custom_path: Option<&Path>,
-) -> Option<(PathBuf, Vec<(GraphNode, String, GraphNode)>)> {
+) -> Option<(PathBuf, Vec<GraphPathStep>)> {
     let (path, rag) = find_active_graph(custom_path)?;
     let steps = rag.shortest_path(from, to)?;
     Some((path, steps))
@@ -151,7 +182,11 @@ pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> 
         return Ok(());
     }
 
-    println!("\n  Finding dependency path: {} ➔ {}", from.cyan(), to.green());
+    println!(
+        "\n  Finding dependency path: {} ➔ {}",
+        from.cyan(),
+        to.green()
+    );
     if let Some((path, _)) = find_active_graph(custom_path) {
         println!("  Source Graph: {}", path.display());
     }
@@ -164,12 +199,21 @@ pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> 
         Some((_, steps)) => {
             println!("  Shortest path ({} hops):\n", steps.len());
             for (i, (src, rel, tgt)) in steps.iter().enumerate() {
-                println!("    [{}] {}  --[{}]-->  {}", i + 1, src.label.cyan(), rel.yellow(), tgt.label.green());
+                println!(
+                    "    [{}] {}  --[{}]-->  {}",
+                    i + 1,
+                    src.label.cyan(),
+                    rel.yellow(),
+                    tgt.label.green()
+                );
             }
             println!();
         }
         None => {
-            println!("  No path found between '{}' and '{}' in graph.\n", from, to);
+            println!(
+                "  No path found between '{}' and '{}' in graph.\n",
+                from, to
+            );
         }
     }
     Ok(())
@@ -177,9 +221,16 @@ pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> 
 
 /// Struct-returning god-nodes listing, shared by the CLI's `--json` mode and the MCP
 /// `prism_graph_god_nodes` tool.
-pub fn god_nodes_data(top: usize, custom_path: Option<&Path>) -> Option<(PathBuf, Vec<(GraphNode, usize)>)> {
+pub fn god_nodes_data(
+    top: usize,
+    custom_path: Option<&Path>,
+) -> Option<(PathBuf, Vec<(GraphNode, usize)>)> {
     let (path, rag) = find_active_graph(custom_path)?;
-    let hubs = rag.god_nodes(top).into_iter().map(|(n, d)| (n.clone(), d)).collect();
+    let hubs = rag
+        .god_nodes(top)
+        .into_iter()
+        .map(|(n, d)| (n.clone(), d))
+        .collect();
     Some((path, hubs))
 }
 
@@ -191,12 +242,19 @@ pub async fn god_nodes(top: usize, custom_path: Option<&Path>) -> Result<()> {
         return Ok(());
     };
 
-    println!("\n  God Nodes / Architectural Hubs (Source: {})", path.display());
+    println!(
+        "\n  God Nodes / Architectural Hubs (Source: {})",
+        path.display()
+    );
     println!("  {}", "═".repeat(60));
 
     for (i, (node, degree)) in hubs.iter().enumerate() {
-        let comm_str = node.community.map(|c| format!("comm: {}", c)).unwrap_or_else(|| "none".to_string());
-        println!("  {:2}. {:<28} {:>3} edges  [{}] in {} ({})",
+        let comm_str = node
+            .community
+            .map(|c| format!("comm: {}", c))
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "  {:2}. {:<28} {:>3} edges  [{}] in {} ({})",
             i + 1,
             node.label.cyan().bold(),
             degree.to_string().yellow(),
@@ -216,8 +274,11 @@ pub async fn import_graph(path: &Path) -> Result<()> {
     let target = graph_dir().join("codebase_graph.json");
     let json = serde_json::to_string_pretty(&rag)?;
     std::fs::write(&target, json)?;
-    println!("Successfully imported and activated {} nodes and {} edges into: {}",
-        rag.nodes.len(), rag.edges.len(), target.display()
+    println!(
+        "Successfully imported and activated {} nodes and {} edges into: {}",
+        rag.nodes.len(),
+        rag.edges.len(),
+        target.display()
     );
     Ok(())
 }
@@ -279,14 +340,22 @@ pub async fn export_to_obsidian(output_dir: &str) -> Result<()> {
             entity.entity_type,
             entity.name,
             entity.description,
-            connected.iter().map(|c| format!("- [[{}]]", c)).collect::<Vec<_>>().join("\n"),
+            connected
+                .iter()
+                .map(|c| format!("- [[{}]]", c))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
         std::fs::write(path, content)?;
     }
 
     let index = format!(
         "---\ntitle: Knowledge Graph Index\n---\n\n# Entity Index\n\n{}\n",
-        entities.iter().map(|e| format!("- [[{}]] ({})", e.name, e.entity_type)).collect::<Vec<_>>().join("\n"),
+        entities
+            .iter()
+            .map(|e| format!("- [[{}]] ({})", e.name, e.entity_type))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
     std::fs::write(out.join("index.md"), index)?;
 
@@ -303,14 +372,29 @@ pub async fn graph_stats(custom_path: Option<&Path>) -> Result<()> {
 
     println!("\n  Knowledge Graph Statistics");
     println!("  {}", "═".repeat(40));
-    println!("  Entities:           {}", entities.len().to_string().cyan());
-    println!("  Relationships:      {}", relationships.len().to_string().cyan());
+    println!(
+        "  Entities:           {}",
+        entities.len().to_string().cyan()
+    );
+    println!(
+        "  Relationships:      {}",
+        relationships.len().to_string().cyan()
+    );
     println!("  Community reports:  {}", reports.len().to_string().cyan());
 
     if let Some((path, rag)) = find_active_graph(custom_path) {
-        println!("  Active Graph:       {}", path.display().to_string().yellow());
-        println!("  Codebase Nodes:     {}", rag.nodes.len().to_string().cyan());
-        println!("  Codebase Edges:     {}", rag.edges.len().to_string().cyan());
+        println!(
+            "  Active Graph:       {}",
+            path.display().to_string().yellow()
+        );
+        println!(
+            "  Codebase Nodes:     {}",
+            rag.nodes.len().to_string().cyan()
+        );
+        println!(
+            "  Codebase Edges:     {}",
+            rag.edges.len().to_string().cyan()
+        );
     }
 
     let mut connection_counts: HashMap<&str, usize> = HashMap::new();
@@ -362,7 +446,11 @@ fn extract_entities(text: &str) -> Result<Vec<KnowledgeEntity>> {
     let mut seen: HashSet<String> = HashSet::new();
     for word in text.split_whitespace() {
         let clean: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
-        if clean.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        if clean
+            .chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
             && clean.len() > 2
             && !seen.contains(&clean)
         {
@@ -380,7 +468,10 @@ fn extract_entities(text: &str) -> Result<Vec<KnowledgeEntity>> {
     Ok(entities)
 }
 
-fn extract_relationships(_text: &str, entities: &[KnowledgeEntity]) -> Result<Vec<KnowledgeRelationship>> {
+fn extract_relationships(
+    _text: &str,
+    entities: &[KnowledgeEntity],
+) -> Result<Vec<KnowledgeRelationship>> {
     let mut rels = Vec::new();
     for i in 0..entities.len() {
         for j in (i + 1)..entities.len().min(i + 4) {
@@ -407,9 +498,17 @@ fn build_community_reports(
         .into_iter()
         .map(|(etype, group)| KnowledgeCommunityReport {
             title: format!("{} Community", etype),
-            summary: format!("A community of {} entities of type '{}'", group.len(), etype),
+            summary: format!(
+                "A community of {} entities of type '{}'",
+                group.len(),
+                etype
+            ),
             entities: group.iter().map(|e| e.name.clone()).collect(),
-            findings: vec![format!("Contains {} entities sharing the '{}' type", group.len(), etype)],
+            findings: vec![format!(
+                "Contains {} entities sharing the '{}' type",
+                group.len(),
+                etype
+            )],
         })
         .collect())
 }
@@ -451,13 +550,18 @@ fn save_relationships(relationships: &[KnowledgeRelationship]) -> Result<()> {
 
 fn save_community_reports(reports: &[KnowledgeCommunityReport]) -> Result<()> {
     std::fs::create_dir_all(graph_dir())?;
-    std::fs::write(graph_dir().join("reports.json"), serde_json::to_string_pretty(reports)?)?;
+    std::fs::write(
+        graph_dir().join("reports.json"),
+        serde_json::to_string_pretty(reports)?,
+    )?;
     Ok(())
 }
 
 fn load_all_entities() -> Result<Vec<KnowledgeEntity>> {
     let path = graph_dir().join("entities.jsonl");
-    if !path.exists() { return Ok(Vec::new()); }
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     Ok(std::fs::read_to_string(path)?
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -466,7 +570,9 @@ fn load_all_entities() -> Result<Vec<KnowledgeEntity>> {
 
 fn load_all_relationships() -> Result<Vec<KnowledgeRelationship>> {
     let path = graph_dir().join("relationships.jsonl");
-    if !path.exists() { return Ok(Vec::new()); }
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     Ok(std::fs::read_to_string(path)?
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -475,7 +581,9 @@ fn load_all_relationships() -> Result<Vec<KnowledgeRelationship>> {
 
 fn load_community_reports() -> Result<Vec<KnowledgeCommunityReport>> {
     let path = graph_dir().join("reports.json");
-    if !path.exists() { return Ok(Vec::new()); }
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
@@ -491,14 +599,20 @@ pub fn search_graph_with_path(query: &str, custom_path: Option<&Path>) -> Result
         if e.name.to_lowercase().contains(&query_lower)
             || e.description.to_lowercase().contains(&query_lower)
         {
-            results.push(format!("{} ({}) — {}", e.name, e.entity_type, e.description));
+            results.push(format!(
+                "{} ({}) — {}",
+                e.name, e.entity_type, e.description
+            ));
         }
     }
 
     if let Some((path, rag)) = find_active_graph(custom_path) {
         let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("Graph");
         for node in rag.query(query, 5) {
-            results.push(format!("[{} {}] {} (path: {})", label, node.kind, node.label, node.path));
+            results.push(format!(
+                "[{} {}] {} (path: {})",
+                label, node.kind, node.label, node.path
+            ));
         }
     }
 

@@ -6,7 +6,12 @@ use clap::Parser;
 use prism::{analytics, cli, mcp, proxy};
 
 #[derive(Parser, Debug)]
-#[command(name = "prism", about = "PRISM — Enterprise Token Optimizer", version, infer_long_args = true)]
+#[command(
+    name = "prism",
+    about = "PRISM — Enterprise Token Optimizer",
+    version,
+    infer_long_args = true
+)]
 enum Args {
     Init {
         #[arg(long, default_value_t = false)]
@@ -126,8 +131,7 @@ enum Args {
 fn init_tracing(verbose: bool) {
     use tracing_subscriber::EnvFilter;
     let default = if verbose { "info" } else { "warn" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -148,18 +152,34 @@ async fn main() -> Result<()> {
         Args::Discover => analytics::discover().await,
         Args::Proxy { cmd } => cli::proxy(cmd).await,
         Args::Serve { port, upstream } => proxy::start_server(port, upstream).await,
-        Args::Mcp { port, stdio, bind, auth_token } => mcp::start_mcp_server(port, stdio, bind, auth_token).await,
+        Args::Mcp {
+            port,
+            stdio,
+            bind,
+            auth_token,
+        } => mcp::start_mcp_server(port, stdio, bind, auth_token).await,
         Args::Memory { cmd } => cli::memory(cmd).await,
         Args::Graph { cmd } => cli::graph(cmd).await,
         Args::Toon { cmd } => cli::toon(cmd).await,
-        Args::Count { string, file, model } => cli::count(string, file, model).await,
+        Args::Count {
+            string,
+            file,
+            model,
+        } => cli::count(string, file, model).await,
         Args::Hook { cmd } => cli::hook(cmd).await,
         Args::Hub { cmd } => cli::hub(cmd).await,
         Args::Shim { cmd } => cli::shim(cmd).await,
-        Args::Compress { string, file, ratio } => cli::compress(string, file, ratio).await,
-        Args::Read { path, mode, lines, line_numbers } => {
-            cli::read(path, mode, lines, line_numbers).await
-        }
+        Args::Compress {
+            string,
+            file,
+            ratio,
+        } => cli::compress(string, file, ratio).await,
+        Args::Read {
+            path,
+            mode,
+            lines,
+            line_numbers,
+        } => cli::read(path, mode, lines, line_numbers).await,
         Args::Cache { cmd } => cli::cache(cmd).await,
         Args::Config { cmd } => cli::config(cmd).await,
         Args::Vscode { output } => cli::vscode_gen(output).await,

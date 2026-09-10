@@ -141,7 +141,9 @@ pub fn compression_ratio(orig_tokens: u32, sent_tokens: u32) -> f32 {
 static HUB_SPOOL_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_spool() -> std::sync::MutexGuard<'static, ()> {
-    HUB_SPOOL_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    HUB_SPOOL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 pub fn spool_dir() -> PathBuf {
@@ -168,7 +170,10 @@ pub fn spool_event(event: &HubEvent) -> std::io::Result<()> {
     line.push('\n');
     let _guard = lock_spool();
     std::fs::create_dir_all(spool_dir())?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(spool_path())?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(spool_path())?;
     f.write_all(line.as_bytes())?;
     f.flush()
 }
@@ -295,8 +300,15 @@ fn hostname_string() -> String {
 const MAX_BATCH: usize = 200;
 
 /// POST one batch of already-serialized `HubEvent` JSON lines to `/api/ingest/events`.
-async fn post_batch(client: &reqwest::Client, creds: &AgentCredentials, lines: &[&str]) -> Result<()> {
-    let body: Vec<serde_json::Value> = lines.iter().filter_map(|l| serde_json::from_str(l).ok()).collect();
+async fn post_batch(
+    client: &reqwest::Client,
+    creds: &AgentCredentials,
+    lines: &[&str],
+) -> Result<()> {
+    let body: Vec<serde_json::Value> = lines
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     if body.is_empty() {
         return Ok(());
     }
@@ -364,7 +376,11 @@ pub async fn flush(creds: &AgentCredentials) -> FlushOutcome {
         }
     }
 
-    FlushOutcome { sent, batches, failed }
+    FlushOutcome {
+        sent,
+        batches,
+        failed,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -429,7 +445,11 @@ pub async fn enroll(hub_url: &str, join_token: &str) -> Result<AgentCredentials>
 /// where `config::merge_all` picks it up as the highest-precedence layer.
 pub async fn fetch_config(creds: &AgentCredentials) -> Result<crate::config::PrismConfig> {
     let client = http_client();
-    let url = format!("{}/agents/{}/config", api_base(&creds.hub_url), creds.agent_id);
+    let url = format!(
+        "{}/agents/{}/config",
+        api_base(&creds.hub_url),
+        creds.agent_id
+    );
     let resp = client
         .get(&url)
         .bearer_auth(&creds.agent_token)
@@ -492,7 +512,10 @@ pub struct HubStatus {
 pub fn status() -> HubStatus {
     let creds = load_credentials();
     let (events, bytes) = match std::fs::read_to_string(spool_path()) {
-        Ok(s) => (s.lines().filter(|l| !l.trim().is_empty()).count(), s.len() as u64),
+        Ok(s) => (
+            s.lines().filter(|l| !l.trim().is_empty()).count(),
+            s.len() as u64,
+        ),
         Err(_) => (0, 0),
     };
     HubStatus {
@@ -528,7 +551,9 @@ impl HubSender {
     /// once `prism hub enroll` has run).
     pub fn spawn() -> Self {
         let Some(creds) = load_credentials() else {
-            tracing::info!("hub: not enrolled — proxy telemetry stays local (see `prism hub enroll`)");
+            tracing::info!(
+                "hub: not enrolled — proxy telemetry stays local (see `prism hub enroll`)"
+            );
             return HubSender { tx: None };
         };
 
@@ -545,7 +570,11 @@ impl HubSender {
             "hub: startup drain sent {} event(s) in {} batch(es){}",
             startup.sent,
             startup.batches,
-            if startup.failed { " (hub unreachable, will retry)" } else { "" }
+            if startup.failed {
+                " (hub unreachable, will retry)"
+            } else {
+                ""
+            }
         );
 
         let client = http_client();
@@ -582,9 +611,16 @@ impl HubSender {
 
     /// Send with exponential backoff; on final failure, spool the batch rather than
     /// drop it.
-    async fn send_batch(client: &reqwest::Client, creds: &AgentCredentials, batch: &mut Vec<HubEvent>) {
+    async fn send_batch(
+        client: &reqwest::Client,
+        creds: &AgentCredentials,
+        batch: &mut Vec<HubEvent>,
+    ) {
         const MAX_ATTEMPTS: u32 = 3;
-        let lines: Vec<String> = batch.iter().filter_map(|e| serde_json::to_string(e).ok()).collect();
+        let lines: Vec<String> = batch
+            .iter()
+            .filter_map(|e| serde_json::to_string(e).ok())
+            .collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
 
         for attempt in 1..=MAX_ATTEMPTS {
@@ -684,22 +720,47 @@ mod tests {
 
         // Every wire field name is camelCase — the exact bug being fixed.
         for must_contain in [
-            "\"sourceIp\"", "\"apiKeyHash\"", "\"origTokens\"", "\"sentTokens\"",
-            "\"respTokens\"", "\"costUsd\"", "\"latencyMs\"", "\"cacheHit\"",
-            "\"compressionRatio\"", "\"cacheServed\"", "\"imageSavedTokens\"",
-            "\"promptCacheReadTokens\"", "\"promptCacheWriteTokens\"",
-            "\"exitCode\"", "\"durationMs\"", "\"inputBytes\"", "\"outputBytes\"",
-            "\"filteredBytes\"", "\"viaShim\"", "\"keyHash\"", "\"cwdHash\"",
-            "\"type\": \"proxy\"", "\"type\": \"command\"", "\"type\": \"cache\"", "\"type\": \"session\"",
+            "\"sourceIp\"",
+            "\"apiKeyHash\"",
+            "\"origTokens\"",
+            "\"sentTokens\"",
+            "\"respTokens\"",
+            "\"costUsd\"",
+            "\"latencyMs\"",
+            "\"cacheHit\"",
+            "\"compressionRatio\"",
+            "\"cacheServed\"",
+            "\"imageSavedTokens\"",
+            "\"promptCacheReadTokens\"",
+            "\"promptCacheWriteTokens\"",
+            "\"exitCode\"",
+            "\"durationMs\"",
+            "\"inputBytes\"",
+            "\"outputBytes\"",
+            "\"filteredBytes\"",
+            "\"viaShim\"",
+            "\"keyHash\"",
+            "\"cwdHash\"",
+            "\"type\": \"proxy\"",
+            "\"type\": \"command\"",
+            "\"type\": \"cache\"",
+            "\"type\": \"session\"",
         ] {
-            assert!(json.contains(must_contain), "fixture missing {must_contain}:\n{json}");
+            assert!(
+                json.contains(must_contain),
+                "fixture missing {must_contain}:\n{json}"
+            );
         }
         // And no snake_case survivors of the old broken contract.
         for must_not_contain in ["orig_tokens", "api_key_hash", "cost_usd", "exit_code"] {
-            assert!(!json.contains(must_not_contain), "fixture still has snake_case {must_not_contain}:\n{json}");
+            assert!(
+                !json.contains(must_not_contain),
+                "fixture still has snake_case {must_not_contain}:\n{json}"
+            );
         }
 
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hub-events.json");
+        let fixture_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hub-events.json");
         std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
         std::fs::write(&fixture_path, &json).expect("writing tests/fixtures/hub-events.json");
     }
@@ -730,9 +791,15 @@ mod tests {
         spool_event(&ev).unwrap();
         assert_eq!(status().spool_events, 1);
 
-        let (rotated, content) = rotate_spool().unwrap().expect("one event should be present");
+        let (rotated, content) = rotate_spool()
+            .unwrap()
+            .expect("one event should be present");
         assert!(content.contains("\"tool\":\"ls\""));
-        assert_eq!(status().spool_events, 0, "rotate must remove the live spool file");
+        assert_eq!(
+            status().spool_events,
+            0,
+            "rotate must remove the live spool file"
+        );
 
         // Failure path: content must come back.
         restore_spool(&rotated);

@@ -6,7 +6,11 @@
 use super::common::*;
 
 fn plural(n: usize, noun: &str) -> String {
-    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
 }
 
 /// Group `path:line[:col]: msg` diagnostics under one header per file.
@@ -62,7 +66,11 @@ fn parse_diag(t: &str) -> Option<(String, String, String)> {
         if let Some((path, pos)) = head.split_once('(') {
             if pos.chars().all(|c| c.is_ascii_digit() || c == ',') && !pos.is_empty() {
                 let msg = rest.split(" [").next().unwrap_or(rest);
-                return Some((path.trim().to_string(), pos.replace(',', ":"), msg.trim().to_string()));
+                return Some((
+                    path.trim().to_string(),
+                    pos.replace(',', ":"),
+                    msg.trim().to_string(),
+                ));
             }
         }
     }
@@ -74,7 +82,11 @@ fn parse_diag(t: &str) -> Option<(String, String, String)> {
     }
     let third = it.next().unwrap_or("");
     if third.trim().chars().all(|c| c.is_ascii_digit()) && !third.trim().is_empty() {
-        Some((path.to_string(), format!("{}:{}", ln, third.trim()), it.next().unwrap_or("").trim().to_string()))
+        Some((
+            path.to_string(),
+            format!("{}:{}", ln, third.trim()),
+            it.next().unwrap_or("").trim().to_string(),
+        ))
     } else {
         let rest = match it.next() {
             Some(r) => format!("{}:{}", third, r),
@@ -118,7 +130,13 @@ pub(crate) fn filter_rspec(output: &str) -> String {
         }
         if section == "fail" {
             // `1) Group does thing`
-            if tt.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && tt.contains(')') {
+            if tt
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+                && tt.contains(')')
+            {
                 fails.push(vec![squeeze_ws(tt)]);
                 continue;
             }
@@ -158,7 +176,10 @@ pub(crate) fn filter_rubocop(output: &str) -> String {
     for line in output.lines() {
         let t = strip_ansi(line.trim_end());
         let tt = t.trim();
-        if tt.is_empty() || tt.starts_with("Inspecting ") || tt.chars().all(|c| c == '.' || c == 'C' || c == 'W') {
+        if tt.is_empty()
+            || tt.starts_with("Inspecting ")
+            || tt.chars().all(|c| c == '.' || c == 'C' || c == 'W')
+        {
             continue;
         }
         if tt.contains("files inspected") {
@@ -233,15 +254,17 @@ pub(crate) fn filter_dotnet_build(output: &str) -> String {
             steps += 1;
             continue;
         }
-        if tt.starts_with("Build succeeded") || tt.starts_with("Build FAILED") || tt.contains("Time Elapsed")
-            || tt.contains("Warning(s)") || tt.contains("Error(s)")
+        if tt.starts_with("Build succeeded")
+            || tt.starts_with("Build FAILED")
+            || tt.contains("Time Elapsed")
+            || tt.contains("Warning(s)")
+            || tt.contains("Error(s)")
         {
             summary.push(squeeze_ws(tt));
             continue;
         }
-        match parse_diag(tt) {
-            Some(d) => diags.push(d),
-            None => {}
+        if let Some(d) = parse_diag(tt) {
+            diags.push(d)
         }
     }
     let mut out = group_diags("dotnet build", diags, Vec::new());
@@ -298,8 +321,14 @@ pub(crate) fn filter_dotnet_test(output: &str) -> String {
 pub(crate) fn filter_dotnet(args: &[&str], output: &str) -> String {
     match find_subcommand(args) {
         Some("test") | Some("vstest") => filter_dotnet_test(output),
-        Some("build") | Some("publish") | Some("pack") | Some("restore") => filter_dotnet_build(output),
-        Some("run") => cap_lines(collapse_blank(output).lines(), limits().passthrough_max_lines, "lines"),
+        Some("build") | Some("publish") | Some("pack") | Some("restore") => {
+            filter_dotnet_build(output)
+        }
+        Some("run") => cap_lines(
+            collapse_blank(output).lines(),
+            limits().passthrough_max_lines,
+            "lines",
+        ),
         _ => generic(output),
     }
 }
@@ -339,7 +368,10 @@ pub(crate) fn filter_gradle(args: &[&str], output: &str) -> String {
             section = "why";
             continue;
         }
-        if tt.starts_with("* Try:") || tt.starts_with("* Get more help") || tt.starts_with("* Exception is:") {
+        if tt.starts_with("* Try:")
+            || tt.starts_with("* Get more help")
+            || tt.starts_with("* Exception is:")
+        {
             section = "";
             continue;
         }
@@ -374,7 +406,11 @@ pub(crate) fn filter_gradle(args: &[&str], output: &str) -> String {
     let head = format!(
         "gradle: {} ({}{} tasks)",
         trailer.unwrap_or_else(|| "done".into()),
-        if duration.is_empty() { String::new() } else { format!("{}, ", duration) },
+        if duration.is_empty() {
+            String::new()
+        } else {
+            format!("{}, ", duration)
+        },
         tasks
     );
     out.push(head);
@@ -436,7 +472,11 @@ pub(crate) fn filter_mvn(output: &str) -> String {
         }
     }
     let mut out: Vec<String> = Vec::new();
-    out.extend(cap_vec(dedupe_consecutive(errors), l.max_diagnostics, "error lines"));
+    out.extend(cap_vec(
+        dedupe_consecutive(errors),
+        l.max_diagnostics,
+        "error lines",
+    ));
     if let Some(t) = tests {
         out.push(t);
     }
@@ -456,7 +496,11 @@ pub(crate) fn filter_mvn(output: &str) -> String {
     out.push(format!(
         "mvn: {}{} ({} steps)",
         status,
-        if time.is_empty() { String::new() } else { format!(" in {}", time) },
+        if time.is_empty() {
+            String::new()
+        } else {
+            format!(" in {}", time)
+        },
         progress
     ));
     out.join("\n")
@@ -480,7 +524,9 @@ pub(crate) fn filter_make(output: &str) -> String {
         if tt.is_empty() {
             continue;
         }
-        if tt.starts_with("make[") && (tt.contains("Entering directory") || tt.contains("Leaving directory")) {
+        if tt.starts_with("make[")
+            && (tt.contains("Entering directory") || tt.contains("Leaving directory"))
+        {
             dirs += 1;
             continue;
         }
@@ -500,7 +546,10 @@ pub(crate) fn filter_make(output: &str) -> String {
         }
         // echoed compile commands are noise unless they carry a diagnostic
         let first = tt.split_whitespace().next().unwrap_or("");
-        if COMPILERS.iter().any(|c| first == *c || first.ends_with(&format!("/{}", c))) {
+        if COMPILERS
+            .iter()
+            .any(|c| first == *c || first.ends_with(&format!("/{}", c)))
+        {
             steps += 1;
             continue;
         }
@@ -541,7 +590,10 @@ pub(crate) fn filter_phpunit(output: &str) -> String {
         if tt.is_empty() {
             continue;
         }
-        if tt.starts_with("PHPUnit ") || tt.starts_with("Runtime:") || tt.starts_with("Configuration:") {
+        if tt.starts_with("PHPUnit ")
+            || tt.starts_with("Runtime:")
+            || tt.starts_with("Configuration:")
+        {
             continue;
         }
         if tt.starts_with("OK (") || tt.starts_with("Tests: ") || tt.starts_with("OK, but") {
@@ -558,7 +610,13 @@ pub(crate) fn filter_phpunit(output: &str) -> String {
             continue;
         }
         if section == "fail" {
-            if tt.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && tt.contains(')') {
+            if tt
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+                && tt.contains(')')
+            {
                 fails.push(vec![squeeze_ws(tt)]);
                 continue;
             }
@@ -589,13 +647,19 @@ pub(crate) fn filter_phpunit(output: &str) -> String {
         }
         let mut out = vec![format!("{} tests, {} classes", tests.len(), groups.len())];
         for (c, m) in &groups {
-            out.push(format!("{}: {}", if c.is_empty() { "(root)" } else { c }, m.join(", ")));
+            out.push(format!(
+                "{}: {}",
+                if c.is_empty() { "(root)" } else { c },
+                m.join(", ")
+            ));
         }
         return cap_vec(out, l.list_max_lines, "classes").join("\n");
     }
-    let mut out = vec![summary
-        .map(|s| format!("phpunit: {}", s))
-        .unwrap_or_else(|| format!("phpunit: {} failures", fails.len()))];
+    let mut out = vec![
+        summary
+            .map(|s| format!("phpunit: {}", s))
+            .unwrap_or_else(|| format!("phpunit: {} failures", fails.len())),
+    ];
     let shown = fails.len().min(l.test_max_failures);
     for f in &fails[..shown] {
         out.extend(f.clone());
@@ -787,7 +851,10 @@ pub(crate) fn filter_sbt(output: &str) -> String {
             continue;
         }
         if let Some(rest) = tt.strip_prefix("[success] ") {
-            trailer = Some(format!("sbt: ok ({})", rest.trim_start_matches("Total time:").trim()));
+            trailer = Some(format!(
+                "sbt: ok ({})",
+                rest.trim_start_matches("Total time:").trim()
+            ));
             continue;
         }
         if let Some(rest) = tt.strip_prefix("[error] ") {
@@ -802,7 +869,10 @@ pub(crate) fn filter_sbt(output: &str) -> String {
             continue;
         }
         if let Some(rest) = tt.strip_prefix("[info] ") {
-            if rest.contains("Passed: Total") || rest.contains("*** FAILED ***") || rest.starts_with("- ") {
+            if rest.contains("Passed: Total")
+                || rest.contains("*** FAILED ***")
+                || rest.starts_with("- ")
+            {
                 tests.push(squeeze_ws(rest));
             } else {
                 info += 1;
@@ -832,9 +902,17 @@ mod tests {
         let out = filter_rspec(
             "....F..\n\nFailures:\n\n  1) Calculator#add returns the sum\n     Failure/Error: expect(add(1, 2)).to eq 4\n\n       expected: 4\n            got: 3\n\n       (compared using ==)\n     # ./spec/calc_spec.rs:12:in `block (3 levels)'\n\nFinished in 0.0123 seconds (files took 0.1 seconds to load)\n7 examples, 1 failure\n\nFailed examples:\n\nrspec ./spec/calc_spec.rb:10 # Calculator#add returns the sum",
         );
-        assert!(out.starts_with("rspec: 7 examples, 1 failure (0.0123 seconds"), "{}", out);
+        assert!(
+            out.starts_with("rspec: 7 examples, 1 failure (0.0123 seconds"),
+            "{}",
+            out
+        );
         assert!(out.contains("1) Calculator#add returns the sum"), "{}", out);
-        assert!(out.contains("Failure/Error: expect(add(1, 2)).to eq 4"), "{}", out);
+        assert!(
+            out.contains("Failure/Error: expect(add(1, 2)).to eq 4"),
+            "{}",
+            out
+        );
         assert!(out.contains("expected: 4"), "{}", out);
         assert!(!out.contains("Failed examples:"), "{}", out);
     }
@@ -844,9 +922,17 @@ mod tests {
         let out = filter_rubocop(
             "Inspecting 3 files\n.C.\n\napp/models/user.rb:12:5: C: Style/StringLiterals: Prefer single-quoted strings\napp/models/user.rb:20:1: W: Lint/UselessAssignment: Useless assignment to `x`\n\n3 files inspected, 2 offenses detected, 1 offense autocorrectable",
         );
-        assert!(out.contains("app/models/user.rb\n  12:5  C: Style/StringLiterals"), "{}", out);
+        assert!(
+            out.contains("app/models/user.rb\n  12:5  C: Style/StringLiterals"),
+            "{}",
+            out
+        );
         assert!(out.contains("  20:1  W: Lint/UselessAssignment"), "{}", out);
-        assert!(out.contains("3 files inspected, 2 offenses detected"), "{}", out);
+        assert!(
+            out.contains("3 files inspected, 2 offenses detected"),
+            "{}",
+            out
+        );
         assert_eq!(filter_rubocop("Inspecting 2 files\n..\n"), "rubocop: ok");
     }
 
@@ -856,7 +942,11 @@ mod tests {
             &["build"],
             "MSBuild version 17.8.3\n  Determining projects to restore...\n  Restored /app/App.csproj (in 1.2 sec).\nProgram.cs(12,5): error CS1002: ; expected [/app/App.csproj]\nProgram.cs(20,9): warning CS0168: variable declared but never used [/app/App.csproj]\n  App -> /app/bin/Debug/App.dll\n\nBuild FAILED.\n    1 Warning(s)\n    1 Error(s)\nTime Elapsed 00:00:03.21",
         );
-        assert!(build.contains("Program.cs\n  12:5  error CS1002: ; expected"), "{}", build);
+        assert!(
+            build.contains("Program.cs\n  12:5  error CS1002: ; expected"),
+            "{}",
+            build
+        );
         assert!(build.contains("  20:9  warning CS0168"), "{}", build);
         assert!(build.contains("Build FAILED"), "{}", build);
         assert!(build.contains("restore/link steps"), "{}", build);
@@ -866,7 +956,11 @@ mod tests {
             &["test"],
             "  Determining projects to restore...\nFailed Calc.AddTest [12 ms]\n  Error Message:\n   Assert.Equal() Failure\n   Expected: 4\n   Actual:   3\n  Stack Trace:\n     at Calc.AddTest() in /app/Tests.cs:line 12\n\nFailed!  - Failed: 1, Passed: 11, Skipped: 0, Total: 12, Duration: 1 s",
         );
-        assert!(test.starts_with("Failed! - Failed: 1, Passed: 11"), "{}", test);
+        assert!(
+            test.starts_with("Failed! - Failed: 1, Passed: 11"),
+            "{}",
+            test
+        );
         assert!(test.contains("FAIL Calc.AddTest [12 ms]"), "{}", test);
         assert!(test.contains("Error Message:"), "{}", test);
     }
@@ -879,7 +973,11 @@ mod tests {
         );
         assert!(out.contains("Execution failed for task ':test'"), "{}", out);
         assert!(out.contains("There were failing tests"), "{}", out);
-        assert!(out.contains("gradle: BUILD FAILED (12s, 3 tasks)"), "{}", out);
+        assert!(
+            out.contains("gradle: BUILD FAILED (12s, 3 tasks)"),
+            "{}",
+            out
+        );
         assert!(!out.contains("--stacktrace"), "{}", out);
         assert!(!out.contains("help.gradle.org"), "{}", out);
     }
@@ -902,7 +1000,11 @@ mod tests {
         let out = filter_make(
             "make[1]: Entering directory '/app/src'\ngcc -c -O2 -o main.o main.c\ngcc -c -O2 -o util.o util.c\nmain.c:12:5: error: 'x' undeclared (first use in this function)\nmake[1]: *** [Makefile:20: main.o] Error 1\nmake[1]: Leaving directory '/app/src'",
         );
-        assert!(out.contains("main.c\n  12:5  error: 'x' undeclared"), "{}", out);
+        assert!(
+            out.contains("main.c\n  12:5  error: 'x' undeclared"),
+            "{}",
+            out
+        );
         assert!(out.contains("Error 1"), "{}", out);
         assert!(out.contains("2 compile steps"), "{}", out);
         assert!(out.contains("2 directory changes"), "{}", out);
@@ -913,13 +1015,27 @@ mod tests {
 
     #[test]
     fn phpunit_summary_failures_and_listing() {
-        let ok = filter_phpunit("PHPUnit 10.5.0 by Sebastian Bergmann\n\nRuntime:       PHP 8.3.0\n...............                                             15 / 15 (100%)\n\nTime: 00:00.123, Memory: 6.00 MB\n\nOK (15 tests, 32 assertions)");
+        let ok = filter_phpunit(
+            "PHPUnit 10.5.0 by Sebastian Bergmann\n\nRuntime:       PHP 8.3.0\n...............                                             15 / 15 (100%)\n\nTime: 00:00.123, Memory: 6.00 MB\n\nOK (15 tests, 32 assertions)",
+        );
         assert_eq!(ok, "phpunit: OK (15 tests, 32 assertions)");
-        let fail = filter_phpunit("PHPUnit 10.5.0\n\n..F\n\nThere was 1 failure:\n\n1) CalcTest::testAdd\nFailed asserting that 3 matches expected 4.\n\n/app/tests/CalcTest.php:12\n\nFAILURES!\nTests: 3, Assertions: 3, Failures: 1.");
-        assert!(fail.contains("Tests: 3, Assertions: 3, Failures: 1"), "{}", fail);
+        let fail = filter_phpunit(
+            "PHPUnit 10.5.0\n\n..F\n\nThere was 1 failure:\n\n1) CalcTest::testAdd\nFailed asserting that 3 matches expected 4.\n\n/app/tests/CalcTest.php:12\n\nFAILURES!\nTests: 3, Assertions: 3, Failures: 1.",
+        );
+        assert!(
+            fail.contains("Tests: 3, Assertions: 3, Failures: 1"),
+            "{}",
+            fail
+        );
         assert!(fail.contains("1) CalcTest::testAdd"), "{}", fail);
-        assert!(fail.contains("Failed asserting that 3 matches expected 4"), "{}", fail);
-        let list = filter_phpunit("PHPUnit 10.5.0\n\nAvailable test(s):\n - CalcTest::testAdd\n - CalcTest::testSub\n - UserTest::testName");
+        assert!(
+            fail.contains("Failed asserting that 3 matches expected 4"),
+            "{}",
+            fail
+        );
+        let list = filter_phpunit(
+            "PHPUnit 10.5.0\n\nAvailable test(s):\n - CalcTest::testAdd\n - CalcTest::testSub\n - UserTest::testName",
+        );
         assert!(list.starts_with("3 tests, 2 classes"), "{}", list);
         assert!(list.contains("CalcTest: testAdd, testSub"), "{}", list);
     }
@@ -930,8 +1046,16 @@ mod tests {
             " ------ ----------------------------------------------------------------- \n  Line   app/Models/User.php                                              \n ------ ----------------------------------------------------------------- \n  12     Method App\\Models\\User::save() has no return type specified.     \n  40     Property $name has no type specified.                            \n ------ ----------------------------------------------------------------- \n\n [ERROR] Found 2 errors\n",
         );
         assert!(out.contains("app/Models/User.php"), "{}", out);
-        assert!(out.contains("  12  Method App\\Models\\User::save() has no return type specified."), "{}", out);
-        assert!(out.contains("  40  Property $name has no type specified."), "{}", out);
+        assert!(
+            out.contains("  12  Method App\\Models\\User::save() has no return type specified."),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("  40  Property $name has no type specified."),
+            "{}",
+            out
+        );
         assert!(out.ends_with("Found 2 errors"), "{}", out);
         assert!(!out.contains("------"), "{}", out);
         assert_eq!(filter_phpstan(" [OK] No errors\n"), "phpstan: ok");
@@ -943,7 +1067,11 @@ mod tests {
             &["install"],
             "Loading composer repositories with package information\nUpdating dependencies\nLock file operations: 2 installs, 0 updates, 0 removals\n  - Locking monolog/monolog (3.5.0)\nPackage operations: 2 installs, 0 updates, 0 removals\n  - Downloading monolog/monolog (3.5.0)\n  - Installing monolog/monolog (3.5.0): Extracting archive\nPackage foo/bar is abandoned, you should avoid using it.\nGenerating autoload files",
         );
-        assert!(out.contains("Installing monolog/monolog (3.5.0)"), "{}", out);
+        assert!(
+            out.contains("Installing monolog/monolog (3.5.0)"),
+            "{}",
+            out
+        );
         assert!(out.contains("(1 abandoned packages)"), "{}", out);
         assert!(out.contains("resolver steps"), "{}", out);
         assert!(!out.contains("Loading composer repositories"), "{}", out);
@@ -954,7 +1082,11 @@ mod tests {
         let out = filter_sbt(
             "[info] welcome to sbt 1.9.7\n[info] loading project definition\n[info] compiling 3 Scala sources\n[error] /app/src/Main.scala:12:5: not found: value foo\n[error] one error found\n[warn] deprecated method\n[error] (Compile / compileIncremental) Compilation failed",
         );
-        assert!(out.contains("/app/src/Main.scala\n  12:5  not found: value foo"), "{}", out);
+        assert!(
+            out.contains("/app/src/Main.scala\n  12:5  not found: value foo"),
+            "{}",
+            out
+        );
         assert!(out.contains("one error found"), "{}", out);
         assert!(out.contains("(1 warnings)"), "{}", out);
         let ok = filter_sbt("[info] compiling\n[success] Total time: 4 s, completed Sep 9, 2026");
@@ -965,7 +1097,11 @@ mod tests {
     fn failure_caps_are_announced_and_empty_is_safe() {
         let mut raw = String::from("Failures:\n\n");
         for i in 0..40 {
-            raw.push_str(&format!("  {}) Group case {}\n     Failure/Error: boom\n\n", i + 1, i));
+            raw.push_str(&format!(
+                "  {}) Group case {}\n     Failure/Error: boom\n\n",
+                i + 1,
+                i
+            ));
         }
         raw.push_str("40 examples, 40 failures\n");
         let out = filter_rspec(&raw);

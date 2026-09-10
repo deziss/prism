@@ -6,11 +6,11 @@
 // bump, and is out of scope for that pass.
 
 use crate::vector::TurboVecIndex;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use chrono::Utc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
@@ -80,13 +80,24 @@ pub fn prompt_similarity(a: &str, b: &str) -> f32 {
         for w in b {
             *cb.entry(w.as_str()).or_insert(0.0) += 1.0;
         }
-        let dot: f32 = ca.iter().map(|(k, v)| cb.get(k).copied().unwrap_or(0.0) * v).sum();
+        let dot: f32 = ca
+            .iter()
+            .map(|(k, v)| cb.get(k).copied().unwrap_or(0.0) * v)
+            .sum();
         let na: f32 = ca.values().map(|v| v * v).sum::<f32>().sqrt();
         let nb: f32 = cb.values().map(|v| v * v).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+        if na == 0.0 || nb == 0.0 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
     fn trigrams(s: &str) -> Vec<String> {
-        let cleaned: Vec<char> = s.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+        let cleaned: Vec<char> = s
+            .to_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         if cleaned.len() < 3 {
             return cleaned.iter().map(|c| c.to_string()).collect();
         }
@@ -289,7 +300,9 @@ impl SemanticCache {
         self.turbo.add(&hash, &emb);
         self.entries.insert(hash.clone(), entry.clone());
         if let Ok(serialized) = serde_json::to_string(&entry) {
-            let _ = self.sled_db.insert(hash.as_bytes(), serialized.into_bytes());
+            let _ = self
+                .sled_db
+                .insert(hash.as_bytes(), serialized.into_bytes());
             let _ = self.sled_db.flush();
         }
     }
@@ -332,7 +345,11 @@ impl SemanticCache {
             .map(|entry| Scored {
                 score: if entry.prompt.is_empty() {
                     // legacy entry: only an exact key match can be trusted
-                    if Self::hash_input(query) == entry.prompt_hash { 1.0 } else { 0.0 }
+                    if Self::hash_input(query) == entry.prompt_hash {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 } else {
                     prompt_similarity(query, &entry.prompt)
                 },
@@ -383,9 +400,7 @@ impl SemanticCache {
     }
 
     pub fn flush(&self) -> std::io::Result<usize> {
-        self.sled_db
-            .flush()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        self.sled_db.flush().map_err(std::io::Error::other)
     }
 
     fn hash_input(input: &str) -> String {
@@ -435,7 +450,7 @@ impl SemanticCache {
 
     fn load_entries(&mut self) -> std::io::Result<()> {
         for item in self.sled_db.iter() {
-            let (k, v) = item.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let (k, v) = item.map_err(std::io::Error::other)?;
             if let Ok(entry) = serde_json::from_slice::<CacheEntry>(v.as_ref()) {
                 if let Some(ref emb) = entry.embedding {
                     if emb.len() == 16 {
@@ -462,16 +477,27 @@ mod similarity_tests {
 
     #[test]
     fn identical_prompts_score_one() {
-        assert!(prompt_similarity("how do I list docker containers", "how do I list docker containers") > 0.99);
+        assert!(
+            prompt_similarity(
+                "how do I list docker containers",
+                "how do I list docker containers"
+            ) > 0.99
+        );
     }
 
     #[test]
     fn rewordings_of_the_same_question_clear_the_threshold() {
         let min = 0.55;
         for (a, b) in [
-            ("how do I list docker containers", "how do I list the docker containers"),
+            (
+                "how do I list docker containers",
+                "how do I list the docker containers",
+            ),
             ("list docker containers", "list docker container"),
-            ("what does this function return", "what does this function returns"),
+            (
+                "what does this function return",
+                "what does this function returns",
+            ),
         ] {
             let s = prompt_similarity(a, b);
             assert!(s >= min, "{:.2} for {:?} vs {:?}", s, a, b);
@@ -494,7 +520,13 @@ mod similarity_tests {
     fn scoring_is_symmetric_and_bounded_and_safe_on_empty() {
         let (a, b) = ("list the pods", "list pods in the cluster");
         assert!((prompt_similarity(a, b) - prompt_similarity(b, a)).abs() < 1e-6);
-        for (x, y) in [("", ""), ("", "something"), ("a", ""), ("é", "é"), ("🎉", "🎉")] {
+        for (x, y) in [
+            ("", ""),
+            ("", "something"),
+            ("a", ""),
+            ("é", "é"),
+            ("🎉", "🎉"),
+        ] {
             let s = prompt_similarity(x, y);
             assert!((0.0..=1.0).contains(&s), "{:.2} for {:?}/{:?}", s, x, y);
         }
@@ -539,7 +571,10 @@ mod tests {
         let dot12: f32 = e1.iter().zip(&e2).map(|(a, b)| a * b).sum();
         let dot13: f32 = e1.iter().zip(&e3).map(|(a, b)| a * b).sum();
 
-        assert!(dot12 > dot13, "Similar code signatures must have higher similarity than unrelated topics");
+        assert!(
+            dot12 > dot13,
+            "Similar code signatures must have higher similarity than unrelated topics"
+        );
     }
 }
 
@@ -566,11 +601,31 @@ mod store_tests {
         // pair collided and whichever landed second answered for both models.
         let dir = tmp("models");
         let mut c = SemanticCache::new(dir.clone()).unwrap();
-        c.put_keyed("k|opus|list pods", "list pods", "OPUS SAYS", "opus", "application/json", false);
-        c.put_keyed("k|sonnet|list pods", "list pods", "SONNET SAYS", "sonnet", "application/json", false);
+        c.put_keyed(
+            "k|opus|list pods",
+            "list pods",
+            "OPUS SAYS",
+            "opus",
+            "application/json",
+            false,
+        );
+        c.put_keyed(
+            "k|sonnet|list pods",
+            "list pods",
+            "SONNET SAYS",
+            "sonnet",
+            "application/json",
+            false,
+        );
         assert_eq!(c.len(), 2);
-        assert_eq!(c.get_keyed("k|opus|list pods").unwrap().response, "OPUS SAYS");
-        assert_eq!(c.get_keyed("k|sonnet|list pods").unwrap().response, "SONNET SAYS");
+        assert_eq!(
+            c.get_keyed("k|opus|list pods").unwrap().response,
+            "OPUS SAYS"
+        );
+        assert_eq!(
+            c.get_keyed("k|sonnet|list pods").unwrap().response,
+            "SONNET SAYS"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -578,8 +633,18 @@ mod store_tests {
     fn an_exact_key_miss_is_a_miss_however_close_the_prompt() {
         let dir = tmp("miss");
         let mut c = SemanticCache::new(dir.clone()).unwrap();
-        c.put_keyed("key-a", "how do I list docker containers", "R", "m", "", false);
-        assert!(c.get_keyed("key-b").is_none(), "exact lookup must not fall back to similarity");
+        c.put_keyed(
+            "key-a",
+            "how do I list docker containers",
+            "R",
+            "m",
+            "",
+            false,
+        );
+        assert!(
+            c.get_keyed("key-b").is_none(),
+            "exact lookup must not fall back to similarity"
+        );
         // …while similarity search still reaches it by prompt text.
         let hits = c.find_similar("how do I list the docker containers", 3);
         assert_eq!(hits.len(), 1);
@@ -592,7 +657,14 @@ mod store_tests {
         let dir = tmp("framing");
         {
             let mut c = SemanticCache::new(dir.clone()).unwrap();
-            c.put_keyed("k", "p", "event: x\ndata: {}\n\n", "m", "text/event-stream", true);
+            c.put_keyed(
+                "k",
+                "p",
+                "event: x\ndata: {}\n\n",
+                "m",
+                "text/event-stream",
+                true,
+            );
         }
         // reopen: a replay decision made after a restart needs these fields persisted
         let c = SemanticCache::new(dir.clone()).unwrap();
@@ -615,7 +687,8 @@ mod store_tests {
             false,
         );
         assert!(
-            c.find_similar("show me all containers in docker", 5).is_empty(),
+            c.find_similar("show me all containers in docker", 5)
+                .is_empty(),
             "the original defect: any query returned its top-N neighbours"
         );
         let _ = std::fs::remove_dir_all(dir);

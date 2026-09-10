@@ -7,13 +7,38 @@ use super::common::*;
 use serde_json::Value;
 
 fn plural(n: usize, noun: &str) -> String {
-    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
 }
 
 fn is_border(t: &str) -> bool {
     !t.is_empty()
         && t.chars().all(|c| {
-            matches!(c, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '━' | '┏' | '┓' | '┗' | '┛' | '=' | '-' | '+' | ' ')
+            matches!(
+                c,
+                '─' | '│'
+                    | '┌'
+                    | '┐'
+                    | '└'
+                    | '┘'
+                    | '├'
+                    | '┤'
+                    | '┬'
+                    | '┴'
+                    | '┼'
+                    | '━'
+                    | '┏'
+                    | '┓'
+                    | '┗'
+                    | '┛'
+                    | '='
+                    | '-'
+                    | '+'
+                    | ' '
+            )
         })
 }
 
@@ -37,13 +62,21 @@ pub(crate) fn filter_semgrep(output: &str) -> String {
         for d in &docs {
             if let Some(results) = d.get("results").and_then(|r| r.as_array()) {
                 for r in results {
-                    let path = r.get("path").and_then(Value::as_str).unwrap_or("?").to_string();
+                    let path = r
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string();
                     let line = r
                         .get("start")
                         .and_then(|s| s.get("line"))
                         .and_then(Value::as_u64)
                         .unwrap_or(0) as usize;
-                    let rule = r.get("check_id").and_then(Value::as_str).unwrap_or("?").to_string();
+                    let rule = r
+                        .get("check_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string();
                     let extra = r.get("extra");
                     let sev = extra
                         .and_then(|e| e.get("severity"))
@@ -58,7 +91,11 @@ pub(crate) fn filter_semgrep(output: &str) -> String {
                     findings.push((path, line, sev, rule, squeeze_ws(&msg)));
                 }
             }
-            if let Some(paths) = d.get("paths").and_then(|p| p.get("scanned")).and_then(|s| s.as_array()) {
+            if let Some(paths) = d
+                .get("paths")
+                .and_then(|p| p.get("scanned"))
+                .and_then(|s| s.as_array())
+            {
                 scanned = paths.len();
             }
         }
@@ -90,7 +127,12 @@ pub(crate) fn filter_semgrep(output: &str) -> String {
             continue;
         }
         // `  12┆ code` excerpt
-        if t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && t.contains('┆') {
+        if t.chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+            && t.contains('┆')
+        {
             continue;
         }
         // a bare path line starts a new file section
@@ -99,8 +141,18 @@ pub(crate) fn filter_semgrep(output: &str) -> String {
             continue;
         }
         if !rule.is_empty() && !file.is_empty() {
-            let sev = if rule.contains("security") { "WARNING" } else { "INFO" };
-            findings.push((file.clone(), 0, sev.to_string(), rule.clone(), squeeze_ws(t)));
+            let sev = if rule.contains("security") {
+                "WARNING"
+            } else {
+                "INFO"
+            };
+            findings.push((
+                file.clone(),
+                0,
+                sev.to_string(),
+                rule.clone(),
+                squeeze_ws(t),
+            ));
             rule.clear();
         }
     }
@@ -156,7 +208,10 @@ fn render_semgrep(
     if dropped > 0 {
         out.push(more(dropped, "findings"));
     }
-    let sev_summary: Vec<String> = by_sev.iter().map(|(s, n)| format!("{} {}", n, s.to_ascii_lowercase())).collect();
+    let sev_summary: Vec<String> = by_sev
+        .iter()
+        .map(|(s, n)| format!("{} {}", n, s.to_ascii_lowercase()))
+        .collect();
     out.push(format!(
         "semgrep: {} ({}) in {}",
         plural(findings.len(), "finding"),
@@ -186,20 +241,40 @@ pub(crate) fn filter_trivy(output: &str) -> String {
         for d in &docs {
             if let Some(results) = d.get("Results").and_then(|r| r.as_array()) {
                 for r in results {
-                    let target = r.get("Target").and_then(Value::as_str).unwrap_or("?").to_string();
+                    let target = r
+                        .get("Target")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string();
                     if let Some(vulns) = r.get("Vulnerabilities").and_then(|v| v.as_array()) {
                         for v in vulns {
                             rows.push((
                                 target.clone(),
-                                v.get("Severity").and_then(Value::as_str).unwrap_or("UNKNOWN").to_string(),
-                                v.get("VulnerabilityID").and_then(Value::as_str).unwrap_or("?").to_string(),
-                                v.get("PkgName").and_then(Value::as_str).unwrap_or("?").to_string(),
+                                v.get("Severity")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("UNKNOWN")
+                                    .to_string(),
+                                v.get("VulnerabilityID")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?")
+                                    .to_string(),
+                                v.get("PkgName")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?")
+                                    .to_string(),
                                 format!(
                                     "{}→{}",
-                                    v.get("InstalledVersion").and_then(Value::as_str).unwrap_or("?"),
-                                    v.get("FixedVersion").and_then(Value::as_str).unwrap_or("none")
+                                    v.get("InstalledVersion")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("?"),
+                                    v.get("FixedVersion")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("none")
                                 ),
-                                v.get("Title").and_then(Value::as_str).unwrap_or("").to_string(),
+                                v.get("Title")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
                             ));
                         }
                     }
@@ -227,7 +302,11 @@ pub(crate) fn filter_trivy(output: &str) -> String {
             continue;
         }
         if let Some(rest) = tt.strip_prefix("Total: ") {
-            totals.push(format!("{}: Total {}", if target.is_empty() { "scan" } else { &target }, rest));
+            totals.push(format!(
+                "{}: Total {}",
+                if target.is_empty() { "scan" } else { &target },
+                rest
+            ));
             continue;
         }
         if !tt.starts_with('│') && !tt.starts_with('|') {
@@ -252,14 +331,10 @@ pub(crate) fn filter_trivy(output: &str) -> String {
                 sev,
                 cells.get(1).cloned().unwrap_or_default(),
                 cells.first().cloned().unwrap_or_default(),
-                format!(
-                    "{}→{}",
-                    cells.get(4).cloned().unwrap_or_default(),
-                    {
-                        let f = cells.get(5).cloned().unwrap_or_default();
-                        if f.is_empty() { "none".to_string() } else { f }
-                    }
-                ),
+                format!("{}→{}", cells.get(4).cloned().unwrap_or_default(), {
+                    let f = cells.get(5).cloned().unwrap_or_default();
+                    if f.is_empty() { "none".to_string() } else { f }
+                }),
                 cells.last().cloned().unwrap_or_default(),
             )),
             None => {
@@ -305,7 +380,11 @@ fn render_trivy(
     }
     let shown = total.min(l.max_diagnostics);
     for (target, sev, id, pkg, ver, title) in &rows[..shown] {
-        let head = if multi_target && !target.is_empty() { format!("{} ", target) } else { String::new() };
+        let head = if multi_target && !target.is_empty() {
+            format!("{} ", target)
+        } else {
+            String::new()
+        };
         out.push(format!(
             "  {}{}  {}  {} {}: {}",
             head,
@@ -333,11 +412,23 @@ pub(crate) fn filter_hadolint(output: &str) -> String {
             let arr = d.as_array().cloned().unwrap_or_default();
             for it in arr {
                 rows.push((
-                    it.get("file").and_then(Value::as_str).unwrap_or("Dockerfile").to_string(),
+                    it.get("file")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Dockerfile")
+                        .to_string(),
                     it.get("line").and_then(Value::as_u64).unwrap_or(0) as usize,
-                    it.get("code").and_then(Value::as_str).unwrap_or("?").to_string(),
-                    it.get("level").and_then(Value::as_str).unwrap_or("info").to_string(),
-                    it.get("message").and_then(Value::as_str).unwrap_or("").to_string(),
+                    it.get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                    it.get("level")
+                        .and_then(Value::as_str)
+                        .unwrap_or("info")
+                        .to_string(),
+                    it.get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                 ));
             }
         }
@@ -359,7 +450,11 @@ pub(crate) fn filter_hadolint(output: &str) -> String {
         let code = words.next().unwrap_or("");
         match (line_no, code.starts_with("DL") || code.starts_with("SC")) {
             (Some(n), true) => {
-                let level = words.next().unwrap_or("info").trim_end_matches(':').to_string();
+                let level = words
+                    .next()
+                    .unwrap_or("info")
+                    .trim_end_matches(':')
+                    .to_string();
                 let msg: Vec<&str> = words.collect();
                 rows.push((file.to_string(), n, code.to_string(), level, msg.join(" ")));
             }
@@ -389,8 +484,19 @@ fn render_hadolint(rows: Vec<(String, usize, String, String, String)>, l: &Limit
     let mut out: Vec<String> = Vec::new();
     let shown = rows.len().min(l.max_diagnostics);
     for (file, line, code, level, msg) in &rows[..shown] {
-        let head = if multi_file { format!("{}:", file) } else { String::new() };
-        out.push(format!("  {}{}  {}  {}  {}", head, line, code, level, truncate(&squeeze_ws(msg), 200)));
+        let head = if multi_file {
+            format!("{}:", file)
+        } else {
+            String::new()
+        };
+        out.push(format!(
+            "  {}{}  {}  {}  {}",
+            head,
+            line,
+            code,
+            level,
+            truncate(&squeeze_ws(msg), 200)
+        ));
     }
     if rows.len() > shown {
         out.push(more(rows.len() - shown, "issues"));
@@ -398,7 +504,11 @@ fn render_hadolint(rows: Vec<(String, usize, String, String, String)>, l: &Limit
     let code_summary: Vec<String> = codes.iter().map(|(c, n)| format!("{} ×{}", c, n)).collect();
     out.insert(
         0,
-        format!("hadolint: {} ({})", plural(rows.len(), "issue"), code_summary.join(", ")),
+        format!(
+            "hadolint: {} ({})",
+            plural(rows.len(), "issue"),
+            code_summary.join(", ")
+        ),
     );
     out.join("\n")
 }
@@ -430,7 +540,11 @@ mod tests {
 Ran 812 rules on 24 files: 2 findings.";
         let out = filter_semgrep(raw);
         assert!(out.contains("app/main.py"), "{}", out);
-        assert!(out.contains("python.lang.security.audit.eval-detected"), "{}", out);
+        assert!(
+            out.contains("python.lang.security.audit.eval-detected"),
+            "{}",
+            out
+        );
         assert!(out.contains("Detected the use of eval()"), "{}", out);
         assert!(out.contains("app/db.py"), "{}", out);
         assert!(out.contains("python.sqlalchemy.security.sqli"), "{}", out);
@@ -444,8 +558,16 @@ Ran 812 rules on 24 files: 2 findings.";
     fn semgrep_json_and_clean_scan() {
         let json = "{\"results\":[{\"path\":\"a.py\",\"start\":{\"line\":12},\"check_id\":\"rule.x\",\"extra\":{\"severity\":\"ERROR\",\"message\":\"bad thing\"}}],\"paths\":{\"scanned\":[\"a.py\",\"b.py\"]}}";
         let out = filter_semgrep(json);
-        assert!(out.contains("a.py\n  12  ERROR  rule.x: bad thing"), "{}", out);
-        assert!(out.contains("semgrep: 1 finding (1 error) in 1 file"), "{}", out);
+        assert!(
+            out.contains("a.py\n  12  ERROR  rule.x: bad thing"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("semgrep: 1 finding (1 error) in 1 file"),
+            "{}",
+            out
+        );
         let clean = filter_semgrep("{\"results\":[],\"paths\":{\"scanned\":[\"a.py\"]}}");
         assert_eq!(clean, "semgrep: 0 findings (1 files scanned)");
     }
@@ -479,11 +601,23 @@ Total: 3 (LOW: 1, MEDIUM: 0, HIGH: 1, CRITICAL: 1)
 │ zlib     │ CVE-2026-3333  │ LOW      │ fixed  │ 1.2.11            │ 1.2.13        │ minor issue         │
 └──────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴─────────────────────┘";
         let out = filter_trivy(raw);
-        assert!(out.starts_with("trivy: 3 vulns (1 crit, 1 high, 0 med, 1 low)"), "{}", out);
+        assert!(
+            out.starts_with("trivy: 3 vulns (1 crit, 1 high, 0 med, 1 low)"),
+            "{}",
+            out
+        );
         let crit = out.lines().nth(2).unwrap(); // line 1 is the scan target
-        assert!(crit.contains("CRITICAL") && crit.contains("CVE-2026-1111"), "{}", out);
+        assert!(
+            crit.contains("CRITICAL") && crit.contains("CVE-2026-1111"),
+            "{}",
+            out
+        );
         assert!(crit.contains("stdlib 1.21.0→1.21.5"), "{}", out);
-        assert!(crit.contains("handshake handling"), "wrapped cell lost: {}", out);
+        assert!(
+            crit.contains("handshake handling"),
+            "wrapped cell lost: {}",
+            out
+        );
         // every CVE survives
         for cve in ["CVE-2026-1111", "CVE-2026-2222", "CVE-2026-3333"] {
             assert!(out.contains(cve), "missing {}\n{}", cve, out);
@@ -506,15 +640,25 @@ Total: 3 (LOW: 1, MEDIUM: 0, HIGH: 1, CRITICAL: 1)
         let out = filter_hadolint(
             "Dockerfile:3 DL3008 warning: Pin versions in apt get install\nDockerfile:9 DL3008 warning: Pin versions in apt get install\nDockerfile:12 SC2086 info: Double quote to prevent globbing",
         );
-        assert!(out.starts_with("hadolint: 3 issues (DL3008 ×2, SC2086 ×1)"), "{}", out);
-        assert!(out.contains("  3  DL3008  warning  Pin versions"), "{}", out);
+        assert!(
+            out.starts_with("hadolint: 3 issues (DL3008 ×2, SC2086 ×1)"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("  3  DL3008  warning  Pin versions"),
+            "{}",
+            out
+        );
         assert!(out.contains("  12  SC2086  info  Double quote"), "{}", out);
         assert_eq!(filter_hadolint(""), "hadolint: ok");
     }
 
     #[test]
     fn hadolint_json_and_multifile() {
-        let out = filter_hadolint("[{\"file\":\"a/Dockerfile\",\"line\":3,\"code\":\"DL3008\",\"level\":\"warning\",\"message\":\"Pin versions\"},{\"file\":\"b/Dockerfile\",\"line\":1,\"code\":\"DL3006\",\"level\":\"warning\",\"message\":\"Tag the version\"}]");
+        let out = filter_hadolint(
+            "[{\"file\":\"a/Dockerfile\",\"line\":3,\"code\":\"DL3008\",\"level\":\"warning\",\"message\":\"Pin versions\"},{\"file\":\"b/Dockerfile\",\"line\":1,\"code\":\"DL3006\",\"level\":\"warning\",\"message\":\"Tag the version\"}]",
+        );
         assert!(out.contains("a/Dockerfile:3"), "{}", out);
         assert!(out.contains("b/Dockerfile:1"), "{}", out);
     }

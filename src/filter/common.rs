@@ -50,11 +50,17 @@ pub fn cap_lines<'a, I: IntoIterator<Item = &'a str>>(lines: I, max: usize, what
     let mut out: Vec<&str> = Vec::new();
     let mut dropped = 0usize;
     for l in lines {
-        if out.len() < max { out.push(l) } else { dropped += 1 }
+        if out.len() < max {
+            out.push(l)
+        } else {
+            dropped += 1
+        }
     }
     let mut s = out.join("\n");
     if dropped > 0 {
-        if !s.is_empty() { s.push('\n') }
+        if !s.is_empty() {
+            s.push('\n')
+        }
         s.push_str(&more(dropped, what));
     }
     s
@@ -102,7 +108,9 @@ pub fn strip_ansi(s: &str) -> String {
                 chars.next();
                 // CSI: parameters/intermediates 0x20..=0x3F, final byte 0x40..=0x7E
                 for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) { break }
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
                 }
             }
             Some(']') => {
@@ -110,11 +118,15 @@ pub fn strip_ansi(s: &str) -> String {
                 // OSC: terminated by BEL or ESC \
                 let mut prev_esc = false;
                 for c in chars.by_ref() {
-                    if c == '\x07' || (prev_esc && c == '\\') { break }
+                    if c == '\x07' || (prev_esc && c == '\\') {
+                        break;
+                    }
                     prev_esc = c == '\x1b';
                 }
             }
-            Some(_) => { chars.next(); }
+            Some(_) => {
+                chars.next();
+            }
             None => {}
         }
     }
@@ -139,11 +151,15 @@ pub fn collapse_blank(s: &str) -> String {
     let mut last_blank = true; // drops leading blanks too
     for l in s.lines() {
         let blank = l.trim().is_empty();
-        if blank && last_blank { continue }
+        if blank && last_blank {
+            continue;
+        }
         out.push(if blank { "" } else { l });
         last_blank = blank;
     }
-    while matches!(out.last(), Some(l) if l.is_empty()) { out.pop(); }
+    while matches!(out.last(), Some(l) if l.is_empty()) {
+        out.pop();
+    }
     out.join("\n")
 }
 
@@ -157,7 +173,13 @@ pub fn dedupe_consecutive(lines: impl IntoIterator<Item = String>) -> Vec<String
         }
     }
     out.into_iter()
-        .map(|(l, n)| if n > 1 { format!("{}  (×{})", l, n) } else { l })
+        .map(|(l, n)| {
+            if n > 1 {
+                format!("{}  (×{})", l, n)
+            } else {
+                l
+            }
+        })
         .collect()
 }
 
@@ -171,9 +193,17 @@ pub fn squeeze_ws(s: &str) -> String {
 /// True when a line looks like a diagnostic worth keeping.
 pub fn is_alert_line(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    ["error", "err!", "fatal", "panic", "warn", "exception", "traceback"]
-        .iter()
-        .any(|k| l.contains(k))
+    [
+        "error",
+        "err!",
+        "fatal",
+        "panic",
+        "warn",
+        "exception",
+        "traceback",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
 /// Group `"<object> <verb>"` lines by their trailing verb.
@@ -228,9 +258,22 @@ pub fn flatten_tree(line: &str) -> String {
                 break;
             }
         }
-        if !advanced { break }
+        if !advanced {
+            break;
+        }
     }
-    for p in ["├─┬ ", "└─┬ ", "├── ", "└── ", "├─ ", "└─ ", "|-- ", "`-- ", "+-- ", "\\-- "] {
+    for p in [
+        "├─┬ ",
+        "└─┬ ",
+        "├── ",
+        "└── ",
+        "├─ ",
+        "└─ ",
+        "|-- ",
+        "`-- ",
+        "+-- ",
+        "\\-- ",
+    ] {
         if let Some(r) = rest.strip_prefix(p) {
             depth += 1;
             rest = r;
@@ -264,7 +307,9 @@ pub fn human_size(bytes: u64) -> String {
 /// Parse a size like `4.6GB`, `137MB`, `10.7K`, `958` into bytes.
 pub fn parse_size(s: &str) -> Option<u64> {
     let s = s.trim();
-    let num_end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let num_end = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
     let num: f64 = s[..num_end].parse().ok()?;
     let unit = s[num_end..].trim().to_ascii_uppercase();
     let mult = match unit.as_str() {
@@ -285,8 +330,18 @@ pub fn find_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i];
-        if matches!(arg, "-C" | "-c" | "--git-dir" | "--work-tree" | "--manifest-path" | "-n" | "--namespace" | "--context" | "--profile" | "--region")
-            && i + 1 < args.len()
+        if matches!(
+            arg,
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--manifest-path"
+                | "-n"
+                | "--namespace"
+                | "--context"
+                | "--profile"
+                | "--region"
+        ) && i + 1 < args.len()
         {
             i += 2;
             continue;
@@ -304,10 +359,14 @@ pub fn find_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
 pub fn has_flag(args: &[&str], short: Option<char>, long: Option<&str>) -> bool {
     args.iter().any(|a| {
         if let Some(l) = long {
-            if *a == l || a.starts_with(&format!("{}=", l)) { return true }
+            if *a == l || a.starts_with(&format!("{}=", l)) {
+                return true;
+            }
         }
         if let Some(c) = short {
-            if a.starts_with('-') && !a.starts_with("--") && a[1..].contains(c) { return true }
+            if a.starts_with('-') && !a.starts_with("--") && a[1..].contains(c) {
+                return true;
+            }
         }
         false
     })
@@ -331,13 +390,15 @@ pub fn flag_value<'a>(args: &[&'a str], long: &str) -> Option<&'a str> {
 /// Parse a JSON document, or a stream of whitespace/newline separated documents.
 pub fn parse_json(s: &str) -> Option<Vec<Value>> {
     let t = s.trim();
-    if t.is_empty() { return None }
+    if t.is_empty() {
+        return None;
+    }
     if let Ok(v) = serde_json::from_str::<Value>(t) {
         return Some(vec![v]);
     }
     let mut out = Vec::new();
-    let mut de = serde_json::Deserializer::from_str(t).into_iter::<Value>();
-    while let Some(v) = de.next() {
+    let de = serde_json::Deserializer::from_str(t).into_iter::<Value>();
+    for v in de {
         out.push(v.ok()?);
     }
     if out.is_empty() { None } else { Some(out) }
@@ -357,15 +418,24 @@ pub fn compact_json(v: &Value) -> String {
 /// Filter helper: render a JSON output (or JSON stream); fall back to `fallback` when not JSON.
 pub fn compact_json_output(output: &str, fallback: impl Fn(&str) -> String) -> String {
     match parse_json(output) {
-        Some(docs) => docs.iter().map(compact_json).collect::<Vec<_>>().join("\n---\n"),
+        Some(docs) => docs
+            .iter()
+            .map(compact_json)
+            .collect::<Vec<_>>()
+            .join("\n---\n"),
         None => fallback(output),
     }
 }
 
 fn key_str(k: &str) -> String {
     let plain = !k.is_empty()
-        && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '@' | ':'));
-    if plain { k.to_string() } else { serde_json::to_string(k).unwrap_or_default() }
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '@' | ':'));
+    if plain {
+        k.to_string()
+    } else {
+        serde_json::to_string(k).unwrap_or_default()
+    }
 }
 
 pub fn scalar_str(v: &Value) -> String {
@@ -383,7 +453,11 @@ pub fn scalar_str(v: &Value) -> String {
                 || s.starts_with('[')
                 || s.starts_with('{')
                 || s.contains(" | ");
-            if needs_quote { serde_json::to_string(s).unwrap_or_default() } else { s.clone() }
+            if needs_quote {
+                serde_json::to_string(s).unwrap_or_default()
+            } else {
+                s.clone()
+            }
         }
         Value::Array(a) if a.is_empty() => "[]".into(),
         Value::Object(o) if o.is_empty() => "{}".into(),
@@ -392,20 +466,29 @@ pub fn scalar_str(v: &Value) -> String {
 }
 
 fn is_scalar(v: &Value) -> bool {
-    !matches!(v, Value::Array(a) if !a.is_empty()) && !matches!(v, Value::Object(o) if !o.is_empty())
+    !matches!(v, Value::Array(a) if !a.is_empty())
+        && !matches!(v, Value::Object(o) if !o.is_empty())
 }
 
 fn uniform_keys(arr: &[Value]) -> Option<Vec<String>> {
-    if arr.len() < 2 { return None }
+    if arr.len() < 2 {
+        return None;
+    }
     let first = arr.first()?.as_object()?;
-    if first.is_empty() || first.len() > 12 { return None }
+    if first.is_empty() || first.len() > 12 {
+        return None;
+    }
     let keys: Vec<String> = first.keys().cloned().collect();
     for v in arr {
         let o = v.as_object()?;
-        if o.len() != keys.len() { return None }
+        if o.len() != keys.len() {
+            return None;
+        }
         for k in &keys {
             let val = o.get(k)?;
-            if !is_scalar(val) { return None }
+            if !is_scalar(val) {
+                return None;
+            }
         }
     }
     Some(keys)
@@ -430,21 +513,43 @@ fn render_value(v: &Value, depth: usize, key: Option<&str>, out: &mut Vec<String
                 let items: Vec<String> = a[..shown].iter().map(scalar_str).collect();
                 let inline = items.join(", ");
                 if inline.len() <= 120 {
-                    let extra = if a.len() > shown { format!(", {}", more(a.len() - shown, "items")) } else { String::new() };
+                    let extra = if a.len() > shown {
+                        format!(", {}", more(a.len() - shown, "items"))
+                    } else {
+                        String::new()
+                    };
                     out.push(format!("{}{}[{}{}]", pad, prefix(key), inline, extra));
                 } else {
                     out.push(format!("{}{}[{}]", pad, prefix(key), a.len()));
-                    for it in items { out.push(format!("{} - {}", pad, it)); }
-                    if a.len() > shown { out.push(format!("{} {}", pad, more(a.len() - shown, "items"))); }
+                    for it in items {
+                        out.push(format!("{} - {}", pad, it));
+                    }
+                    if a.len() > shown {
+                        out.push(format!("{} {}", pad, more(a.len() - shown, "items")));
+                    }
                 }
             } else if let Some(keys) = uniform_keys(a) {
-                out.push(format!("{}{}[{}] {}", pad, prefix(key), a.len(), keys.iter().map(|k| key_str(k)).collect::<Vec<_>>().join("|")));
+                out.push(format!(
+                    "{}{}[{}] {}",
+                    pad,
+                    prefix(key),
+                    a.len(),
+                    keys.iter()
+                        .map(|k| key_str(k))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ));
                 for it in &a[..shown] {
                     let o = it.as_object().unwrap();
-                    let row: Vec<String> = keys.iter().map(|k| scalar_str(&o[k]).replace('|', "\\|")).collect();
+                    let row: Vec<String> = keys
+                        .iter()
+                        .map(|k| scalar_str(&o[k]).replace('|', "\\|"))
+                        .collect();
                     out.push(format!("{} {}", pad, row.join("|")));
                 }
-                if a.len() > shown { out.push(format!("{} {}", pad, more(a.len() - shown, "rows"))); }
+                if a.len() > shown {
+                    out.push(format!("{} {}", pad, more(a.len() - shown, "rows")));
+                }
             } else {
                 out.push(format!("{}{}[{}]", pad, prefix(key), a.len()));
                 for it in &a[..shown] {
@@ -456,7 +561,9 @@ fn render_value(v: &Value, depth: usize, key: Option<&str>, out: &mut Vec<String
                         *first = format!("{} - {}", pad, trimmed);
                     }
                 }
-                if a.len() > shown { out.push(format!("{} {}", pad, more(a.len() - shown, "items"))); }
+                if a.len() > shown {
+                    out.push(format!("{} {}", pad, more(a.len() - shown, "items")));
+                }
             }
         }
         scalar => out.push(format!("{}{}{}", pad, prefix(key), scalar_str(scalar))),
@@ -513,7 +620,10 @@ mod tests {
     fn sizes() {
         assert_eq!(human_size(958), "958B");
         assert_eq!(human_size(10957), "10.7K");
-        assert_eq!(parse_size("4.6GB"), Some((4.6 * 1024.0 * 1024.0 * 1024.0) as u64));
+        assert_eq!(
+            parse_size("4.6GB"),
+            Some((4.6 * 1024.0 * 1024.0 * 1024.0) as u64)
+        );
         assert_eq!(parse_size("137MB"), Some(137 * 1024 * 1024));
     }
 
@@ -555,9 +665,15 @@ mod tests {
 
     #[test]
     fn find_subcommand_skips_option_values() {
-        assert_eq!(find_subcommand(&["-C", "/tmp", "status", "-s"]), Some("status"));
+        assert_eq!(
+            find_subcommand(&["-C", "/tmp", "status", "-s"]),
+            Some("status")
+        );
         assert_eq!(find_subcommand(&["--no-pager", "log"]), Some("log"));
-        assert_eq!(find_subcommand(&["-n", "kube-system", "get", "pods"]), Some("get"));
+        assert_eq!(
+            find_subcommand(&["-n", "kube-system", "get", "pods"]),
+            Some("get")
+        );
     }
 
     #[test]

@@ -33,7 +33,11 @@ impl TurboVecIndex {
 
     /// Add a TURBO_DIM-dimensional embedding. Skips if id already present.
     pub fn add(&mut self, id: &str, embedding: &[f32]) {
-        assert_eq!(embedding.len(), TURBO_DIM, "embedding must be {TURBO_DIM}-dim");
+        assert_eq!(
+            embedding.len(),
+            TURBO_DIM,
+            "embedding must be {TURBO_DIM}-dim"
+        );
         if self.id_to_u64.contains_key(id) {
             return;
         }

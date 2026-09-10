@@ -9,7 +9,7 @@ use super::common::*;
 // ─── diagnostics (build / check / clippy / doc / test-compile) ────────────────
 
 struct Diag {
-    kind: String,    // "error[E0382]" | "warning" | "error"
+    kind: String, // "error[E0382]" | "warning" | "error"
     msg: String,
     loc: Option<String>,
     help: Vec<String>,
@@ -17,10 +17,14 @@ struct Diag {
 
 fn is_gutter(t: &str) -> bool {
     // `  |`, `3 | code`, `  = note: ...`, `...`
-    t == "|" || t == "..." || t.starts_with("| ") || t == "|"
+    t == "|"
+        || t == "..."
+        || t.starts_with("| ")
         || t.starts_with("= note")
         || t.starts_with("= help")
-        || t.split_once(" | ").map(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == ' ')).unwrap_or(false)
+        || t.split_once(" | ")
+            .map(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == ' '))
+            .unwrap_or(false)
 }
 
 /// Parse rustc/clippy diagnostics into structured records plus the leftover lines
@@ -175,7 +179,11 @@ fn finished_time(rest: &[String]) -> Option<String> {
 
 fn count_progress(rest: &[String]) -> usize {
     rest.iter()
-        .filter(|l| l.starts_with("Compiling ") || l.starts_with("Checking ") || l.starts_with("Documenting "))
+        .filter(|l| {
+            l.starts_with("Compiling ")
+                || l.starts_with("Checking ")
+                || l.starts_with("Documenting ")
+        })
         .count()
 }
 
@@ -217,9 +225,13 @@ fn build_like(sub: &str, output: &str) -> String {
             .collect();
         if !extra.is_empty() {
             out.extend(
-                cap_lines(extra.iter().map(|s| s.as_str()), limits().max_diagnostics, "lines")
-                    .lines()
-                    .map(String::from),
+                cap_lines(
+                    extra.iter().map(|s| s.as_str()),
+                    limits().max_diagnostics,
+                    "lines",
+                )
+                .lines()
+                .map(String::from),
             );
         }
         return out.join("\n");
@@ -280,7 +292,13 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
     if output.contains("error[E") || output.contains("error: could not compile") {
         return build_like("test", output);
     }
-    let mut totals = TestTotals { passed: 0, failed: 0, ignored: 0, suites: 0, secs: 0.0 };
+    let mut totals = TestTotals {
+        passed: 0,
+        failed: 0,
+        ignored: 0,
+        suites: 0,
+        secs: 0.0,
+    };
     let mut failed_names: Vec<String> = Vec::new();
     let mut failure_details: Vec<String> = Vec::new();
     let mut listing: Vec<String> = Vec::new();
@@ -320,10 +338,17 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
                 failure_details.push(format!("FAIL {}\n  {}", test, at.1.trim_end_matches(':')));
                 continue;
             }
-            if t.starts_with("note:") || t.starts_with("stack backtrace") || t.starts_with("thread '") {
+            if t.starts_with("note:")
+                || t.starts_with("stack backtrace")
+                || t.starts_with("thread '")
+            {
                 continue;
             }
-            if failure_details.last().map(|d| d.starts_with(&format!("FAIL {}", test))).unwrap_or(false) {
+            if failure_details
+                .last()
+                .map(|d| d.starts_with(&format!("FAIL {}", test)))
+                .unwrap_or(false)
+            {
                 let last = failure_details.last_mut().unwrap();
                 if last.lines().count() < 4 {
                     last.push_str(&format!("\n  {}", truncate(t, 200)));
@@ -354,7 +379,11 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
                 dropped += tests.len();
                 continue;
             }
-            out.push(format!("{}: {}", if m.is_empty() { "(root)" } else { m }, tests.join(", ")));
+            out.push(format!(
+                "{}: {}",
+                if m.is_empty() { "(root)" } else { m },
+                tests.join(", ")
+            ));
         }
         if dropped > 0 {
             out.push(more(dropped, "tests"));
@@ -426,9 +455,13 @@ pub(crate) fn filter_nextest(output: &str) -> String {
         summary.unwrap_or_else(|| format!("nextest: {} passed, {} failed", passed, failures.len())),
     );
     out.extend(
-        cap_lines(failures.iter().map(|s| s.as_str()), l.max_diagnostics, "lines")
-            .lines()
-            .map(String::from),
+        cap_lines(
+            failures.iter().map(|s| s.as_str()),
+            l.max_diagnostics,
+            "lines",
+        )
+        .lines()
+        .map(String::from),
     );
     out.join("\n")
 }
@@ -459,7 +492,13 @@ fn cargo_fmt(output: &str) -> String {
             };
             match files.iter_mut().find(|f| f.path == short) {
                 Some(f) => f.hunks += 1,
-                None => files.push(F { path: short, hunks: 1, add: 0, del: 0, first: Vec::new() }),
+                None => files.push(F {
+                    path: short,
+                    hunks: 1,
+                    add: 0,
+                    del: 0,
+                    first: Vec::new(),
+                }),
             }
             continue;
         }
@@ -511,7 +550,10 @@ fn cargo_fmt(output: &str) -> String {
     if dropped > 0 {
         out.push(more(dropped, "files"));
     }
-    out.push(format!("cargo fmt: {} need formatting", plural(files.len(), "file")));
+    out.push(format!(
+        "cargo fmt: {} need formatting",
+        plural(files.len(), "file")
+    ));
     out.join("\n")
 }
 
@@ -627,7 +669,7 @@ pub(crate) fn filter_clippy(output: &str) -> String {
 
 pub(crate) fn filter_cargo(args: &[&str], output: &str) -> String {
     match find_subcommand(args) {
-        Some("test") if args.iter().any(|a| *a == "--list") => filter_cargo_test(output),
+        Some("test") if args.contains(&"--list") => filter_cargo_test(output),
         Some("test") => filter_cargo_test(output),
         Some("nextest") => filter_nextest(output),
         Some("build") | Some("b") | Some("watch") => filter_cargo_build(output),
@@ -638,8 +680,15 @@ pub(crate) fn filter_cargo(args: &[&str], output: &str) -> String {
         Some("tree") => cargo_tree(output),
         Some("metadata") | Some("read-manifest") => compact_json_output(output, generic),
         Some("fmt") => cargo_fmt(output),
-        Some("add") | Some("remove") | Some("rm") | Some("update") | Some("install")
-        | Some("uninstall") | Some("vendor") | Some("fetch") | Some("generate-lockfile") => {
+        Some("add")
+        | Some("remove")
+        | Some("rm")
+        | Some("update")
+        | Some("install")
+        | Some("uninstall")
+        | Some("vendor")
+        | Some("fetch")
+        | Some("generate-lockfile") => {
             cargo_pkg_op(find_subcommand(args).unwrap_or("cargo"), output)
         }
         Some("run") | Some("r") => {
@@ -654,7 +703,7 @@ pub(crate) fn filter_cargo(args: &[&str], output: &str) -> String {
                         || t.starts_with("Blocking"))
                 })
                 .collect();
-            cap_lines(body.into_iter(), limits().passthrough_max_lines, "lines")
+            cap_lines(body, limits().passthrough_max_lines, "lines")
         }
         None => cargo_list(output),
         _ => generic(output),
@@ -673,7 +722,10 @@ mod tests {
         );
         assert_eq!(out, "cargo check: ok (1 crates, 0.75s)");
         assert_eq!(
-            filter_cargo(&["check"], "    Finished `dev` profile target(s) in 0.43s\n"),
+            filter_cargo(
+                &["check"],
+                "    Finished `dev` profile target(s) in 0.43s\n"
+            ),
             "cargo check: ok (0.43s)"
         );
     }
@@ -718,7 +770,11 @@ error: could not compile `prism` (lib) due to 1 previous error; 2 warnings emitt
             "{}",
             out
         );
-        assert!(out.contains("  help: consider cloning the value"), "{}", out);
+        assert!(
+            out.contains("  help: consider cloning the value"),
+            "{}",
+            out
+        );
         // the two identical warnings fold into one line naming both sites
         assert!(
             out.contains("warning: unused import: `super::common::*` ×2: cloud.rs:3:5, db.rs:3:5"),
@@ -742,7 +798,11 @@ error: could not compile `prism` (lib) due to 1 previous error; 2 warnings emitt
         }
         let out = filter_cargo(&["check"], &fixture);
         assert!(has_truncation(&out), "{}", out);
-        assert!(out.contains("cargo check: 0 errors, 60 warnings"), "{}", out);
+        assert!(
+            out.contains("cargo check: 0 errors, 60 warnings"),
+            "{}",
+            out
+        );
     }
 
     const TEST_OK: &str = "\
@@ -788,10 +848,22 @@ test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 49 filtered out
     #[test]
     fn test_failure_keeps_name_location_and_assertion() {
         let out = filter_cargo(&["test"], TEST_FAIL);
-        assert!(out.starts_with("cargo test: 11 passed, 1 failed (1 suite, 0.01s)"), "{}", out);
-        assert!(out.contains("FAIL filter::common::tests::compact_json_shapes"), "{}", out);
+        assert!(
+            out.starts_with("cargo test: 11 passed, 1 failed (1 suite, 0.01s)"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("FAIL filter::common::tests::compact_json_shapes"),
+            "{}",
+            out
+        );
         assert!(out.contains("src/filter/common.rs:485:9"), "{}", out);
-        assert!(out.contains("assertion failed: s.contains(\"deps\")"), "{}", out);
+        assert!(
+            out.contains("assertion failed: s.contains(\"deps\")"),
+            "{}",
+            out
+        );
         assert!(!out.contains("RUST_BACKTRACE"), "{}", out);
     }
 
@@ -807,13 +879,21 @@ filter::files::tests::grep_empty_and_single_line: test";
         let out = filter_cargo(&["test", "--offline", "--", "--list"], listing);
         assert!(out.starts_with("4 tests, 3 modules"), "{}", out);
         assert!(out.contains("cache::tests: test_pseudo_embedding_dimension_and_norm, test_pseudo_embedding_similarity"), "{}", out);
-        assert!(out.contains("filter::files::tests: grep_empty_and_single_line"), "{}", out);
+        assert!(
+            out.contains("filter::files::tests: grep_empty_and_single_line"),
+            "{}",
+            out
+        );
     }
 
     #[test]
     fn test_compile_error_routes_to_diagnostics() {
         let out = filter_cargo(&["test"], ERR);
-        assert!(out.contains("error[E0382] src/filter/js.rs:1538:20"), "{}", out);
+        assert!(
+            out.contains("error[E0382] src/filter/js.rs:1538:20"),
+            "{}",
+            out
+        );
         assert!(out.contains("cargo test: 1 error"), "{}", out);
     }
 
@@ -834,10 +914,18 @@ Diff in /home/u/prism/src/cli.rs:9:
 +fn a() {}";
         let out = filter_cargo(&["fmt", "--check"], fmt);
         assert!(out.contains("src/main.rs: 2 hunks, +2 -2"), "{}", out);
-        assert!(out.contains("-use std::{env, path::PathBuf, fs};"), "{}", out);
+        assert!(
+            out.contains("-use std::{env, path::PathBuf, fs};"),
+            "{}",
+            out
+        );
         assert!(out.contains("[+1 more hunks]"), "{}", out);
         assert!(out.contains("src/cli.rs: 1 hunk, +1 -1"), "{}", out);
-        assert!(out.ends_with("cargo fmt: 2 files need formatting"), "{}", out);
+        assert!(
+            out.ends_with("cargo fmt: 2 files need formatting"),
+            "{}",
+            out
+        );
         assert_eq!(filter_cargo(&["fmt", "--check"], ""), "cargo fmt: ok");
     }
 
@@ -861,7 +949,10 @@ Diff in /home/u/prism/src/cli.rs:9:
 
     #[test]
     fn metadata_and_unknown_and_empty() {
-        let meta = filter_cargo(&["metadata", "--format-version", "1"], "{\"packages\":[{\"name\":\"prism\",\"version\":\"0.1.0\"}],\"workspace_root\":\"/x\"}");
+        let meta = filter_cargo(
+            &["metadata", "--format-version", "1"],
+            "{\"packages\":[{\"name\":\"prism\",\"version\":\"0.1.0\"}],\"workspace_root\":\"/x\"}",
+        );
         assert!(meta.contains("name: prism"), "{}", meta);
         assert!(meta.contains("workspace_root: /x"), "{}", meta);
         assert_eq!(filter_cargo(&["check"], ""), "cargo check: ok");
@@ -875,7 +966,11 @@ Diff in /home/u/prism/src/cli.rs:9:
         let out = filter_nextest(
             "    Starting 3 tests across 1 binary\n        PASS [   0.003s] prism cache::tests::a\n        FAIL [   0.004s] prism filter::b\n  thread panicked at src/x.rs:1:1\n  Summary [   0.010s] 3 tests run: 2 passed, 1 failed",
         );
-        assert!(out.starts_with("Summary [ 0.010s] 3 tests run: 2 passed, 1 failed"), "{}", out);
+        assert!(
+            out.starts_with("Summary [ 0.010s] 3 tests run: 2 passed, 1 failed"),
+            "{}",
+            out
+        );
         assert!(out.contains("FAIL [ 0.004s] prism filter::b"), "{}", out);
         assert!(out.contains("panicked at src/x.rs:1:1"), "{}", out);
     }

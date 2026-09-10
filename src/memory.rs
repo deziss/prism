@@ -1,10 +1,10 @@
 // PRISM memory.rs — 3-layer Memory Palace (Recall → Core → Archive)
 // Persistence layer: JSONL for each memory level
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use chrono::Utc;
 
 use crate::cache::SemanticCache;
 
@@ -42,7 +42,11 @@ pub struct MemoryBlock {
 impl MemoryBlock {
     pub fn new(layer: MemoryLayer, content: &str, category: &str) -> Self {
         let now = Utc::now().to_rfc3339();
-        let trimmed = if content.len() > 10_000 { &content[..10_000] } else { content };
+        let trimmed = if content.len() > 10_000 {
+            &content[..10_000]
+        } else {
+            content
+        };
         Self {
             id: format!("mem-{}", Utc::now().timestamp_millis()),
             layer,
@@ -75,11 +79,42 @@ impl MemoryBlock {
 fn is_stop_word(w: &str) -> bool {
     matches!(
         w,
-        "this" | "that" | "with" | "from" | "have" | "has" | "had" | "been" | "were"
-            | "being" | "would" | "could" | "should" | "there" | "their" | "they" | "them"
-            | "then" | "than" | "into" | "over" | "such" | "make" | "like" | "just" | "some"
-            | "what" | "when" | "where" | "which" | "while" | "only" | "also" | "does"
-            | "even" | "each"
+        "this"
+            | "that"
+            | "with"
+            | "from"
+            | "have"
+            | "has"
+            | "had"
+            | "been"
+            | "were"
+            | "being"
+            | "would"
+            | "could"
+            | "should"
+            | "there"
+            | "their"
+            | "they"
+            | "them"
+            | "then"
+            | "than"
+            | "into"
+            | "over"
+            | "such"
+            | "make"
+            | "like"
+            | "just"
+            | "some"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "while"
+            | "only"
+            | "also"
+            | "does"
+            | "even"
+            | "each"
     )
 }
 
@@ -241,7 +276,10 @@ impl MemoryPalace {
         Ok(())
     }
 
-    fn load_layer(data_dir: &PathBuf, layer: &str) -> Result<Vec<MemoryBlock>, std::io::Error> {
+    fn load_layer(
+        data_dir: &std::path::Path,
+        layer: &str,
+    ) -> Result<Vec<MemoryBlock>, std::io::Error> {
         let mut blocks = Vec::new();
         let path = data_dir.join("sessions").join(layer).join("blocks.jsonl");
         if let Ok(s) = fs::read_to_string(&path) {

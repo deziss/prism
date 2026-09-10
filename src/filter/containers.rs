@@ -231,7 +231,11 @@ fn compact_ports(field: &str) -> String {
             Some((host, cont)) => {
                 let hp = host.rsplit(':').next().unwrap_or(host);
                 let cp = cont.split('/').next().unwrap_or(cont);
-                if hp == cp { cp.to_string() } else { format!("{}->{}", hp, cp) }
+                if hp == cp {
+                    cp.to_string()
+                } else {
+                    format!("{}->{}", hp, cp)
+                }
             }
             None => spec.split('/').next().unwrap_or(spec).to_string(),
         };
@@ -274,7 +278,13 @@ pub(crate) fn filter_docker_ps(output: &str) -> String {
         let image = get(i_img);
         let status = get(i_status);
         let ports = compact_ports(&get(i_ports));
-        let mut row = format!("  {} {} ({}) {}", &id[..id.len().min(12)], name, image, status);
+        let mut row = format!(
+            "  {} {} ({}) {}",
+            &id[..id.len().min(12)],
+            name,
+            image,
+            status
+        );
         if !ports.is_empty() {
             row.push_str(&format!(" [{}]", ports));
         }
@@ -453,8 +463,16 @@ fn docker_version(output: &str) -> String {
         if let Some((k, v)) = t.split_once(':') {
             let k = k.trim();
             let v = v.trim();
-            if matches!(k, "Version" | "API version" | "Go version" | "OS/Arch" | "Git commit") && !v.is_empty() {
-                bits.push(format!("{} {}", k.to_ascii_lowercase().replace(" version", ""), v));
+            if matches!(
+                k,
+                "Version" | "API version" | "Go version" | "OS/Arch" | "Git commit"
+            ) && !v.is_empty()
+            {
+                bits.push(format!(
+                    "{} {}",
+                    k.to_ascii_lowercase().replace(" version", ""),
+                    v
+                ));
             }
         }
     }
@@ -466,9 +484,19 @@ fn docker_version(output: &str) -> String {
 }
 
 const INFO_KEYS: [&str; 13] = [
-    "Server Version", "Storage Driver", "Cgroup Driver", "Cgroup Version", "Kernel Version",
-    "Operating System", "OSType", "Architecture", "CPUs", "Total Memory", "Docker Root Dir",
-    "Containers", "Images",
+    "Server Version",
+    "Storage Driver",
+    "Cgroup Driver",
+    "Cgroup Version",
+    "Kernel Version",
+    "Operating System",
+    "OSType",
+    "Architecture",
+    "CPUs",
+    "Total Memory",
+    "Docker Root Dir",
+    "Containers",
+    "Images",
 ];
 
 fn docker_info(output: &str) -> String {
@@ -570,9 +598,15 @@ pub(crate) fn filter_compose(args: &[&str], output: &str) -> String {
                 if t.is_empty() {
                     continue;
                 }
-                if t.starts_with('⠿') || t.starts_with('✔') || t.starts_with('-') || t.contains(" Started")
-                    || t.contains(" Created") || t.contains(" Running") || t.contains(" Stopped")
-                    || t.contains(" Removed") || t.contains(" Healthy")
+                if t.starts_with('⠿')
+                    || t.starts_with('✔')
+                    || t.starts_with('-')
+                    || t.contains(" Started")
+                    || t.contains(" Created")
+                    || t.contains(" Running")
+                    || t.contains(" Stopped")
+                    || t.contains(" Removed")
+                    || t.contains(" Healthy")
                 {
                     acted += 1;
                     continue;
@@ -592,7 +626,7 @@ pub(crate) fn filter_docker(args: &[&str], output: &str) -> String {
     let l = limits();
     match find_subcommand(args) {
         Some("ps") => filter_docker_ps(output),
-        Some("images") | Some("image") if !args.iter().any(|a| *a == "history") => {
+        Some("images") | Some("image") if !args.contains(&"history") => {
             filter_docker_images(output)
         }
         Some("compose") => {
@@ -605,10 +639,14 @@ pub(crate) fn filter_docker(args: &[&str], output: &str) -> String {
         Some("inspect") => pruned_json(output, generic),
         Some("build") | Some("buildx") | Some("pull") | Some("push") => docker_build(output),
         Some("network") | Some("volume") => {
-            let kind = if find_subcommand(args) == Some("network") { "network" } else { "volume" };
-            if args.iter().any(|a| *a == "inspect") {
+            let kind = if find_subcommand(args) == Some("network") {
+                "network"
+            } else {
+                "volume"
+            };
+            if args.contains(&"inspect") {
                 pruned_json(output, generic)
-            } else if args.iter().any(|a| *a == "ls") {
+            } else if args.contains(&"ls") {
                 docker_ls_resource(output, kind)
             } else {
                 generic(output)
@@ -659,7 +697,8 @@ pub(super) fn split_glog(output: &str) -> (Vec<String>, String) {
             && matches!(b[0], b'E' | b'W' | b'I' | b'F')
             && b[1..5].iter().all(|c| c.is_ascii_digit())
     };
-    let (glog, rest): (Vec<&str>, Vec<&str>) = output.lines().partition(|l| is_glog(l.trim_start()));
+    let (glog, rest): (Vec<&str>, Vec<&str>) =
+        output.lines().partition(|l| is_glog(l.trim_start()));
     if glog.is_empty() {
         return (Vec::new(), output.to_string());
     }
@@ -687,7 +726,9 @@ pub(crate) fn filter_kubectl(args: &[&str], output: &str) -> String {
 
 fn filter_kubectl_body(args: &[&str], output: &str, l: &Limits) -> String {
     let json_out = flag_value(args, "-o").map(|v| v == "json").unwrap_or(false)
-        || flag_value(args, "--output").map(|v| v == "json").unwrap_or(false);
+        || flag_value(args, "--output")
+            .map(|v| v == "json")
+            .unwrap_or(false);
     match find_subcommand(args) {
         Some("get") if json_out => pruned_json(output, |o| squeeze_table(o, l.list_max_lines)),
         Some("get") | Some("top") => squeeze_table(output, l.list_max_lines),
@@ -696,7 +737,14 @@ fn filter_kubectl_body(args: &[&str], output: &str, l: &Limits) -> String {
         Some("apply") | Some("delete") | Some("create") | Some("patch") | Some("label") => {
             let (mut out, other) = group_by_verb(
                 output,
-                &["created", "configured", "unchanged", "deleted", "labeled", "patched"],
+                &[
+                    "created",
+                    "configured",
+                    "unchanged",
+                    "deleted",
+                    "labeled",
+                    "patched",
+                ],
                 l.list_max_lines,
             );
             out.extend(cap_vec(other, l.max_diagnostics, "lines"));
@@ -733,7 +781,8 @@ pub(crate) fn filter_helm(args: &[&str], output: &str) -> String {
                     continue;
                 }
                 if let Some((k, v)) = t.split_once(':') {
-                    if k.chars().all(|c| c.is_ascii_uppercase() || c == ' ') && !v.trim().is_empty() {
+                    if k.chars().all(|c| c.is_ascii_uppercase() || c == ' ') && !v.trim().is_empty()
+                    {
                         fields.push(format!("{}={}", k.trim().to_ascii_lowercase(), v.trim()));
                     }
                 }
@@ -755,7 +804,8 @@ pub(crate) fn filter_helm(args: &[&str], output: &str) -> String {
             let mut keep: Vec<String> = Vec::new();
             for line in output.lines() {
                 let t = line.trim();
-                if t.contains("[ERROR]") || t.contains("[WARNING]") || t.contains("chart(s) linted") {
+                if t.contains("[ERROR]") || t.contains("[WARNING]") || t.contains("chart(s) linted")
+                {
                     keep.push(squeeze_ws(t));
                 }
             }
@@ -771,7 +821,12 @@ pub(crate) fn filter_helm(args: &[&str], output: &str) -> String {
             let keep: Vec<&str> = output
                 .lines()
                 .map(|l| l.trim())
-                .filter(|t| t.contains("PASSED") || t.contains("FAILED") || t.starts_with("Phase") || t.starts_with("TEST SUITE"))
+                .filter(|t| {
+                    t.contains("PASSED")
+                        || t.contains("FAILED")
+                        || t.starts_with("Phase")
+                        || t.starts_with("TEST SUITE")
+                })
                 .collect();
             if keep.is_empty() {
                 generic(output)
@@ -779,8 +834,8 @@ pub(crate) fn filter_helm(args: &[&str], output: &str) -> String {
                 keep.join("\n")
             }
         }
-        Some("list") | Some("ls") | Some("history") | Some("repo") | Some("search") | Some("env")
-        | Some("version") => squeeze_table(output, l.list_max_lines),
+        Some("list") | Some("ls") | Some("history") | Some("repo") | Some("search")
+        | Some("env") | Some("version") => squeeze_table(output, l.list_max_lines),
         _ => generic(output),
     }
 }
@@ -790,7 +845,11 @@ pub(crate) fn filter_stern(output: &str) -> String {
 }
 
 pub(crate) fn filter_k9s(output: &str) -> String {
-    cap_lines(collapse_blank(output).lines(), limits().list_max_lines, "lines")
+    cap_lines(
+        collapse_blank(output).lines(),
+        limits().list_max_lines,
+        "lines",
+    )
 }
 
 #[cfg(test)]
@@ -807,10 +866,24 @@ bef31c060979   apache/kafka:4.3.0     \"/__cacert_entrypoin…\" 9 days ago     
     fn ps_groups_running_and_keeps_ids_names_ports() {
         let out = filter_docker_ps(PS);
         assert!(out.starts_with("[docker] 2 running:"), "{}", out);
-        assert!(out.contains("ef93185539c3 conman-server (conman-server:latest) Up 39 minutes (healthy) [5173]"), "{}", out);
-        assert!(out.contains("62d495a72692 conman-local-agent (conman-agent:latest) Up 4 days [5073]"), "{}", out);
+        assert!(
+            out.contains(
+                "ef93185539c3 conman-server (conman-server:latest) Up 39 minutes (healthy) [5173]"
+            ),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("62d495a72692 conman-local-agent (conman-agent:latest) Up 4 days [5073]"),
+            "{}",
+            out
+        );
         assert!(out.contains("[docker] 1 stopped/exited:"), "{}", out);
-        assert!(out.contains("bef31c060979 local_kafka (apache/kafka:4.3.0) Exited (143) 6 days ago"), "{}", out);
+        assert!(
+            out.contains("bef31c060979 local_kafka (apache/kafka:4.3.0) Exited (143) 6 days ago"),
+            "{}",
+            out
+        );
         // COMMAND and CREATED are dropped
         assert!(!out.contains("cacert_entrypoin"), "{}", out);
         assert!(!out.contains("9 days ago"), "{}", out);
@@ -844,13 +917,23 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
     fn images_fidelity_cap_announced() {
         let mut raw = String::from("REPOSITORY   TAG   IMAGE ID   CREATED   SIZE\n");
         for i in 0..300 {
-            raw.push_str(&format!("repo{}   latest   abc{}   2 days ago   10MB\n", i, i));
+            raw.push_str(&format!(
+                "repo{}   latest   abc{}   2 days ago   10MB\n",
+                i, i
+            ));
         }
         let out = filter_docker_images(&raw);
         let shown = out.lines().filter(|l| l.starts_with("  repo")).count();
         let announced: usize = out
             .lines()
-            .find_map(|l| l.trim().strip_prefix("[+")?.split_whitespace().next()?.parse().ok())
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("[+")?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
             .unwrap_or(0);
         assert_eq!(shown + announced, 300, "{}", out);
         assert!(has_truncation(&out));
@@ -895,7 +978,10 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
     fn logs_keep_errors_from_the_dropped_head() {
         let mut raw = String::from("early FATAL boom\n");
         for i in 0..50 {
-            raw.push_str(&format!("line variant {} alpha\n", (b'a' + (i % 26) as u8) as char));
+            raw.push_str(&format!(
+                "line variant {} alpha\n",
+                (b'a' + (i % 26) as u8) as char
+            ));
         }
         let out = fold_logs(&raw, 5);
         assert!(out.contains("early FATAL boom"), "{}", out);
@@ -915,10 +1001,14 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
 
     #[test]
     fn version_and_info_keep_key_facts() {
-        let v = docker_version("Client: Docker Engine - Community\n Version:           29.8.0\n API version:       1.56\n Go version:        go1.26.8\n Git commit:        88096ef\n\nServer: Docker Engine - Community\n Engine:\n  Version:          29.8.0\n  API version:      1.56 (minimum version 1.24)");
+        let v = docker_version(
+            "Client: Docker Engine - Community\n Version:           29.8.0\n API version:       1.56\n Go version:        go1.26.8\n Git commit:        88096ef\n\nServer: Docker Engine - Community\n Engine:\n  Version:          29.8.0\n  API version:      1.56 (minimum version 1.24)",
+        );
         assert!(v.contains("29.8.0"), "{}", v);
         assert!(v.contains("api 1.56"), "{}", v);
-        let i = docker_info("Client: Docker Engine\n Version: 29.8.0\n Containers: 12\n  Running: 2\n  Paused: 0\n  Stopped: 10\n Images: 92\n Server Version: 29.8.0\n Storage Driver: overlay2\n Plugins:\n  buildx: Docker Buildx\nWARNING: No swap limit support");
+        let i = docker_info(
+            "Client: Docker Engine\n Version: 29.8.0\n Containers: 12\n  Running: 2\n  Paused: 0\n  Stopped: 10\n Images: 92\n Server Version: 29.8.0\n Storage Driver: overlay2\n Plugins:\n  buildx: Docker Buildx\nWARNING: No swap limit support",
+        );
         assert!(i.contains("Containers: 12"), "{}", i);
         assert!(i.contains("running: 2"), "{}", i);
         assert!(i.contains("Server Version: 29.8.0"), "{}", i);
@@ -941,7 +1031,11 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
         let out = filter_kubectl(&["get", "pods", "-A"], &raw);
         assert!(out.contains("connection refused"), "{}", out);
         assert!(out.contains("(×5"), "repeats not folded: {}", out);
-        assert!(out.contains("The connection to the server localhost:8080 was refused"), "{}", out);
+        assert!(
+            out.contains("The connection to the server localhost:8080 was refused"),
+            "{}",
+            out
+        );
         assert!(out.lines().count() <= 3, "still verbose: {}", out);
     }
 
@@ -951,8 +1045,16 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
             &["get", "pods", "-A"],
             "NAMESPACE     NAME                       READY   STATUS    RESTARTS   AGE\nkube-system   coredns-abc                1/1     Running   0          5d",
         );
-        assert!(out.contains("NAMESPACE NAME READY STATUS RESTARTS AGE"), "{}", out);
-        assert!(out.contains("kube-system coredns-abc 1/1 Running 0 5d"), "{}", out);
+        assert!(
+            out.contains("NAMESPACE NAME READY STATUS RESTARTS AGE"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("kube-system coredns-abc 1/1 Running 0 5d"),
+            "{}",
+            out
+        );
         let err = filter_kubectl(&["get", "pods"], "error: current-context is not set");
         assert_eq!(err, "error: current-context is not set");
     }
@@ -963,7 +1065,11 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
             &["apply", "-f", "."],
             "deployment.apps/api created\nservice/api created\nconfigmap/env unchanged",
         );
-        assert!(out.contains("created (2): deployment.apps/api, service/api"), "{}", out);
+        assert!(
+            out.contains("created (2): deployment.apps/api, service/api"),
+            "{}",
+            out
+        );
         assert!(out.contains("unchanged (1): configmap/env"), "{}", out);
     }
 
@@ -977,7 +1083,10 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
         assert!(out.contains("status=deployed"), "{}", out);
         assert!(out.contains("revision=3"), "{}", out);
         assert!(has_truncation(&out), "{}", out);
-        assert_eq!(filter_helm(&["lint", "./chart"], "==> Linting ./chart\n"), "helm lint: ok");
+        assert_eq!(
+            filter_helm(&["lint", "./chart"], "==> Linting ./chart\n"),
+            "helm lint: ok"
+        );
     }
 
     #[test]
@@ -988,7 +1097,10 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
         );
         assert!(up.contains("Error response from daemon"), "{}", up);
         assert!(up.contains("[compose] 2 container steps"), "{}", up);
-        let ps = filter_compose(&["ps", "-a"], "NAME    IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS\napi-1   api:dev   \"run\"     api       2d ago    Up 2 days  0.0.0.0:8080->80/tcp");
+        let ps = filter_compose(
+            &["ps", "-a"],
+            "NAME    IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS\napi-1   api:dev   \"run\"     api       2d ago    Up 2 days  0.0.0.0:8080->80/tcp",
+        );
         assert!(ps.contains("api-1"), "{}", ps);
         assert!(ps.contains("8080->80"), "{}", ps);
     }
@@ -1003,7 +1115,9 @@ alpine:latest                d529dd0c6e55       8.42MB             0B
 
     #[test]
     fn digest_shortening_and_build_summary() {
-        let out = docker_build("#1 [internal] load build definition\n#5 CACHED\nabc123: Preparing\nsuccessfully pushed sha256:0123456789abcdef0123456789abcdef01234567\n#8 DONE 1.2s");
+        let out = docker_build(
+            "#1 [internal] load build definition\n#5 CACHED\nabc123: Preparing\nsuccessfully pushed sha256:0123456789abcdef0123456789abcdef01234567\n#8 DONE 1.2s",
+        );
         assert!(out.contains("sha256:0123456789ab…"), "{}", out);
         assert!(out.contains("[docker] 3 steps, 1 cached"), "{}", out);
     }

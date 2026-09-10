@@ -42,18 +42,18 @@ pub fn count_tokens(text: &str, _model: &str) -> Result<usize> {
 
 /// Pricing table: (model prefix, input $/1K tokens, output $/1K tokens)
 const PRICING: &[(&str, f64, f64)] = &[
-    ("gpt-4o-mini",        0.00015, 0.0006),
-    ("gpt-4o",             0.005,   0.015),
-    ("gpt-4-turbo",        0.01,    0.03),
-    ("gpt-3.5",            0.0005,  0.0015),
-    ("claude-3-5-haiku",   0.0008,  0.004),
-    ("claude-3-5-sonnet",  0.003,   0.015),
-    ("claude-3-opus",      0.015,   0.075),
-    ("claude-3-haiku",     0.00025, 0.00125),
-    ("claude-3-sonnet",    0.003,   0.015),
-    ("gemini-1.5-flash",   0.000075,0.0003),
-    ("gemini-1.5-pro",     0.00125, 0.005),
-    ("gemini-2.0-flash",   0.0001,  0.0004),
+    ("gpt-4o-mini", 0.00015, 0.0006),
+    ("gpt-4o", 0.005, 0.015),
+    ("gpt-4-turbo", 0.01, 0.03),
+    ("gpt-3.5", 0.0005, 0.0015),
+    ("claude-3-5-haiku", 0.0008, 0.004),
+    ("claude-3-5-sonnet", 0.003, 0.015),
+    ("claude-3-opus", 0.015, 0.075),
+    ("claude-3-haiku", 0.00025, 0.00125),
+    ("claude-3-sonnet", 0.003, 0.015),
+    ("gemini-1.5-flash", 0.000075, 0.0003),
+    ("gemini-1.5-pro", 0.00125, 0.005),
+    ("gemini-2.0-flash", 0.0001, 0.0004),
 ];
 
 /// Estimate cost in USD for a given model and token counts.
@@ -81,7 +81,11 @@ pub fn record_proxy_event(event: &crate::hub::ProxyEvent) {
     let mut line = serde_json::to_string(event).unwrap_or_default();
     line.push('\n');
     if let Ok(_guard) = PROXY_EVENTS_LOCK.lock() {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = f.write_all(line.as_bytes());
             let _ = f.flush();
         }
@@ -145,7 +149,9 @@ fn load_proxy_summary() -> ProxySummary {
 
     let mut sum = ProxySummary::default();
     for line in raw.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         sum.requests += 1;
         sum.orig_tokens += v.get("origTokens").and_then(|x| x.as_u64()).unwrap_or(0);
         sum.sent_tokens += v.get("sentTokens").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -222,7 +228,10 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
     let top_commands = top
         .into_iter()
         .take(10)
-        .map(|(command, tokens)| GainTopCommand { command: command.to_string(), tokens })
+        .map(|(command, tokens)| GainTopCommand {
+            command: command.to_string(),
+            tokens,
+        })
         .collect();
 
     let history = history_flag.then(|| {
@@ -259,27 +268,57 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
     if let Some(history) = &report.history {
         println!("\n  PRISM Command History\n{}", "─".repeat(50));
         for entry in history {
-            println!("  {}  {:>12} tokens  {}", entry.timestamp, entry.tokens, entry.command);
+            println!(
+                "  {}  {:>12} tokens  {}",
+                entry.timestamp, entry.tokens, entry.command
+            );
         }
     } else {
-        println!("\n  {}  {}", "PRISM TOKEN ANALYTICS".bold().cyan(), "v0.1.0".dimmed());
+        println!(
+            "\n  {}  {}",
+            "PRISM TOKEN ANALYTICS".bold().cyan(),
+            "v0.1.0".dimmed()
+        );
         println!("  {}\n", "─".repeat(65).dimmed());
-        println!("  {:<30} {}", "Total commands tracked:", report.total_commands.to_string().cyan().bold());
-        println!("  {:<30} {}", "Total output tokens:", report.total_output_tokens.to_string().cyan().bold());
+        println!(
+            "  {:<30} {}",
+            "Total commands tracked:",
+            report.total_commands.to_string().cyan().bold()
+        );
+        println!(
+            "  {:<30} {}",
+            "Total output tokens:",
+            report.total_output_tokens.to_string().cyan().bold()
+        );
 
         // Measured proxy savings — read from the event log, not estimated.
         if let Some(proxy) = &report.proxy {
             println!("\n  {}", "PROXY INTERCEPTION:".bold().yellow());
-            println!("    {:<28} {}", "Requests intercepted:", proxy.requests.to_string().cyan());
-            println!("    {:<28} {}", "Original prompt tokens:", proxy.orig_tokens.to_string().cyan());
-            println!("    {:<28} {}", "Sent prompt tokens:", proxy.sent_tokens.to_string().cyan());
+            println!(
+                "    {:<28} {}",
+                "Requests intercepted:",
+                proxy.requests.to_string().cyan()
+            );
+            println!(
+                "    {:<28} {}",
+                "Original prompt tokens:",
+                proxy.orig_tokens.to_string().cyan()
+            );
+            println!(
+                "    {:<28} {}",
+                "Sent prompt tokens:",
+                proxy.sent_tokens.to_string().cyan()
+            );
             println!(
                 "    {:<28} {} ({:.1}%)",
                 "Measured token savings:",
                 proxy.saved_tokens.to_string().green().bold(),
                 proxy.saved_pct
             );
-            println!("    {:<28} ${:.4}", "Spend on forwarded traffic:", proxy.cost_usd);
+            println!(
+                "    {:<28} ${:.4}",
+                "Spend on forwarded traffic:", proxy.cost_usd
+            );
         } else {
             println!(
                 "\n  {}",
@@ -289,7 +328,11 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
 
         println!("\n  {}", "TOP COMMANDS BY TOKEN SPEND:".bold().yellow());
         for top in &report.top_commands {
-            println!("    {:<18} {:>10} tokens", top.command.cyan(), top.tokens.to_string().white());
+            println!(
+                "    {:<18} {:>10} tokens",
+                top.command.cyan(),
+                top.tokens.to_string().white()
+            );
         }
         println!("  {}\n", "─".repeat(65).dimmed());
     }
@@ -299,8 +342,11 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
 
 /// Discover missed optimization opportunities from Claude Code history.
 pub async fn discover() -> Result<()> {
-
-    println!("\n  {}  {}", "PRISM DISCOVERY".bold().cyan(), "v0.1.0".dimmed());
+    println!(
+        "\n  {}  {}",
+        "PRISM DISCOVERY".bold().cyan(),
+        "v0.1.0".dimmed()
+    );
     println!("  {}\n", "─".repeat(65).dimmed());
 
     let hist = load_history()?;
@@ -360,7 +406,10 @@ impl CommandEntry {
 
 impl CommandEntry {
     fn is_cacheable(&self) -> bool {
-        matches!(self.command.as_str(), "git" | "cargo" | "grep" | "find" | "ls")
+        matches!(
+            self.command.as_str(),
+            "git" | "cargo" | "grep" | "find" | "ls"
+        )
     }
 }
 
@@ -370,7 +419,11 @@ fn load_history() -> Result<History> {
         let content = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&content)?)
     } else {
-        Ok(History { commands: Vec::new(), total_savings_tokens: 0, sessions: 0 })
+        Ok(History {
+            commands: Vec::new(),
+            total_savings_tokens: 0,
+            sessions: 0,
+        })
     }
 }
 

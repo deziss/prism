@@ -6,7 +6,11 @@
 use super::common::*;
 
 fn plural(n: usize, noun: &str) -> String {
-    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
+    if n == 1 {
+        format!("{} {}", n, noun)
+    } else {
+        format!("{} {}s", n, noun)
+    }
 }
 
 /// Mask digit runs so otherwise-identical log lines group together.
@@ -29,9 +33,11 @@ fn log_template(line: &str) -> String {
 
 fn is_alert(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    ["error", "fail", "fatal", "panic", "warn", "denied", "refused", "timeout"]
-        .iter()
-        .any(|k| l.contains(k))
+    [
+        "error", "fail", "fatal", "panic", "warn", "denied", "refused", "timeout",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
 /// Fold repeated templates, then keep the last `tail` lines with alerts pinned.
@@ -46,7 +52,13 @@ fn fold_lines(lines: Vec<String>, tail: usize) -> Vec<String> {
     }
     let rendered: Vec<String> = groups
         .into_iter()
-        .map(|(_, first, n)| if n > 1 { format!("{}  (×{})", first, n) } else { first })
+        .map(|(_, first, n)| {
+            if n > 1 {
+                format!("{}  (×{})", first, n)
+            } else {
+                first
+            }
+        })
         .collect();
     if rendered.len() <= tail {
         return rendered;
@@ -70,13 +82,23 @@ fn fold_lines(lines: Vec<String>, tail: usize) -> Vec<String> {
 // ─── curl / wget / ping ───────────────────────────────────────────────────────
 
 const KEEP_HEADERS: [&str; 10] = [
-    "content-type", "content-length", "location", "cache-control", "etag", "retry-after",
-    "www-authenticate", "content-encoding", "transfer-encoding", "x-request-id",
+    "content-type",
+    "content-length",
+    "location",
+    "cache-control",
+    "etag",
+    "retry-after",
+    "www-authenticate",
+    "content-encoding",
+    "transfer-encoding",
+    "x-request-id",
 ];
 
 fn interesting_header(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    KEEP_HEADERS.contains(&n.as_str()) || n.starts_with("x-ratelimit") || n.starts_with("set-cookie")
+    KEEP_HEADERS.contains(&n.as_str())
+        || n.starts_with("x-ratelimit")
+        || n.starts_with("set-cookie")
 }
 
 /// Reduce an HTML body to its title and visible text.
@@ -97,7 +119,9 @@ fn html_digest(body: &str, max_lines: usize) -> String {
     while i < bytes.len() {
         let c = bytes[i];
         if c == '<' {
-            let rest: String = lower_chars[i..(i + 8).min(lower_chars.len())].iter().collect();
+            let rest: String = lower_chars[i..(i + 8).min(lower_chars.len())]
+                .iter()
+                .collect();
             if rest.starts_with("<script") || rest.starts_with("<style") {
                 skip_block = true;
             }
@@ -185,7 +209,13 @@ pub(crate) fn filter_curl(_args: &[&str], output: &str) -> String {
         }
         // response headers from -i / -I
         if let Some((name, val)) = tt.split_once(": ") {
-            if !name.contains(' ') && name.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+            if !name.contains(' ')
+                && name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic())
+                    .unwrap_or(false)
+            {
                 if interesting_header(name) {
                     out.push(format!("{}: {}", name, val.trim()));
                 } else {
@@ -205,10 +235,13 @@ pub(crate) fn filter_curl(_args: &[&str], output: &str) -> String {
     if body_text.trim_start().starts_with('<') {
         out.push(html_digest(&body_text, 5));
     } else if !body_text.is_empty() {
-        out.push(cap_lines(body.into_iter(), l.passthrough_max_lines, "lines"));
+        out.push(cap_lines(body, l.passthrough_max_lines, "lines"));
     }
     if verbose_dropped > 0 {
-        out.push(format!("({} header/progress lines dropped)", verbose_dropped));
+        out.push(format!(
+            "({} header/progress lines dropped)",
+            verbose_dropped
+        ));
     }
     out.join("\n")
 }
@@ -226,8 +259,11 @@ pub(crate) fn filter_wget(output: &str) -> String {
         if t.is_empty() {
             continue;
         }
-        if t.starts_with("--20") || t.starts_with("Resolving ") || t.starts_with("Connecting to ")
-            || t.starts_with("Reusing existing connection") || t.contains("Loaded CA certificate")
+        if t.starts_with("--20")
+            || t.starts_with("Resolving ")
+            || t.starts_with("Connecting to ")
+            || t.starts_with("Reusing existing connection")
+            || t.contains("Loaded CA certificate")
         {
             noise += 1;
             continue;
@@ -282,7 +318,7 @@ pub(crate) fn filter_wget(output: &str) -> String {
         } else if body_text.trim_start().starts_with('<') {
             out.push(html_digest(&body_text, 5));
         } else {
-            out.push(cap_lines(body.into_iter(), l.passthrough_max_lines, "lines"));
+            out.push(cap_lines(body, l.passthrough_max_lines, "lines"));
         }
     }
     if noise > 0 {
@@ -318,7 +354,11 @@ pub(crate) fn filter_ping(output: &str) -> String {
             rtt = Some(squeeze_ws(t));
             continue;
         }
-        if t.contains("Unreachable") || t.contains("unknown host") || t.contains("failure") || t.starts_with("ping:") {
+        if t.contains("Unreachable")
+            || t.contains("unknown host")
+            || t.contains("failure")
+            || t.starts_with("ping:")
+        {
             errors.push(squeeze_ws(t));
             continue;
         }
@@ -357,8 +397,13 @@ pub(crate) fn filter_ps(_args: &[&str], output: &str) -> String {
             continue;
         }
         let up = t.trim_start();
-        if header.is_none() && (up.starts_with("USER") || up.starts_with("UID") || up.starts_with("PID")) {
-            cols = up.split_whitespace().map(|c| c.to_ascii_uppercase()).collect();
+        if header.is_none()
+            && (up.starts_with("USER") || up.starts_with("UID") || up.starts_with("PID"))
+        {
+            cols = up
+                .split_whitespace()
+                .map(|c| c.to_ascii_uppercase())
+                .collect();
             header = Some(squeeze_ws(t));
             continue;
         }
@@ -403,7 +448,9 @@ pub(crate) fn filter_ss(output: &str) -> String {
         if t.trim().is_empty() {
             continue;
         }
-        if header.is_none() && (t.contains("Local Address") || t.starts_with("Netid") || t.starts_with("Proto")) {
+        if header.is_none()
+            && (t.contains("Local Address") || t.starts_with("Netid") || t.starts_with("Proto"))
+        {
             header = Some(squeeze_ws(t));
             continue;
         }
@@ -419,11 +466,17 @@ pub(crate) fn filter_ss(output: &str) -> String {
     }
     rows.sort_by_key(|(p, _)| *p);
     let mut out: Vec<String> = header.into_iter().collect();
-    out.extend(cap_vec(rows.into_iter().map(|(_, r)| r).collect(), l.ps_max_rows.max(l.list_max_lines / 2), "sockets"));
+    out.extend(cap_vec(
+        rows.into_iter().map(|(_, r)| r).collect(),
+        l.ps_max_rows.max(l.list_max_lines / 2),
+        "sockets",
+    ));
     out.join("\n")
 }
 
-const PSEUDO_FS: [&str; 8] = ["tmpfs", "devtmpfs", "efivarfs", "squashfs", "overlay", "udev", "none", "shm"];
+const PSEUDO_FS: [&str; 8] = [
+    "tmpfs", "devtmpfs", "efivarfs", "squashfs", "overlay", "udev", "none", "shm",
+];
 
 pub(crate) fn filter_df(output: &str) -> String {
     let l = limits();
@@ -470,7 +523,12 @@ pub(crate) fn filter_du(output: &str) -> String {
         rows.push((bytes, format!("{} {}", size, path)));
     }
     rows.sort_by(|a, b| b.0.cmp(&a.0));
-    cap_vec(rows.into_iter().map(|(_, r)| r).collect(), l.list_max_lines, "paths").join("\n")
+    cap_vec(
+        rows.into_iter().map(|(_, r)| r).collect(),
+        l.list_max_lines,
+        "paths",
+    )
+    .join("\n")
 }
 
 pub(crate) fn filter_free(output: &str) -> String {
@@ -496,7 +554,11 @@ pub(crate) fn filter_free(output: &str) -> String {
                     None => v.to_string(),
                 })
                 .collect();
-            out.push(format!("{}: {}", label.trim().to_ascii_lowercase(), pairs.join(", ")));
+            out.push(format!(
+                "{}: {}",
+                label.trim().to_ascii_lowercase(),
+                pairs.join(", ")
+            ));
         }
     }
     if out.is_empty() {
@@ -539,10 +601,27 @@ pub(crate) fn filter_systemctl(args: &[&str], output: &str) -> String {
                         let state = v
                             .split(&['(', ';'][..])
                             .map(|p| p.trim())
-                            .filter(|p| matches!(*p, "enabled" | "disabled" | "static" | "masked" | "loaded" | "not-found"))
+                            .filter(|p| {
+                                matches!(
+                                    *p,
+                                    "enabled"
+                                        | "disabled"
+                                        | "static"
+                                        | "masked"
+                                        | "loaded"
+                                        | "not-found"
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(", ");
-                        out.push(format!("Loaded: {}", if state.is_empty() { squeeze_ws(v) } else { state }));
+                        out.push(format!(
+                            "Loaded: {}",
+                            if state.is_empty() {
+                                squeeze_ws(v)
+                            } else {
+                                state
+                            }
+                        ));
                         continue;
                     }
                     "Docs" | "Process" | "CGroup" | "TriggeredBy" | "Triggers" => continue,
@@ -562,7 +641,10 @@ pub(crate) fn filter_systemctl(args: &[&str], output: &str) -> String {
         }
         return out.join("\n");
     }
-    if matches!(sub, Some("list-units") | Some("list-unit-files") | Some("list-timers") | Some("list-sockets")) {
+    if matches!(
+        sub,
+        Some("list-units") | Some("list-unit-files") | Some("list-timers") | Some("list-sockets")
+    ) {
         let mut rows: Vec<String> = Vec::new();
         let mut header: Option<String> = None;
         let mut legend = 0usize;
@@ -572,8 +654,12 @@ pub(crate) fn filter_systemctl(args: &[&str], output: &str) -> String {
             if tt.is_empty() {
                 continue;
             }
-            if tt.starts_with("Legend:") || tt.starts_with("LOAD ") || tt.starts_with("ACTIVE ")
-                || tt.starts_with("SUB ") || tt.contains("loaded units listed") || tt.starts_with("To show all")
+            if tt.starts_with("Legend:")
+                || tt.starts_with("LOAD ")
+                || tt.starts_with("ACTIVE ")
+                || tt.starts_with("SUB ")
+                || tt.contains("loaded units listed")
+                || tt.starts_with("To show all")
                 || tt.starts_with("unit files listed")
             {
                 legend += 1;
@@ -588,7 +674,11 @@ pub(crate) fn filter_systemctl(args: &[&str], output: &str) -> String {
         let n = rows.len();
         let mut out: Vec<String> = header.into_iter().collect();
         out.extend(cap_vec(rows, l.list_max_lines, "units"));
-        out.push(format!("({} listed{})", n, if legend > 0 { ", legend dropped" } else { "" }));
+        out.push(format!(
+            "({} listed{})",
+            n,
+            if legend > 0 { ", legend dropped" } else { "" }
+        ));
         return out.join("\n");
     }
     // is-active / is-enabled / enable / disable → already terse
@@ -612,7 +702,11 @@ pub(crate) fn filter_journalctl(output: &str) -> String {
         let fields: Vec<&str> = t.splitn(6, ' ').collect();
         let compacted = if fields.len() >= 6 && fields[2].contains(':') {
             let time = fields[2];
-            let unit = fields[4].split('[').next().unwrap_or(fields[4]).trim_end_matches(':');
+            let unit = fields[4]
+                .split('[')
+                .next()
+                .unwrap_or(fields[4])
+                .trim_end_matches(':');
             format!("{} {}: {}", time, unit, fields[5])
         } else {
             squeeze_ws(t)
@@ -629,7 +723,15 @@ pub(crate) fn filter_journalctl(output: &str) -> String {
 // ─── env / man ────────────────────────────────────────────────────────────────
 
 const SECRET_KEYS: [&str; 9] = [
-    "secret", "token", "password", "passwd", "api_key", "apikey", "private", "credential", "auth",
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "private",
+    "credential",
+    "auth",
 ];
 
 pub(crate) fn filter_env(output: &str) -> String {
@@ -659,7 +761,14 @@ pub(crate) fn filter_env(output: &str) -> String {
     cap_vec(rows, l.list_max_lines, "vars").join("\n")
 }
 
-const MAN_DROP: [&str; 6] = ["AUTHOR", "REPORTING BUGS", "COPYRIGHT", "SEE ALSO", "COLOPHON", "BUGS"];
+const MAN_DROP: [&str; 6] = [
+    "AUTHOR",
+    "REPORTING BUGS",
+    "COPYRIGHT",
+    "SEE ALSO",
+    "COLOPHON",
+    "BUGS",
+];
 
 pub(crate) fn filter_man(output: &str) -> String {
     let l = limits();
@@ -676,7 +785,9 @@ pub(crate) fn filter_man(output: &str) -> String {
         }
         // section headings are unindented and upper-case
         let is_heading = !t.starts_with(' ')
-            && tt.chars().all(|c| c.is_ascii_uppercase() || c == ' ' || c == '-')
+            && tt
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == ' ' || c == '-')
             && tt.len() > 2;
         if is_heading {
             section = tt.to_string();
@@ -692,7 +803,11 @@ pub(crate) fn filter_man(output: &str) -> String {
             continue;
         }
         // page header/footer, e.g. `LS(1)   User Commands   LS(1)`
-        if !t.starts_with(' ') && tt.contains('(') && tt.contains(')') && tt.split_whitespace().count() <= 6 {
+        if !t.starts_with(' ')
+            && tt.contains('(')
+            && tt.contains(')')
+            && tt.split_whitespace().count() <= 6
+        {
             continue;
         }
         if section.starts_with("OPTIONS") {
@@ -717,7 +832,11 @@ pub(crate) fn filter_man(output: &str) -> String {
     if out.is_empty() {
         return generic(output);
     }
-    cap_lines(out.iter().map(|s| s.as_str()), l.passthrough_max_lines, "lines")
+    cap_lines(
+        out.iter().map(|s| s.as_str()),
+        l.passthrough_max_lines,
+        "lines",
+    )
 }
 
 // ─── act / generic lint ───────────────────────────────────────────────────────
@@ -762,7 +881,11 @@ pub(crate) fn filter_act(output: &str) -> String {
             failing = Some(job);
             continue;
         }
-        if body.contains("docker") || body.starts_with('🐳') || body.starts_with('⭐') || body.starts_with("⚙") {
+        if body.contains("docker")
+            || body.starts_with('🐳')
+            || body.starts_with('⭐')
+            || body.starts_with("⚙")
+        {
             continue;
         }
     }
@@ -797,11 +920,22 @@ pub(crate) fn filter_lint(output: &str) -> String {
         let ln = it.next().unwrap_or("").trim();
         if !path.is_empty() && !ln.is_empty() && ln.chars().all(|c| c.is_ascii_digit()) {
             let third = it.next().unwrap_or("");
-            let (pos, msg) = if third.trim().chars().all(|c| c.is_ascii_digit()) && !third.trim().is_empty() {
-                (format!("{}:{}", ln, third.trim()), it.next().unwrap_or("").trim().to_string())
-            } else {
-                (ln.to_string(), format!("{}{}", third, it.next().map(|r| format!(":{}", r)).unwrap_or_default()))
-            };
+            let (pos, msg) =
+                if third.trim().chars().all(|c| c.is_ascii_digit()) && !third.trim().is_empty() {
+                    (
+                        format!("{}:{}", ln, third.trim()),
+                        it.next().unwrap_or("").trim().to_string(),
+                    )
+                } else {
+                    (
+                        ln.to_string(),
+                        format!(
+                            "{}{}",
+                            third,
+                            it.next().map(|r| format!(":{}", r)).unwrap_or_default()
+                        ),
+                    )
+                };
             count += 1;
             let entry = format!("  {}  {}", pos, truncate(&squeeze_ws(&msg), 200));
             match files.iter_mut().find(|(p, _)| *p == path) {
@@ -837,7 +971,11 @@ pub(crate) fn filter_lint(output: &str) -> String {
         out.push(more(dropped, "diagnostics"));
     }
     out.extend(cap_vec(other, 10, "lines"));
-    out.push(format!("lint: {} in {}", plural(count, "issue"), plural(files.len(), "file")));
+    out.push(format!(
+        "lint: {} in {}",
+        plural(count, "issue"),
+        plural(files.len(), "file")
+    ));
     out.join("\n")
 }
 
@@ -847,7 +985,10 @@ mod tests {
 
     #[test]
     fn curl_json_body_is_compacted() {
-        let out = filter_curl(&["-s", "http://x/health"], "{\"status\":\"ok\",\"mcp\":true,\"version\":\"2024-11-05\"}");
+        let out = filter_curl(
+            &["-s", "http://x/health"],
+            "{\"status\":\"ok\",\"mcp\":true,\"version\":\"2024-11-05\"}",
+        );
         assert!(out.contains("status: ok"), "{}", out);
         assert!(out.contains("mcp: true"), "{}", out);
     }
@@ -859,7 +1000,11 @@ mod tests {
             "HTTP/2 200 \ncontent-type: text/html; charset=UTF-8\ndate: Tue, 09 Sep 2026 08:00:00 GMT\nserver: ECAcc\nx-ratelimit-remaining: 59\nalt-svc: h3=\":443\"\ncontent-length: 1256",
         );
         assert!(out.contains("HTTP/2 200"), "{}", out);
-        assert!(out.contains("content-type: text/html; charset=UTF-8"), "{}", out);
+        assert!(
+            out.contains("content-type: text/html; charset=UTF-8"),
+            "{}",
+            out
+        );
         assert!(out.contains("x-ratelimit-remaining: 59"), "{}", out);
         assert!(out.contains("content-length: 1256"), "{}", out);
         assert!(!out.contains("alt-svc"), "{}", out);
@@ -874,7 +1019,10 @@ mod tests {
         );
         assert!(v.contains("Connection refused"), "{}", v);
         assert!(v.contains("curl: (7)"), "{}", v);
-        let html = filter_curl(&["-s", "https://example.com"], "<html><head><title>Example Domain</title><style>a{}</style></head><body><h1>Example Domain</h1><p>Use in docs.</p><script>x()</script></body></html>");
+        let html = filter_curl(
+            &["-s", "https://example.com"],
+            "<html><head><title>Example Domain</title><style>a{}</style></head><body><h1>Example Domain</h1><p>Use in docs.</p><script>x()</script></body></html>",
+        );
         assert!(html.contains("title: Example Domain"), "{}", html);
         assert!(html.contains("Example Domain Use in docs."), "{}", html);
         assert!(!html.contains("x()"), "{}", html);
@@ -889,7 +1037,9 @@ mod tests {
         assert!(out.contains("[200 OK]"), "{}", out);
         assert!(out.contains("(1256"), "{}", out);
         assert!(!out.contains("Resolving"), "{}", out);
-        let err = filter_wget("--2026-09-09--  https://x/404\nHTTP request sent, awaiting response... 404 Not Found\nERROR 404: Not Found.");
+        let err = filter_wget(
+            "--2026-09-09--  https://x/404\nHTTP request sent, awaiting response... 404 Not Found\nERROR 404: Not Found.",
+        );
         assert!(err.contains("ERROR 404: Not Found."), "{}", err);
     }
 
@@ -898,23 +1048,40 @@ mod tests {
         let out = filter_ping(
             "PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.\n64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.048 ms\n64 bytes from 127.0.0.1: icmp_seq=2 ttl=64 time=0.052 ms\n\n--- 127.0.0.1 ping statistics ---\n2 packets transmitted, 2 received, 0% packet loss, time 1002ms\nrtt min/avg/max/mdev = 0.048/0.050/0.052/0.002 ms",
         );
-        assert!(out.starts_with("ping 127.0.0.1: 2 packets transmitted, 2 received, 0% packet loss"), "{}", out);
+        assert!(
+            out.starts_with("ping 127.0.0.1: 2 packets transmitted, 2 received, 0% packet loss"),
+            "{}",
+            out
+        );
         assert!(out.contains("rtt min/avg/max/mdev"), "{}", out);
         assert!(!out.contains("icmp_seq"), "{}", out);
     }
 
     #[test]
     fn ps_drops_kernel_threads_and_announces_cap() {
-        let mut raw = String::from("USER   PID  %CPU %MEM    VSZ   RSS TTY   STAT START   TIME COMMAND\n");
+        let mut raw =
+            String::from("USER   PID  %CPU %MEM    VSZ   RSS TTY   STAT START   TIME COMMAND\n");
         raw.push_str("root     1   0.0  0.1 168000 12000 ?     Ss   08:00   0:01 /sbin/init\n");
         for i in 0..5 {
-            raw.push_str(&format!("root    {}   0.0  0.0      0     0 ?        I<   08:00   0:00 [kworker/{}:0H]\n", 100 + i, i));
+            raw.push_str(&format!(
+                "root    {}   0.0  0.0      0     0 ?        I<   08:00   0:00 [kworker/{}:0H]\n",
+                100 + i,
+                i
+            ));
         }
         for i in 0..300 {
-            raw.push_str(&format!("u      {}   0.1  0.2  50000  8000 ?        Sl   08:00   0:00 proc{}\n", 1000 + i, i));
+            raw.push_str(&format!(
+                "u      {}   0.1  0.2  50000  8000 ?        Sl   08:00   0:00 proc{}\n",
+                1000 + i,
+                i
+            ));
         }
         let out = filter_ps(&["aux"], &raw);
-        assert!(out.starts_with("USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND"), "{}", out);
+        assert!(
+            out.starts_with("USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND"),
+            "{}",
+            out
+        );
         assert!(out.contains("/sbin/init"), "{}", out);
         assert!(out.contains("(5 kernel threads omitted)"), "{}", out);
         assert!(has_truncation(&out), "{}", out);
@@ -922,11 +1089,15 @@ mod tests {
 
     #[test]
     fn ss_sorts_by_port_and_df_drops_pseudo_filesystems() {
-        let ss = filter_ss("Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\ntcp   LISTEN 0      4096   127.0.0.1:27182     0.0.0.0:*  users:((\"prism\"))\ntcp   LISTEN 0      511    0.0.0.0:80          0.0.0.0:*  users:((\"nginx\"))");
+        let ss = filter_ss(
+            "Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\ntcp   LISTEN 0      4096   127.0.0.1:27182     0.0.0.0:*  users:((\"prism\"))\ntcp   LISTEN 0      511    0.0.0.0:80          0.0.0.0:*  users:((\"nginx\"))",
+        );
         let lines: Vec<&str> = ss.lines().collect();
         assert!(lines[1].contains(":80"), "{}", ss);
         assert!(lines[2].contains(":27182"), "{}", ss);
-        let df = filter_df("Filesystem      Size  Used Avail Use% Mounted on\ntmpfs           1.6G  2.4M  1.6G   1% /run\n/dev/nvme0n1p2  468G  372G   72G  84% /\n/dev/loop12      64M   64M     0 100% /snap/core20/2318");
+        let df = filter_df(
+            "Filesystem      Size  Used Avail Use% Mounted on\ntmpfs           1.6G  2.4M  1.6G   1% /run\n/dev/nvme0n1p2  468G  372G   72G  84% /\n/dev/loop12      64M   64M     0 100% /snap/core20/2318",
+        );
         assert!(df.contains("/dev/nvme0n1p2 468G 372G 72G 84% /"), "{}", df);
         assert!(df.contains("(2 tmpfs/loop filesystems omitted)"), "{}", df);
     }
@@ -937,7 +1108,9 @@ mod tests {
         let first = du.lines().next().unwrap();
         assert!(first.starts_with("11G"), "{}", du);
         assert!(du.lines().last().unwrap().starts_with("4.0K"), "{}", du);
-        let free = filter_free("               total        used        free      shared  buff/cache   available\nMem:            15Gi        10Gi       1.0Gi       300Mi       4.0Gi       5.0Gi\nSwap:          4.0Gi       1.0Gi       3.0Gi");
+        let free = filter_free(
+            "               total        used        free      shared  buff/cache   available\nMem:            15Gi        10Gi       1.0Gi       300Mi       4.0Gi       5.0Gi\nSwap:          4.0Gi       1.0Gi       3.0Gi",
+        );
         assert!(free.contains("mem: total 15Gi, used 10Gi"), "{}", free);
         assert!(free.contains("swap: total 4.0Gi"), "{}", free);
     }
@@ -963,7 +1136,11 @@ mod tests {
             "  UNIT              LOAD   ACTIVE SUB     DESCRIPTION\n  dbus.service      loaded active running D-Bus User Message Bus\n  dconf.service     loaded active running User preferences database\n\nLOAD   = Reflects whether the unit definition was properly loaded.\nACTIVE = The high-level unit activation state.\n\n2 loaded units listed.",
         );
         assert!(out.contains("UNIT LOAD ACTIVE SUB DESCRIPTION"), "{}", out);
-        assert!(out.contains("dbus.service loaded active running"), "{}", out);
+        assert!(
+            out.contains("dbus.service loaded active running"),
+            "{}",
+            out
+        );
         assert!(out.contains("(2 listed, legend dropped)"), "{}", out);
         assert!(!out.contains("Reflects whether"), "{}", out);
     }
@@ -976,7 +1153,11 @@ mod tests {
         }
         raw.push_str("Sep 09 08:15:00 myhost prism[1234]: ERROR upstream refused\n");
         let out = filter_journalctl(&raw);
-        assert!(out.contains("08:14:12 prism: heartbeat ok  (×50)"), "{}", out);
+        assert!(
+            out.contains("08:14:12 prism: heartbeat ok  (×50)"),
+            "{}",
+            out
+        );
         assert!(out.contains("ERROR upstream refused"), "{}", out);
         assert!(out.contains("(1 boot markers dropped)"), "{}", out);
         assert!(!out.contains("myhost"), "{}", out);
@@ -984,7 +1165,9 @@ mod tests {
 
     #[test]
     fn env_masks_secrets_sorts_and_drops_ls_colors() {
-        let out = filter_env("PATH=/usr/bin:/bin\nGITHUB_TOKEN=ghp_realsecretvalue\nAWS_SECRET_ACCESS_KEY=abcd\nLS_COLORS=rs=0:di=01;34:ln=01;36\nHOME=/home/u\nDB_PASSWORD=hunter2");
+        let out = filter_env(
+            "PATH=/usr/bin:/bin\nGITHUB_TOKEN=ghp_realsecretvalue\nAWS_SECRET_ACCESS_KEY=abcd\nLS_COLORS=rs=0:di=01;34:ln=01;36\nHOME=/home/u\nDB_PASSWORD=hunter2",
+        );
         assert!(out.contains("GITHUB_TOKEN=***"), "{}", out);
         assert!(out.contains("AWS_SECRET_ACCESS_KEY=***"), "{}", out);
         assert!(out.contains("DB_PASSWORD=***"), "{}", out);
@@ -993,7 +1176,11 @@ mod tests {
         assert!(out.contains("LS_COLORS=[dropped]"), "{}", out);
         assert!(out.contains("PATH=/usr/bin:/bin"), "{}", out);
         let lines: Vec<&str> = out.lines().collect();
-        assert!(lines.windows(2).all(|w| w[0] <= w[1]), "not sorted: {}", out);
+        assert!(
+            lines.windows(2).all(|w| w[0] <= w[1]),
+            "not sorted: {}",
+            out
+        );
     }
 
     #[test]
@@ -1007,17 +1194,29 @@ mod tests {
         assert!(out.contains("-a, --all"), "{}", out);
         assert!(!out.contains("Richard M. Stallman"), "{}", out);
         assert!(!out.contains("Free Software Foundation"), "{}", out);
-        assert!(out.contains("more sections: AUTHOR, COPYRIGHT, SEE ALSO"), "{}", out);
+        assert!(
+            out.contains("more sections: AUTHOR, COPYRIGHT, SEE ALSO"),
+            "{}",
+            out
+        );
     }
 
     #[test]
     fn act_summarises_jobs_and_lint_groups_by_file() {
-        let act = filter_act("[build/test] 🚀  Start image=node:20\n[build/test]   ⭐ Run Main Set up\n[build/test]   ✅  Success - Main Set up\n[build/test]   ⭐ Run Main Tests\n[build/test]   ❌  Failure - Main Tests\n[build/test] exitcode '1': failure\n[build/lint] ✅  Success - Main Lint");
+        let act = filter_act(
+            "[build/test] 🚀  Start image=node:20\n[build/test]   ⭐ Run Main Set up\n[build/test]   ✅  Success - Main Set up\n[build/test]   ⭐ Run Main Tests\n[build/test]   ❌  Failure - Main Tests\n[build/test] exitcode '1': failure\n[build/lint] ✅  Success - Main Lint",
+        );
         assert!(act.contains("build/test:"), "{}", act);
         assert!(act.contains("failed"), "{}", act);
         assert!(act.contains("build/lint: 1 ok"), "{}", act);
-        let lint = filter_lint("src/a.js:12:5: Unexpected console statement\nsrc/a.js:20:1: Missing semicolon\nsrc/b.js:3:9: Unused var");
-        assert!(lint.contains("src/a.js\n  12:5  Unexpected console statement"), "{}", lint);
+        let lint = filter_lint(
+            "src/a.js:12:5: Unexpected console statement\nsrc/a.js:20:1: Missing semicolon\nsrc/b.js:3:9: Unused var",
+        );
+        assert!(
+            lint.contains("src/a.js\n  12:5  Unexpected console statement"),
+            "{}",
+            lint
+        );
         assert!(lint.contains("lint: 3 issues in 2 files"), "{}", lint);
     }
 

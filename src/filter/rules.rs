@@ -134,12 +134,19 @@ pub fn load_from(dir: &std::path::Path) -> Rules {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            matches!(p.extension().and_then(|e| e.to_str()), Some("yaml") | Some("yml"))
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("yaml") | Some("yml")
+            )
         })
         .collect();
     paths.sort();
     for path in paths {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
@@ -288,7 +295,10 @@ fn shape(action: &Action, output: &str, cap: usize) -> String {
         }
         Shape::Dedupe => {
             let lines = dedupe_consecutive(
-                output.lines().filter(|l| !l.trim().is_empty()).map(String::from),
+                output
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(String::from),
             );
             cap_vec(lines, cap, "lines").join("\n")
         }
@@ -297,7 +307,7 @@ fn shape(action: &Action, output: &str, cap: usize) -> String {
             let lines: Vec<String> = output
                 .lines()
                 .filter(|l| is_alert_line(l))
-                .map(|l| squeeze_ws(l))
+                .map(squeeze_ws)
                 .collect();
             if lines.is_empty() {
                 return generic(output);
@@ -357,15 +367,20 @@ mod tests {
             "tool: nomad\nsubcommands:\n  status: { shape: table, cap: list_max_lines }\n",
         )]);
         assert!(r.errors.is_empty(), "{:?}", r.errors);
-        let out = apply_with(&r, "nomad", &["status"], "ID    Type\nweb   service\n", false)
-            .expect("rule should apply");
+        let out = apply_with(
+            &r,
+            "nomad",
+            &["status"],
+            "ID    Type\nweb   service\n",
+            false,
+        )
+        .expect("rule should apply");
         assert_eq!(out, "ID Type\nweb service");
     }
 
     #[test]
     fn a_rule_without_override_does_not_preempt_a_builtin() {
-        let (_d, r) =
-            rules_from(&[("git.yaml", "tool: git\ndefault: { shape: generic }\n")]);
+        let (_d, r) = rules_from(&[("git.yaml", "tool: git\ndefault: { shape: generic }\n")]);
         // The dispatch table asks for overrides first; this rule must decline.
         assert!(apply_with(&r, "git", &["status"], "x", true).is_none());
         // …and only take effect in the fallthrough position.
@@ -378,14 +393,20 @@ mod tests {
             "git.yaml",
             "tool: git\noverride: true\ndefault: { shape: raw }\n",
         )]);
-        assert_eq!(apply_with(&r, "git", &["status"], "kept\n", true).as_deref(), Some("kept\n"));
+        assert_eq!(
+            apply_with(&r, "git", &["status"], "kept\n", true).as_deref(),
+            Some("kept\n")
+        );
     }
 
     #[test]
     fn a_typo_is_a_reported_error_not_a_silent_no_op() {
         let (_d, r) = rules_from(&[
             ("bad-shape.yaml", "tool: a\ndefault: { shape: tabel }\n"),
-            ("bad-cap.yaml", "tool: b\ndefault: { shape: table, cap: no_such_limit }\n"),
+            (
+                "bad-cap.yaml",
+                "tool: b\ndefault: { shape: table, cap: no_such_limit }\n",
+            ),
             ("bad-key.yaml", "tool: c\ndefualt: { shape: table }\n"),
             ("ok.yaml", "tool: d\ndefault: { shape: table }\n"),
         ]);
@@ -411,7 +432,10 @@ mod tests {
         .unwrap();
         assert!(out.contains("started (2): job/web, job/api"), "{out}");
         assert!(out.contains("updated (1): job/db"), "{out}");
-        assert!(out.contains("something odd"), "leftovers must survive: {out}");
+        assert!(
+            out.contains("something odd"),
+            "leftovers must survive: {out}"
+        );
     }
 
     #[test]

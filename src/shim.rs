@@ -37,7 +37,10 @@ pub fn shim_dir() -> PathBuf {
 /// Tools to shim: everything with a real filter, plus whatever the user's YAML rules
 /// add, so a rule file is enough to get a tool intercepted end to end.
 pub fn shimmable() -> Vec<String> {
-    let mut v: Vec<String> = crate::filter::FILTERED_TOOLS.iter().map(|s| s.to_string()).collect();
+    let mut v: Vec<String> = crate::filter::FILTERED_TOOLS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     for t in crate::filter::loaded_rules().tools() {
         if !v.iter().any(|x| x == t) {
             v.push(t.to_string());
@@ -81,12 +84,10 @@ pub struct Report {
 }
 
 fn on_path(tool: &str, path: &str) -> bool {
-    path.split(':')
-        .filter(|d| !d.is_empty())
-        .any(|d| {
-            let p = Path::new(d).join(tool);
-            p.is_file() || p.is_symlink()
-        })
+    path.split(':').filter(|d| !d.is_empty()).any(|d| {
+        let p = Path::new(d).join(tool);
+        p.is_file() || p.is_symlink()
+    })
 }
 
 /// Write a shim for every filtered tool that exists on this machine.
@@ -98,7 +99,10 @@ pub fn install() -> Result<Report> {
     // ever find the shims it wrote last time.
     let clean = strip_from_path(&std::env::var("PATH").unwrap_or_default());
 
-    let mut report = Report { dir: dir.clone(), ..Default::default() };
+    let mut report = Report {
+        dir: dir.clone(),
+        ..Default::default()
+    };
     if is_build_artifact(&prism) {
         report.volatile_binary = Some(prism.clone());
     }
@@ -152,11 +156,15 @@ fn set_executable(_path: &Path) -> Result<()> {
 /// name collision cannot make this delete something a user put there.
 pub fn uninstall() -> Result<usize> {
     let dir = shim_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
     let mut n = 0;
     for e in entries.flatten() {
         let p = e.path();
-        let ours = std::fs::read_to_string(&p).map(|s| s.contains(MARKER)).unwrap_or(false);
+        let ours = std::fs::read_to_string(&p)
+            .map(|s| s.contains(MARKER))
+            .unwrap_or(false);
         if ours && std::fs::remove_file(&p).is_ok() {
             n += 1;
         }
@@ -180,20 +188,30 @@ pub fn status() -> Status {
         .map(|es| {
             es.flatten()
                 .filter(|e| {
-                    std::fs::read_to_string(e.path()).map(|s| s.contains(MARKER)).unwrap_or(false)
+                    std::fs::read_to_string(e.path())
+                        .map(|s| s.contains(MARKER))
+                        .unwrap_or(false)
                 })
                 .count()
         })
         .unwrap_or(0);
     let path = std::env::var("PATH").unwrap_or_default();
-    Status { active: path_leads_with(&path, &dir), dir, installed, mode: mode() }
+    Status {
+        active: path_leads_with(&path, &dir),
+        dir,
+        installed,
+        mode: mode(),
+    }
 }
 
 /// True when `dir` appears on `path` ahead of any other entry — the only arrangement in
 /// which the shims actually win the lookup.
 fn path_leads_with(path: &str, dir: &Path) -> bool {
     let target = dir.to_string_lossy();
-    path.split(':').find(|d| !d.is_empty()).map(|d| d == target).unwrap_or(false)
+    path.split(':')
+        .find(|d| !d.is_empty())
+        .map(|d| d == target)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +280,11 @@ mod tests {
         ] {
             assert!(is_build_artifact(Path::new(p)), "{p}");
         }
-        for p in ["/usr/local/bin/prism", "/home/u/.local/bin/prism", "/opt/prism/bin/prism"] {
+        for p in [
+            "/usr/local/bin/prism",
+            "/home/u/.local/bin/prism",
+            "/opt/prism/bin/prism",
+        ] {
             assert!(!is_build_artifact(Path::new(p)), "{p}");
         }
         // a directory merely named "release" outside a target/ tree is fine
@@ -288,8 +310,14 @@ mod tests {
     fn the_tty_decides_who_is_reading() {
         // A person at a terminal gets the real tool; an agent reading a pipe gets the
         // filtered form. This is the whole interactive-command story.
-        assert!(!should_filter(Mode::Auto, true, 0), "a human at a tty must see raw output");
-        assert!(should_filter(Mode::Auto, false, 0), "a pipe means an agent is reading");
+        assert!(
+            !should_filter(Mode::Auto, true, 0),
+            "a human at a tty must see raw output"
+        );
+        assert!(
+            should_filter(Mode::Auto, false, 0),
+            "a pipe means an agent is reading"
+        );
         assert!(should_filter(Mode::Always, true, 0));
         assert!(!should_filter(Mode::Off, false, 0));
         // recursion guard beats every mode
@@ -332,7 +360,10 @@ mod tests {
         let s = shim_script(Path::new("/usr/local/bin/prism"), "cargo");
         assert!(s.starts_with("#!/bin/sh\n"));
         assert!(s.contains(MARKER));
-        assert!(s.contains(r#"exec "/usr/local/bin/prism" cmd cargo "$@""#), "{s}");
+        assert!(
+            s.contains(r#"exec "/usr/local/bin/prism" cmd cargo "$@""#),
+            "{s}"
+        );
         // no baked-in tool path: resolution must stay dynamic for nvm/rbenv/pyenv
         assert!(!s.contains("/usr/bin/cargo"), "{s}");
     }
@@ -346,7 +377,11 @@ mod tests {
         let theirs = dir.join("please-keep");
         std::fs::write(&theirs, "#!/bin/sh\necho hand written\n").unwrap();
         // uninstall() works on shim_dir(); exercise the same predicate directly
-        let ours = |p: &Path| std::fs::read_to_string(p).map(|s| s.contains(MARKER)).unwrap_or(false);
+        let ours = |p: &Path| {
+            std::fs::read_to_string(p)
+                .map(|s| s.contains(MARKER))
+                .unwrap_or(false)
+        };
         assert!(ours(&mine));
         assert!(!ours(&theirs));
         let _ = std::fs::remove_dir_all(&dir);

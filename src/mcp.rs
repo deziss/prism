@@ -22,14 +22,13 @@ use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    schemars,
+    schemars, tool, tool_handler, tool_router,
     transport::{
         io::stdio,
         streamable_http_server::{
             StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
         },
     },
-    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
@@ -45,10 +44,13 @@ async fn memory_search_str(query: &str) -> anyhow::Result<String> {
     if results.is_empty() {
         Ok(format!("No memories found for: {}", query))
     } else {
-        let lines: Vec<String> = results.iter().map(|b| {
-            let preview = &b.content[..b.content.len().min(200)];
-            format!("[{}] {}: {}", b.layer, b.category, preview)
-        }).collect();
+        let lines: Vec<String> = results
+            .iter()
+            .map(|b| {
+                let preview = &b.content[..b.content.len().min(200)];
+                format!("[{}] {}: {}", b.layer, b.category, preview)
+            })
+            .collect();
         Ok(lines.join("\n"))
     }
 }
@@ -60,11 +62,18 @@ async fn memory_save_str(key: &str, value: &str) -> anyhow::Result<String> {
     Ok(format!("Saved: {}", key))
 }
 
-async fn graph_query_str(query: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+async fn graph_query_str(
+    query: &str,
+    custom_path: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     if let Some((path, matches)) = crate::knowledge::query_graph_data(query, 8, custom_path) {
         if !matches.is_empty() {
             let mut lines = vec![format!("Graph Query Results (Source: {}):", path.display())];
-            lines.extend(matches.iter().map(|n| format!("  • [{}] {} (path: {})", n.kind, n.label, n.path)));
+            lines.extend(
+                matches
+                    .iter()
+                    .map(|n| format!("  • [{}] {} (path: {})", n.kind, n.label, n.path)),
+            );
             return Ok(lines.join("\n"));
         }
     }
@@ -73,17 +82,30 @@ async fn graph_query_str(query: &str, custom_path: Option<&std::path::Path>) -> 
     if results.is_empty() {
         Ok(format!("No graph results for: {}", query))
     } else {
-        Ok(format!("Knowledge Graph results:\n{}", results.iter().map(|r| format!("  • {}", r)).collect::<Vec<_>>().join("\n")))
+        Ok(format!(
+            "Knowledge Graph results:\n{}",
+            results
+                .iter()
+                .map(|r| format!("  • {}", r))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
     }
 }
 
-async fn graph_explain_str(node: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+async fn graph_explain_str(
+    node: &str,
+    custom_path: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     let Some((path, exp)) = crate::knowledge::explain_node_data(node, custom_path) else {
-        return Ok(if crate::knowledge::find_active_graph(custom_path).is_none() {
-            "No active graph found. Run `prism graph index` or provide a graph path.".to_string()
-        } else {
-            format!("Node '{}' not found in graph.", node)
-        });
+        return Ok(
+            if crate::knowledge::find_active_graph(custom_path).is_none() {
+                "No active graph found. Run `prism graph index` or provide a graph path."
+                    .to_string()
+            } else {
+                format!("Node '{}' not found in graph.", node)
+            },
+        );
     };
 
     let mut lines = Vec::new();
@@ -93,46 +115,89 @@ async fn graph_explain_str(node: &str, custom_path: Option<&std::path::Path>) ->
     if let Some(comm) = exp.node.community {
         lines.push(format!("Community: {}", comm));
     }
-    lines.push(format!("Total Degree: {}", exp.outgoing.len() + exp.incoming.len()));
+    lines.push(format!(
+        "Total Degree: {}",
+        exp.outgoing.len() + exp.incoming.len()
+    ));
 
     if !exp.outgoing.is_empty() {
         lines.push(format!("\nOutgoing Connections ({}):", exp.outgoing.len()));
         for (target, kind, weight) in exp.outgoing.iter().take(15) {
-            lines.push(format!("  --> {} [{}] (w: {:.1}) in {}", target.label, kind, weight, target.path));
+            lines.push(format!(
+                "  --> {} [{}] (w: {:.1}) in {}",
+                target.label, kind, weight, target.path
+            ));
         }
     }
     if !exp.incoming.is_empty() {
         lines.push(format!("\nIncoming Connections ({}):", exp.incoming.len()));
         for (source, kind, weight) in exp.incoming.iter().take(15) {
-            lines.push(format!("  <-- {} [{}] (w: {:.1}) in {}", source.label, kind, weight, source.path));
+            lines.push(format!(
+                "  <-- {} [{}] (w: {:.1}) in {}",
+                source.label, kind, weight, source.path
+            ));
         }
     }
     Ok(lines.join("\n"))
 }
 
-async fn graph_path_str(from: &str, to: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+async fn graph_path_str(
+    from: &str,
+    to: &str,
+    custom_path: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     match crate::knowledge::shortest_path_data(from, to, custom_path) {
-        Some((_, steps)) if steps.is_empty() => Ok(format!("Identical node: '{}' is '{}'.", from, to)),
+        Some((_, steps)) if steps.is_empty() => {
+            Ok(format!("Identical node: '{}' is '{}'.", from, to))
+        }
         Some((path, steps)) => {
-            let mut lines = vec![format!("Shortest path in {} ({} hops):", path.display(), steps.len())];
+            let mut lines = vec![format!(
+                "Shortest path in {} ({} hops):",
+                path.display(),
+                steps.len()
+            )];
             for (i, (src, rel, tgt)) in steps.iter().enumerate() {
-                lines.push(format!("  [{}] {} --[{}]--> {}", i + 1, src.label, rel, tgt.label));
+                lines.push(format!(
+                    "  [{}] {} --[{}]--> {}",
+                    i + 1,
+                    src.label,
+                    rel,
+                    tgt.label
+                ));
             }
             Ok(lines.join("\n"))
         }
-        None if crate::knowledge::find_active_graph(custom_path).is_none() => Ok("No active graph found.".to_string()),
-        None => Ok(format!("No path found between '{}' and '{}' in graph.", from, to)),
+        None if crate::knowledge::find_active_graph(custom_path).is_none() => {
+            Ok("No active graph found.".to_string())
+        }
+        None => Ok(format!(
+            "No path found between '{}' and '{}' in graph.",
+            from, to
+        )),
     }
 }
 
-async fn graph_god_nodes_str(top: usize, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+async fn graph_god_nodes_str(
+    top: usize,
+    custom_path: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     let Some((path, hubs)) = crate::knowledge::god_nodes_data(top, custom_path) else {
         return Ok("No active graph found.".to_string());
     };
 
-    let mut lines = vec![format!("God Nodes / Architectural Hubs (Source: {}):", path.display())];
+    let mut lines = vec![format!(
+        "God Nodes / Architectural Hubs (Source: {}):",
+        path.display()
+    )];
     for (i, (node, degree)) in hubs.iter().enumerate() {
-        lines.push(format!("  {:2}. {:<25} {:>3} edges [{}] in {}", i + 1, node.label, degree, node.kind, node.path));
+        lines.push(format!(
+            "  {:2}. {:<25} {:>3} edges [{}] in {}",
+            i + 1,
+            node.label,
+            degree,
+            node.kind,
+            node.path
+        ));
     }
     Ok(lines.join("\n"))
 }
@@ -142,13 +207,27 @@ async fn graph_god_nodes_str(top: usize, custom_path: Option<&std::path::Path>) 
 // this always matches whatever schemars version the SDK itself was built against)
 // drives the `inputSchema` the client sees; `Deserialize` drives the actual parse.
 
-fn default_model() -> String { "gpt-4".to_string() }
-fn default_read_mode() -> String { "skeleton".to_string() }
-fn default_top() -> usize { 10 }
-fn default_ratio() -> f64 { 0.7 }
-fn default_cache_model() -> String { "mcp".to_string() }
-fn default_limit() -> usize { 3 }
-fn default_index_path() -> String { ".".to_string() }
+fn default_model() -> String {
+    "gpt-4".to_string()
+}
+fn default_read_mode() -> String {
+    "skeleton".to_string()
+}
+fn default_top() -> usize {
+    10
+}
+fn default_ratio() -> f64 {
+    0.7
+}
+fn default_cache_model() -> String {
+    "mcp".to_string()
+}
+fn default_limit() -> usize {
+    3
+}
+fn default_index_path() -> String {
+    ".".to_string()
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CountTokensRequest {
@@ -307,26 +386,43 @@ impl Default for PrismMcpServer {
 #[tool_router]
 impl PrismMcpServer {
     pub fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+        Self {
+            tool_router: Self::tool_router(),
+        }
     }
 
-    #[tool(description = "Count tokens in text. Returns token count and estimated cost for common models.")]
-    async fn prism_count_tokens(&self, Parameters(req): Parameters<CountTokensRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Count tokens in text. Returns token count and estimated cost for common models."
+    )]
+    async fn prism_count_tokens(
+        &self,
+        Parameters(req): Parameters<CountTokensRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match analytics::count_tokens(&req.text, &req.model) {
             Ok(count) => {
                 let cost = analytics::estimate_cost(&req.model, count as u32, 0);
-                text_ok(format!("{} tokens ({} model)\nEstimated input cost: ${:.6}", count, req.model, cost))
+                text_ok(format!(
+                    "{} tokens ({} model)\nEstimated input cost: ${:.6}",
+                    count, req.model, cost
+                ))
             }
             Err(e) => text_err(format!("Error counting tokens: {e}")),
         }
     }
 
-    #[tool(description = "Intelligent 7-mode file reader. Modes: 'skeleton' (AST signatures, omits bodies, 70-85% savings), 'map' (outline), 'clean' (no comments), 'diff' (git diff against HEAD), 'lines' (range N-M), 'cached' (~15 token receipt if unchanged), 'full'.")]
-    async fn prism_read_file(&self, Parameters(req): Parameters<ReadFileRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Intelligent 7-mode file reader. Modes: 'skeleton' (AST signatures, omits bodies, 70-85% savings), 'map' (outline), 'clean' (no comments), 'diff' (git diff against HEAD), 'lines' (range N-M), 'cached' (~15 token receipt if unchanged), 'full'."
+    )]
+    async fn prism_read_file(
+        &self,
+        Parameters(req): Parameters<ReadFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let mode = if let Some(range) = &req.lines {
             crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
         } else {
-            req.mode.parse::<crate::reader::ReadMode>().unwrap_or(crate::reader::ReadMode::Skeleton)
+            req.mode
+                .parse::<crate::reader::ReadMode>()
+                .unwrap_or(crate::reader::ReadMode::Skeleton)
         };
         match crate::reader::read_file(std::path::Path::new(&req.path), mode, req.line_numbers) {
             Ok(out) => {
@@ -340,8 +436,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Filter raw shell/CLI command output using 65+ RTK-compatible filters (git, cargo, pytest, tsc, docker, k8s, etc.).")]
-    async fn prism_filter_cmd(&self, Parameters(req): Parameters<FilterCmdRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Filter raw shell/CLI command output using 65+ RTK-compatible filters (git, cargo, pytest, tsc, docker, k8s, etc.)."
+    )]
+    async fn prism_filter_cmd(
+        &self,
+        Parameters(req): Parameters<FilterCmdRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let parts: Vec<&str> = req.command.split_whitespace().collect();
         let cmd = parts.first().copied().unwrap_or("");
         let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
@@ -349,8 +450,13 @@ impl PrismMcpServer {
         text_ok(filtered.into_owned())
     }
 
-    #[tool(description = "Search PRISM Memory Palace for previously stored facts, code snippets, and context.")]
-    async fn prism_memory_search(&self, Parameters(req): Parameters<MemorySearchRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Search PRISM Memory Palace for previously stored facts, code snippets, and context."
+    )]
+    async fn prism_memory_search(
+        &self,
+        Parameters(req): Parameters<MemorySearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match memory_search_str(&req.query).await {
             Ok(s) => text_ok(s),
             Err(e) => text_err(format!("Memory search error: {e}")),
@@ -358,7 +464,10 @@ impl PrismMcpServer {
     }
 
     #[tool(description = "Save a key-value fact to PRISM Memory Palace for future retrieval.")]
-    async fn prism_memory_save(&self, Parameters(req): Parameters<MemorySaveRequest>) -> Result<CallToolResult, McpError> {
+    async fn prism_memory_save(
+        &self,
+        Parameters(req): Parameters<MemorySaveRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match memory_save_str(&req.key, &req.value).await {
             Ok(s) => text_ok(s),
             Err(e) => text_err(format!("Memory save error: {e}")),
@@ -376,8 +485,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Query the PRISM Knowledge Graph or any existing Graphify graph (graphify-out/graph.json) using Corrective RAG (CRAG).")]
-    async fn prism_graph_query(&self, Parameters(req): Parameters<GraphQueryRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Query the PRISM Knowledge Graph or any existing Graphify graph (graphify-out/graph.json) using Corrective RAG (CRAG)."
+    )]
+    async fn prism_graph_query(
+        &self,
+        Parameters(req): Parameters<GraphQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_query_str(&req.query, graph_path).await {
             Ok(s) => text_ok(s),
@@ -385,8 +499,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Explain a codebase node/symbol and inspect its incoming/outgoing dependencies (compatible with Graphify and PRISM graphs).")]
-    async fn prism_graph_explain(&self, Parameters(req): Parameters<GraphExplainRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Explain a codebase node/symbol and inspect its incoming/outgoing dependencies (compatible with Graphify and PRISM graphs)."
+    )]
+    async fn prism_graph_explain(
+        &self,
+        Parameters(req): Parameters<GraphExplainRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_explain_str(&req.node, graph_path).await {
             Ok(s) => text_ok(s),
@@ -394,8 +513,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Find the shortest dependency call/import path between two nodes in the codebase graph.")]
-    async fn prism_graph_path(&self, Parameters(req): Parameters<GraphPathRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Find the shortest dependency call/import path between two nodes in the codebase graph."
+    )]
+    async fn prism_graph_path(
+        &self,
+        Parameters(req): Parameters<GraphPathRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_path_str(&req.from, &req.to, graph_path).await {
             Ok(s) => text_ok(s),
@@ -403,8 +527,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "List the most connected architectural hub nodes in the graph (degree centrality).")]
-    async fn prism_graph_god_nodes(&self, Parameters(req): Parameters<GraphGodNodesRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "List the most connected architectural hub nodes in the graph (degree centrality)."
+    )]
+    async fn prism_graph_god_nodes(
+        &self,
+        Parameters(req): Parameters<GraphGodNodesRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let graph_path = req.graph.as_deref().map(std::path::Path::new);
         match graph_god_nodes_str(req.top, graph_path).await {
             Ok(s) => text_ok(s),
@@ -412,24 +541,42 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Import and activate any existing Graphify (graphify-out/graph.json) or NetworkX graph into PRISM.")]
-    async fn prism_graph_import(&self, Parameters(req): Parameters<GraphImportRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Import and activate any existing Graphify (graphify-out/graph.json) or NetworkX graph into PRISM."
+    )]
+    async fn prism_graph_import(
+        &self,
+        Parameters(req): Parameters<GraphImportRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match crate::knowledge::import_graph(std::path::Path::new(&req.path)).await {
-            Ok(_) => text_ok(format!("Successfully imported and activated graph from: {}", req.path)),
+            Ok(_) => text_ok(format!(
+                "Successfully imported and activated graph from: {}",
+                req.path
+            )),
             Err(e) => text_err(format!("Graph import error: {e}")),
         }
     }
 
-    #[tool(description = "Index a codebase directory into the PRISM GraphRAG dependency graph (extracts files, functions, types, and imports).")]
-    async fn prism_graph_index(&self, Parameters(req): Parameters<GraphIndexRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Index a codebase directory into the PRISM GraphRAG dependency graph (extracts files, functions, types, and imports)."
+    )]
+    async fn prism_graph_index(
+        &self,
+        Parameters(req): Parameters<GraphIndexRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match crate::knowledge::index_codebase(std::path::Path::new(&req.path)).await {
             Ok(_) => text_ok(format!("Successfully indexed codebase at '{}'", req.path)),
             Err(e) => text_err(format!("Indexing error: {e}")),
         }
     }
 
-    #[tool(description = "Encode a JSON array/object into TOON (Token-Oriented Object Notation) — reduces token count by 25-45%.")]
-    async fn prism_toon_encode(&self, Parameters(req): Parameters<ToonEncodeRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Encode a JSON array/object into TOON (Token-Oriented Object Notation) — reduces token count by 25-45%."
+    )]
+    async fn prism_toon_encode(
+        &self,
+        Parameters(req): Parameters<ToonEncodeRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match serde_json::from_str::<serde_json::Value>(&req.json) {
             Ok(v) => match encode::encode_json_to_toon(&v) {
                 Ok(toon) => text_ok(toon),
@@ -439,8 +586,13 @@ impl PrismMcpServer {
         }
     }
 
-    #[tool(description = "Compress a long text prompt using BM25 sentence scoring — reduces token count by 30-50% while preserving key information.")]
-    async fn prism_compress(&self, Parameters(req): Parameters<CompressRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Compress a long text prompt using BM25 sentence scoring — reduces token count by 30-50% while preserving key information."
+    )]
+    async fn prism_compress(
+        &self,
+        Parameters(req): Parameters<CompressRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let result = crate::compress::compress(&req.text, req.ratio);
         text_ok(format!(
             "Compressed: {} → {} tokens ({:.0}% reduction)\n\n{}",
@@ -448,37 +600,61 @@ impl PrismMcpServer {
         ))
     }
 
-    #[tool(description = "Store a prompt-response pair into the PRISM Semantic Cache and TurboVec ANN vector index.")]
-    async fn prism_cache_save(&self, Parameters(req): Parameters<CacheSaveRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Store a prompt-response pair into the PRISM Semantic Cache and TurboVec ANN vector index."
+    )]
+    async fn prism_cache_save(
+        &self,
+        Parameters(req): Parameters<CacheSaveRequest>,
+    ) -> Result<CallToolResult, McpError> {
         if req.prompt.is_empty() || req.response.is_empty() {
             return text_err("prompt and response are required");
         }
         crate::cache::cache_response(&req.prompt, &req.response, &req.model);
-        text_ok(format!("Cached response in TurboVec for prompt: {}", req.prompt))
+        text_ok(format!(
+            "Cached response in TurboVec for prompt: {}",
+            req.prompt
+        ))
     }
 
-    #[tool(description = "Query the PRISM Semantic Cache using TurboVec ANN search for similar past prompts and responses.")]
-    async fn prism_cache_lookup(&self, Parameters(req): Parameters<CacheLookupRequest>) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Query the PRISM Semantic Cache using TurboVec ANN search for similar past prompts and responses."
+    )]
+    async fn prism_cache_lookup(
+        &self,
+        Parameters(req): Parameters<CacheLookupRequest>,
+    ) -> Result<CallToolResult, McpError> {
         if let Some(e) = crate::cache::open_error() {
             // An unreachable store is not an empty one; an agent must not read a
             // lock failure as "nothing cached".
-            return text_err(format!("Cache unavailable (store locked by another process): {e}"));
+            return text_err(format!(
+                "Cache unavailable (store locked by another process): {e}"
+            ));
         }
         let results = crate::cache::lookup_similar(&req.query, req.limit);
         if results.is_empty() {
             text_ok(format!("No cached entries found for: {}", req.query))
         } else {
-            let formatted = results.iter().map(|hit| {
-                format!(
-                    "[Cache: {} | {:.0}% match | model: {}] {}",
-                    hit.entry.key_hash, hit.score * 100.0, hit.entry.model.as_deref().unwrap_or("unknown"), hit.entry.response
-                )
-            }).collect::<Vec<_>>().join("\n---\n");
+            let formatted = results
+                .iter()
+                .map(|hit| {
+                    format!(
+                        "[Cache: {} | {:.0}% match | model: {}] {}",
+                        hit.entry.key_hash,
+                        hit.score * 100.0,
+                        hit.entry.model.as_deref().unwrap_or("unknown"),
+                        hit.entry.response
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n");
             text_ok(formatted)
         }
     }
 
-    #[tool(description = "Get a summary of PRISM token savings, cost economics, and semantic cache status.")]
+    #[tool(
+        description = "Get a summary of PRISM token savings, cost economics, and semantic cache status."
+    )]
     async fn prism_analytics_summary(&self) -> Result<CallToolResult, McpError> {
         let stats = crate::cache::get_cache_stats();
         text_ok(format!(
@@ -524,12 +700,19 @@ async fn require_bearer(
     if ok {
         next.run(req).await
     } else {
-        (axum::http::StatusCode::UNAUTHORIZED, "unauthorized — missing or invalid bearer token").into_response()
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "unauthorized — missing or invalid bearer token",
+        )
+            .into_response()
     }
 }
 
 async fn health() -> (axum::http::StatusCode, &'static str) {
-    (axum::http::StatusCode::OK, r#"{"status":"ok","mcp":true,"transport":"streamable-http"}"#)
+    (
+        axum::http::StatusCode::OK,
+        r#"{"status":"ok","mcp":true,"transport":"streamable-http"}"#,
+    )
 }
 
 // ── Server entrypoints ────────────────────────────────────────────────────────
@@ -548,7 +731,9 @@ async fn serve_stdio() -> Result<()> {
 /// explicit `--bind` and a bearer token (`--auth-token`, or the hub agent token from
 /// `prism hub enroll`) — the server refuses to start otherwise.
 async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result<()> {
-    let bind_ip: IpAddr = bind.parse().with_context(|| format!("invalid --bind address: {bind}"))?;
+    let bind_ip: IpAddr = bind
+        .parse()
+        .with_context(|| format!("invalid --bind address: {bind}"))?;
     let off_loopback = !bind_ip.is_loopback();
 
     let token = auth_token.or_else(|| crate::hub::load_credentials().map(|c| c.agent_token));
@@ -573,14 +758,18 @@ async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result
         router = router.layer(axum::middleware::from_fn_with_state(state, require_bearer));
         info!("PRISM MCP server: bearer auth required on /mcp");
     } else {
-        info!("PRISM MCP server: no auth token configured (loopback-only bind, so this is not a LAN exposure)");
+        info!(
+            "PRISM MCP server: no auth token configured (loopback-only bind, so this is not a LAN exposure)"
+        );
     }
     router = router.route("/health", axum::routing::any(health));
 
     let addr = SocketAddr::new(bind_ip, port);
     info!("PRISM MCP server (streamable HTTP, protocol 2026-07-28) on http://{addr}");
     if off_loopback {
-        info!("Add to the hub: a remote MCP client pointed at http://{addr}/mcp with the bearer token above");
+        info!(
+            "Add to the hub: a remote MCP client pointed at http://{addr}/mcp with the bearer token above"
+        );
     } else {
         info!("Add to Claude Code: claude mcp add prism --transport http http://{addr}/mcp");
     }
@@ -595,7 +784,12 @@ async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result
     Ok(())
 }
 
-pub async fn start_mcp_server(port: u16, stdio: bool, bind: String, auth_token: Option<String>) -> Result<()> {
+pub async fn start_mcp_server(
+    port: u16,
+    stdio: bool,
+    bind: String,
+    auth_token: Option<String>,
+) -> Result<()> {
     if stdio {
         serve_stdio().await
     } else {

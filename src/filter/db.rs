@@ -14,7 +14,11 @@ use std::sync::OnceLock;
 
 /// CRLF → LF so the line parsers see one record per line.
 fn normalize(s: &str) -> String {
-    if s.contains('\r') { s.replace("\r\n", "\n").replace('\r', "\n") } else { s.to_string() }
+    if s.contains('\r') {
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Glyphs that make up a horizontal rule (ASCII and box-drawing).
@@ -24,20 +28,26 @@ const CUT_CHARS: &str = "+┼┬┴├┤┌┐└┘╪╬╤╧╠╣╔╗╚
 /// Vertical cell separators.
 const BAR_CHARS: &str = "|│║";
 
-fn is_bar(c: char) -> bool { BAR_CHARS.contains(c) }
+fn is_bar(c: char) -> bool {
+    BAR_CHARS.contains(c)
+}
 
 /// `----+-----`, `+---+---+`, `─┼─`, `┌──┬──┐` … (needs at least one dash-like glyph).
 fn is_rule(line: &str) -> bool {
     let t = line.trim();
     t.len() >= 2
-        && t.chars().all(|c| RULE_CHARS.contains(c) || c == ' ' || is_bar(c))
+        && t.chars()
+            .all(|c| RULE_CHARS.contains(c) || c == ' ' || is_bar(c))
         && t.chars().any(|c| matches!(c, '-' | '─' | '═'))
 }
 
 /// Markdown table separator: `|----|:---:|`.
 fn is_md_rule(line: &str) -> bool {
     let t = line.trim();
-    t.starts_with('|') && t.len() >= 3 && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && t.contains('-')
+    t.starts_with('|')
+        && t.len() >= 3
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+        && t.contains('-')
 }
 
 /// Char indices of the column crossings in a rule line (`+`/`┼`; markdown `|`).
@@ -55,22 +65,43 @@ fn rule_cuts(line: &str) -> Vec<usize> {
 /// (multibyte display widths, wrapped values). `bordered` rows carry leading/trailing bars.
 fn slice_cells(line: &str, cuts: &[usize], bordered: bool) -> Vec<String> {
     let chars: Vec<char> = line.chars().collect();
-    let aligned = !cuts.is_empty() && cuts.iter().all(|&i| chars.get(i).is_some_and(|c| is_bar(*c)));
+    let aligned = !cuts.is_empty()
+        && cuts
+            .iter()
+            .all(|&i| chars.get(i).is_some_and(|c| is_bar(*c)));
     let mut cells: Vec<String> = if aligned {
         let mut out = Vec::new();
         let mut start = 0;
         for &i in cuts {
-            out.push(chars[start..i].iter().collect::<String>().trim().to_string());
+            out.push(
+                chars[start..i]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string(),
+            );
             start = i + 1;
         }
-        out.push(chars.get(start..).unwrap_or(&[]).iter().collect::<String>().trim().to_string());
+        out.push(
+            chars
+                .get(start..)
+                .unwrap_or(&[])
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        );
         out
     } else {
-        line.split(|c| is_bar(c)).map(|c| c.trim().to_string()).collect()
+        line.split(is_bar).map(|c| c.trim().to_string()).collect()
     };
     if bordered {
-        if cells.first().is_some_and(|c| c.is_empty()) { cells.remove(0); }
-        if cells.last().is_some_and(|c| c.is_empty()) { cells.pop(); }
+        if cells.first().is_some_and(|c| c.is_empty()) {
+            cells.remove(0);
+        }
+        if cells.last().is_some_and(|c| c.is_empty()) {
+            cells.pop();
+        }
     }
     cells
 }
@@ -96,20 +127,30 @@ fn drop_empty_columns(header: &mut Vec<String>, rows: &mut [Vec<String>]) {
     let keep: Vec<bool> = (0..width)
         .map(|i| rows.iter().any(|r| r.get(i).is_some_and(|c| !c.is_empty())))
         .collect();
-    if keep.iter().all(|k| *k) { return }
+    if keep.iter().all(|k| *k) {
+        return;
+    }
     let filter = |v: &mut Vec<String>| {
         let mut i = 0;
-        v.retain(|_| { let k = keep.get(i).copied().unwrap_or(true); i += 1; k });
+        v.retain(|_| {
+            let k = keep.get(i).copied().unwrap_or(true);
+            i += 1;
+            k
+        });
     };
     filter(header);
-    for r in rows.iter_mut() { filter(r) }
+    for r in rows.iter_mut() {
+        filter(r)
+    }
 }
 
 /// `key   | value` / `key: value` → `key: value` with padding squeezed.
 fn kv_line(line: &str, sep: char) -> Option<String> {
     let (k, v) = line.split_once(sep)?;
     let k = k.trim();
-    if k.is_empty() || k.contains(' ') { return None }
+    if k.is_empty() || k.contains(' ') {
+        return None;
+    }
     Some(format!("{}: {}", k, v.trim()))
 }
 
@@ -128,7 +169,9 @@ fn re(cell: &'static OnceLock<Regex>, pat: &str) -> &'static Regex {
 /// `-[ RECORD 3 ]----` (expanded display) → Some(3).
 fn psql_record_header(line: &str) -> Option<&str> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    re(&RE, r"^[-─]\[ RECORD (\d+) \][-─]*$").captures(line.trim()).map(|c| c.get(1).unwrap().as_str())
+    re(&RE, r"^[-─]\[ RECORD (\d+) \][-─]*$")
+        .captures(line.trim())
+        .map(|c| c.get(1).unwrap().as_str())
 }
 
 fn psql_banner(l: &str) -> bool {
@@ -150,12 +193,16 @@ fn psql_footer(l: &str) -> bool {
 /// Strip an interactive prompt (`mydb=# `, `mydb-> `, `mydb=> `) from an echoed line.
 fn psql_strip_prompt(l: &str) -> Option<&str> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    re(&RE, r"^[\w.-]+[=\-]?[#>] ?").find(l).map(|m| l[m.end()..].trim())
+    re(&RE, r"^[\w.-]+[=\-]?[#>] ?")
+        .find(l)
+        .map(|m| l[m.end()..].trim())
 }
 
 /// Looks like a row of the aligned table (leading pad or a bar somewhere).
 fn psql_is_row(l: &str) -> bool {
-    !l.trim().is_empty() && !psql_footer(l) && (l.starts_with(' ') || l.chars().next().is_some_and(is_bar) || l.chars().any(is_bar))
+    !l.trim().is_empty()
+        && !psql_footer(l)
+        && (l.starts_with(' ') || l.chars().next().is_some_and(is_bar) || l.chars().any(is_bar))
 }
 
 pub(crate) fn filter_psql(output: &str) -> String {
@@ -166,14 +213,23 @@ pub(crate) fn filter_psql(output: &str) -> String {
     while i < lines.len() {
         let line = lines[i];
         let t = line.trim();
-        if t.is_empty() { i += 1; continue }
+        if t.is_empty() {
+            i += 1;
+            continue;
+        }
 
         // aligned table: header line followed by a rule
-        if !is_rule(line) && psql_record_header(line).is_none()
-            && lines.get(i + 1).is_some_and(|n| is_rule(n) && !is_md_rule(n))
+        if !is_rule(line)
+            && psql_record_header(line).is_none()
+            && lines
+                .get(i + 1)
+                .is_some_and(|n| is_rule(n) && !is_md_rule(n))
         {
             let rule = lines[i + 1];
-            let bordered = rule.trim_start().starts_with(|c: char| CUT_CHARS.contains(c)) && line.trim_start().starts_with(is_bar);
+            let bordered = rule
+                .trim_start()
+                .starts_with(|c: char| CUT_CHARS.contains(c))
+                && line.trim_start().starts_with(is_bar);
             let cuts = rule_cuts(rule);
             // border=2 top rule sits above the header: already emitted? it was skipped as a rule below
             let mut header = slice_cells(line, &cuts, bordered);
@@ -182,16 +238,30 @@ pub(crate) fn filter_psql(output: &str) -> String {
             let mut footer: Option<&str> = None;
             while j < lines.len() {
                 let l = lines[j];
-                if is_rule(l) { j += 1; if bordered { break } else { continue } }
-                if psql_footer(l) { footer = Some(l.trim()); j += 1; break }
-                if !psql_is_row(l) { break }
+                if is_rule(l) {
+                    j += 1;
+                    if bordered { break } else { continue }
+                }
+                if psql_footer(l) {
+                    footer = Some(l.trim());
+                    j += 1;
+                    break;
+                }
+                if !psql_is_row(l) {
+                    break;
+                }
                 rows.push(slice_cells(l, &cuts, bordered));
                 j += 1;
             }
-            let describe = header.iter().any(|h| h == "Column") && header.iter().any(|h| h == "Type");
-            if describe { drop_empty_columns(&mut header, &mut rows) }
+            let describe =
+                header.iter().any(|h| h == "Column") && header.iter().any(|h| h == "Type");
+            if describe {
+                drop_empty_columns(&mut header, &mut rows)
+            }
             emit_table(Some(header), rows, &mut out);
-            if let Some(f) = footer { out.push(f.to_string()) }
+            if let Some(f) = footer {
+                out.push(f.to_string())
+            }
             i = j;
             continue;
         }
@@ -202,21 +272,34 @@ pub(crate) fn filter_psql(output: &str) -> String {
             let mut j = i + 1;
             while j < lines.len() {
                 let l = lines[j];
-                if l.trim().is_empty() || psql_record_header(l).is_some() || psql_footer(l) { break }
+                if l.trim().is_empty() || psql_record_header(l).is_some() || psql_footer(l) {
+                    break;
+                }
                 let sep = if l.contains('│') { '│' } else { '|' };
-                out.push(format!(" {}", kv_line(l, sep).unwrap_or_else(|| squeeze_ws(l))));
+                out.push(format!(
+                    " {}",
+                    kv_line(l, sep).unwrap_or_else(|| squeeze_ws(l))
+                ));
                 j += 1;
             }
             i = j;
             continue;
         }
 
-        if is_rule(line) || psql_banner(line) { i += 1; continue }
+        if is_rule(line) || psql_banner(line) {
+            i += 1;
+            continue;
+        }
         // caret line under `LINE 1:` (position is decoration)
-        if t.chars().all(|c| c == '^') { i += 1; continue }
+        if t.chars().all(|c| c == '^') {
+            i += 1;
+            continue;
+        }
         // prompt-echoed input
         if let Some(rest) = psql_strip_prompt(line) {
-            if line != rest && !rest.is_empty() { out.push(format!("> {}", squeeze_ws(rest))) }
+            if line != rest && !rest.is_empty() {
+                out.push(format!("> {}", squeeze_ws(rest)))
+            }
             i += 1;
             continue;
         }
@@ -257,7 +340,9 @@ fn mysql_banner(l: &str) -> bool {
 /// `*************************** 2. row ***************************` → Some("2")
 fn mysql_row_header(l: &str) -> Option<&str> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    re(&RE, r"^\*+ (\d+)\. row \*+$").captures(l.trim()).map(|c| c.get(1).unwrap().as_str())
+    re(&RE, r"^\*+ (\d+)\. row \*+$")
+        .captures(l.trim())
+        .map(|c| c.get(1).unwrap().as_str())
 }
 
 /// Shared by mysql and sqlite3: bordered ASCII/unicode tables, tab rows, vertical rows.
@@ -273,7 +358,10 @@ fn filter_table_tool(output: &str, banner: fn(&str) -> bool, keep_blank_free_lis
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut vertical = false;
     let mut i = 0;
-    let flush = |rules: &mut usize, header: &mut Option<Vec<String>>, rows: &mut Vec<Vec<String>>, out: &mut Vec<String>| {
+    let flush = |rules: &mut usize,
+                 header: &mut Option<Vec<String>>,
+                 rows: &mut Vec<Vec<String>>,
+                 out: &mut Vec<String>| {
         if *rules > 0 || header.is_some() || !rows.is_empty() {
             emit_table(header.take(), std::mem::take(rows), out);
         }
@@ -287,15 +375,23 @@ fn filter_table_tool(output: &str, banner: fn(&str) -> bool, keep_blank_free_lis
             let starts_bordered = t.starts_with(|c: char| CUT_CHARS.contains(c));
             if starts_bordered {
                 rules += 1;
-                if rules == 1 { cuts = rule_cuts(line) }
-                if rules >= 3 { flush(&mut rules, &mut header, &mut rows, &mut out) }
+                if rules == 1 {
+                    cuts = rule_cuts(line)
+                }
+                if rules >= 3 {
+                    flush(&mut rules, &mut header, &mut rows, &mut out)
+                }
             }
             i += 1;
             continue;
         }
         if rules > 0 && t.starts_with(is_bar) {
             let cells = slice_cells(line, &cuts, true);
-            if rules == 1 && header.is_none() { header = Some(cells) } else { rows.push(cells) }
+            if rules == 1 && header.is_none() {
+                header = Some(cells)
+            } else {
+                rows.push(cells)
+            }
             i += 1;
             continue;
         }
@@ -313,24 +409,53 @@ fn filter_table_tool(output: &str, banner: fn(&str) -> bool, keep_blank_free_lis
             continue;
         }
         // column mode (`sqlite3 -column`): header, dash rule with spaces, rows
-        if !t.is_empty() && lines.get(i + 1).is_some_and(|n| {
-            let nt = n.trim();
-            nt.len() >= 2 && nt.chars().all(|c| c == '-' || c == ' ') && nt.contains(' ') && !nt.trim_start_matches('-').is_empty()
-        }) {
+        if !t.is_empty()
+            && lines.get(i + 1).is_some_and(|n| {
+                let nt = n.trim();
+                nt.len() >= 2
+                    && nt.chars().all(|c| c == '-' || c == ' ')
+                    && nt.contains(' ')
+                    && !nt.trim_start_matches('-').is_empty()
+            })
+        {
             let rule = lines[i + 1];
-            let starts: Vec<usize> = rule.char_indices().enumerate()
-                .filter(|(k, (_, c))| *c == '-' && (*k == 0 || rule.chars().nth(k - 1) != Some('-')))
-                .map(|(k, _)| k).collect();
+            let starts: Vec<usize> = rule
+                .char_indices()
+                .enumerate()
+                .filter(|(k, (_, c))| {
+                    *c == '-' && (*k == 0 || rule.chars().nth(k - 1) != Some('-'))
+                })
+                .map(|(k, _)| k)
+                .collect();
             let slice = |l: &str| -> Vec<String> {
                 let chars: Vec<char> = l.chars().collect();
-                starts.iter().enumerate().map(|(k, &s)| {
-                    let e = starts.get(k + 1).copied().unwrap_or(chars.len()).min(chars.len());
-                    chars.get(s.min(chars.len())..e).unwrap_or(&[]).iter().collect::<String>().trim().to_string()
-                }).collect()
+                starts
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &s)| {
+                        let e = starts
+                            .get(k + 1)
+                            .copied()
+                            .unwrap_or(chars.len())
+                            .min(chars.len());
+                        chars
+                            .get(s.min(chars.len())..e)
+                            .unwrap_or(&[])
+                            .iter()
+                            .collect::<String>()
+                            .trim()
+                            .to_string()
+                    })
+                    .collect()
             };
             header = Some(slice(line));
             let mut j = i + 2;
-            while j < lines.len() && !lines[j].trim().is_empty() && !lines.get(j + 1).is_some_and(|n| n.trim().chars().all(|c| c == '-' || c == ' ') && n.contains('-')) {
+            while j < lines.len()
+                && !lines[j].trim().is_empty()
+                && !lines.get(j + 1).is_some_and(|n| {
+                    n.trim().chars().all(|c| c == '-' || c == ' ') && n.contains('-')
+                })
+            {
                 rows.push(slice(lines[j]));
                 j += 1;
             }
@@ -338,10 +463,19 @@ fn filter_table_tool(output: &str, banner: fn(&str) -> bool, keep_blank_free_lis
             i = j;
             continue;
         }
-        if rules > 0 { flush(&mut rules, &mut header, &mut rows, &mut out) }
+        if rules > 0 {
+            flush(&mut rules, &mut header, &mut rows, &mut out)
+        }
 
-        if t.is_empty() { vertical = false; i += 1; continue }
-        if banner(line) { i += 1; continue }
+        if t.is_empty() {
+            vertical = false;
+            i += 1;
+            continue;
+        }
+        if banner(line) {
+            i += 1;
+            continue;
+        }
         if let Some(n) = mysql_row_header(line) {
             out.push(format!("row {}:", n));
             vertical = true;
@@ -349,17 +483,28 @@ fn filter_table_tool(output: &str, banner: fn(&str) -> bool, keep_blank_free_lis
             continue;
         }
         if vertical {
-            if let Some(kv) = kv_line(line, ':') { out.push(format!(" {}", kv)); i += 1; continue }
+            if let Some(kv) = kv_line(line, ':') {
+                out.push(format!(" {}", kv));
+                i += 1;
+                continue;
+            }
             vertical = false;
         }
         if t.starts_with("mysql>") || t.starts_with("MariaDB [") || t.starts_with("sqlite>") {
-            let rest = t.splitn(2, '>').nth(1).unwrap_or("").trim();
-            if !rest.is_empty() { out.push(format!("> {}", squeeze_ws(rest))) }
+            let rest = t.split_once('>').map(|x| x.1).unwrap_or("").trim();
+            if !rest.is_empty() {
+                out.push(format!("> {}", squeeze_ws(rest)))
+            }
             i += 1;
             continue;
         }
         if line.contains('\t') {
-            out.push(line.split('\t').map(str::trim).collect::<Vec<_>>().join("|"));
+            out.push(
+                line.split('\t')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            );
         } else if keep_blank_free_list {
             out.push(line.trim_end().to_string());
         } else {
@@ -379,7 +524,8 @@ pub(crate) fn filter_mysql(output: &str) -> String {
 
 fn sqlite_banner(l: &str) -> bool {
     let t = l.trim();
-    t.starts_with("SQLite version ") || t.starts_with("Enter \".help\" for usage hints.")
+    t.starts_with("SQLite version ")
+        || t.starts_with("Enter \".help\" for usage hints.")
         || t.starts_with("Connected to a transient in-memory database")
         || t.starts_with("Use \".open FILENAME\"")
 }
@@ -393,7 +539,11 @@ pub(crate) fn filter_sqlite3(output: &str) -> String {
 
 pub(crate) fn filter_redis(output: &str) -> String {
     // redis-cli output is already terse — strip prompt lines
-    output.lines().filter(|l| !l.starts_with("127.0.0.1:") && !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
+    output
+        .lines()
+        .filter(|l| !l.starts_with("127.0.0.1:") && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ─── mongosh ──────────────────────────────────────────────────────────────────
@@ -402,19 +552,29 @@ pub(crate) fn filter_redis(output: &str) -> String {
 /// renderer can be used. Heuristic, and deliberately conservative: on any doubt the
 /// caller falls back to the raw text.
 fn ejson_to_json(s: &str) -> String {
-    static WRAPPERS: [&str; 6] = ["ObjectId", "ISODate", "UUID", "BinData", "NumberDecimal", "Timestamp"];
+    static WRAPPERS: [&str; 6] = [
+        "ObjectId",
+        "ISODate",
+        "UUID",
+        "BinData",
+        "NumberDecimal",
+        "Timestamp",
+    ];
     let mut out = s.to_string();
     for w in WRAPPERS {
         // ObjectId('abc') / ISODate("2026-01-01") → "abc"
-        let re = regex::Regex::new(&format!(r#"{}\(\s*['"]?([^'")]*)['"]?\s*\)"#, w)).expect("static regex");
+        let re = regex::Regex::new(&format!(r#"{}\(\s*['"]?([^'")]*)['"]?\s*\)"#, w))
+            .expect("static regex");
         out = re.replace_all(&out, "\"$1\"").into_owned();
     }
     for w in ["NumberLong", "NumberInt", "NumberDouble"] {
-        let re = regex::Regex::new(&format!(r#"{}\(\s*['"]?([-0-9.]*)['"]?\s*\)"#, w)).expect("static regex");
+        let re = regex::Regex::new(&format!(r#"{}\(\s*['"]?([-0-9.]*)['"]?\s*\)"#, w))
+            .expect("static regex");
         out = re.replace_all(&out, "$1").into_owned();
     }
     // bare keys → quoted keys
-    let keys = regex::Regex::new(r"([\{,]\s*)([A-Za-z_$][A-Za-z0-9_$.]*)\s*:").expect("static regex");
+    let keys =
+        regex::Regex::new(r"([\{,]\s*)([A-Za-z_$][A-Za-z0-9_$.]*)\s*:").expect("static regex");
     out = keys.replace_all(&out, "$1\"$2\":").into_owned();
     // single-quoted scalars → double-quoted
     let sq = regex::Regex::new(r"'([^'\n]*)'").expect("static regex");
@@ -523,7 +683,8 @@ pub(crate) fn filter_prisma_db(output: &str) -> String {
             continue;
         }
         // box-drawn "update available" frame and the migration file tree
-        if t.starts_with('┌') || t.starts_with('│') || t.starts_with('└') || t.starts_with('┐') {
+        if t.starts_with('┌') || t.starts_with('│') || t.starts_with('└') || t.starts_with('┐')
+        {
             continue;
         }
         if t.starts_with("└─") || t.starts_with("migrations/") {
@@ -533,7 +694,11 @@ pub(crate) fn filter_prisma_db(output: &str) -> String {
         if let Some(rest) = t.strip_prefix("Datasource \"") {
             // `Datasource "db": PostgreSQL database "prism", schema "public" at "host:5432"`
             let db = rest.split('"').nth(2).unwrap_or("");
-            let at = rest.rsplit("at \"").next().and_then(|r| r.split('"').next()).unwrap_or("");
+            let at = rest
+                .rsplit("at \"")
+                .next()
+                .and_then(|r| r.split('"').next())
+                .unwrap_or("");
             datasource = Some(format!("db: {}@{}", db, at));
             continue;
         }
@@ -577,12 +742,24 @@ mod tests {
 
     #[test]
     fn psql_keeps_errors_and_command_tags() {
-        let err = filter_psql("psql: error: connection to server at \"127.0.0.1\", port 5432 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?\n");
+        let err = filter_psql(
+            "psql: error: connection to server at \"127.0.0.1\", port 5432 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?\n",
+        );
         assert!(err.contains("Connection refused"), "{}", err);
         let tag = filter_psql("INSERT 0 3\nUPDATE 5\n");
-        assert!(tag.contains("INSERT 0 3") && tag.contains("UPDATE 5"), "{}", tag);
-        let sql_err = filter_psql("ERROR:  relation \"users\" does not exist\nLINE 1: select * from users;\n                      ^\n");
-        assert!(sql_err.contains("relation \"users\" does not exist"), "{}", sql_err);
+        assert!(
+            tag.contains("INSERT 0 3") && tag.contains("UPDATE 5"),
+            "{}",
+            tag
+        );
+        let sql_err = filter_psql(
+            "ERROR:  relation \"users\" does not exist\nLINE 1: select * from users;\n                      ^\n",
+        );
+        assert!(
+            sql_err.contains("relation \"users\" does not exist"),
+            "{}",
+            sql_err
+        );
     }
 
     #[test]
@@ -599,7 +776,9 @@ mod tests {
 
     #[test]
     fn mysql_and_sqlite_drop_borders() {
-        let my = filter_mysql("+----+-------+\n| id | name  |\n+----+-------+\n|  1 | prism |\n+----+-------+\n1 row in set (0.00 sec)\n");
+        let my = filter_mysql(
+            "+----+-------+\n| id | name  |\n+----+-------+\n|  1 | prism |\n+----+-------+\n1 row in set (0.00 sec)\n",
+        );
         assert!(my.contains("prism"), "{}", my);
         assert!(my.contains("1 row in set"), "{}", my);
         assert!(!my.contains("+----"), "{}", my);
@@ -609,7 +788,8 @@ mod tests {
 
     #[test]
     fn redis_strips_prompts_and_type_markers() {
-        let out = filter_redis("127.0.0.1:6379> get k\n\"value\"\n127.0.0.1:6379> llen l\n(integer) 5\n");
+        let out =
+            filter_redis("127.0.0.1:6379> get k\n\"value\"\n127.0.0.1:6379> llen l\n(integer) 5\n");
         assert!(out.contains("value"), "{}", out);
         assert!(out.contains('5'), "{}", out);
         assert!(!out.contains("127.0.0.1:6379>"), "{}", out);
@@ -635,14 +815,26 @@ mod tests {
         );
         assert!(mig.contains("20260909_init"), "{}", mig);
         assert!(!mig.contains("Environment variables loaded"), "{}", mig);
-        let err = filter_prisma(&["migrate", "deploy"], "Error: P1001: Can't reach database server at `localhost:5432`\n");
+        let err = filter_prisma(
+            &["migrate", "deploy"],
+            "Error: P1001: Can't reach database server at `localhost:5432`\n",
+        );
         assert!(err.contains("P1001"), "{}", err);
         assert!(err.contains("localhost:5432"), "{}", err);
     }
 
     #[test]
     fn empty_and_odd_inputs_never_panic() {
-        for raw in ["", "\n\n", "+---+\n", "|\n", "(0 rows)\n", "── ✓ 🎉\n", "a\r\nb\r\n", "\t|\t|\t\n"] {
+        for raw in [
+            "",
+            "\n\n",
+            "+---+\n",
+            "|\n",
+            "(0 rows)\n",
+            "── ✓ 🎉\n",
+            "a\r\nb\r\n",
+            "\t|\t|\t\n",
+        ] {
             let _ = filter_psql(raw);
             let _ = filter_mysql(raw);
             let _ = filter_sqlite3(raw);

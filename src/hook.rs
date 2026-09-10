@@ -65,7 +65,10 @@ pub async fn install(global: bool) -> Result<()> {
         eprintln!("  `cargo clean`, or moving this repo, will break every shimmed command");
         eprintln!("  (git, ls, find, cargo, …) for this user. Install the binary to a stable");
         eprintln!("  location first, then re-run from there:");
-        eprintln!("    cp {} ~/.local/bin/prism && ~/.local/bin/prism shim install --path", vol.display());
+        eprintln!(
+            "    cp {} ~/.local/bin/prism && ~/.local/bin/prism shim install --path",
+            vol.display()
+        );
         eprintln!();
     }
     for rc in rc_files(global)? {
@@ -75,7 +78,11 @@ pub async fn install(global: bool) -> Result<()> {
         std::fs::write(&rc, updated).with_context(|| format!("writing {}", rc.display()))?;
         println!("  PATH:         {}", rc.display());
     }
-    println!("  Shims:        {} in {}", report.written.len(), report.dir.display());
+    println!(
+        "  Shims:        {} in {}",
+        report.written.len(),
+        report.dir.display()
+    );
     println!("  (open a new shell, or `source` the rc, for it to take effect)");
     Ok(())
 }
@@ -148,7 +155,11 @@ mod tests {
         let base = "export EDITOR=vim\nalias ll='ls -la'\n";
         let once = format!("{}{}", base, block_for(rc));
         // installing twice must not leave two blocks
-        let twice = format!("{}{}", ensure_trailing_newline(&strip_block(&once)), block_for(rc));
+        let twice = format!(
+            "{}{}",
+            ensure_trailing_newline(&strip_block(&once)),
+            block_for(rc)
+        );
         assert_eq!(once, twice);
         // and removing gets us exactly back
         assert_eq!(strip_block(&once), base);
