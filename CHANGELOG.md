@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **BREAKING: GraphRAG and the semantic cache are now hub-policy features, off by
+  default.** `graph_enabled` and `cache_enabled` default to `false`. An agent with no
+  hub policy — which is every agent today — loses `prism graph` (all nine subcommands,
+  and the `prism_graph_*` MCP tools) and `prism cache` (including the proxy's record and
+  replay legs) on upgrade. A licensed PRISM Hub distributes policy setting them `true`;
+  that lands in `<data>/hub-config.yaml` via `prism hub config` and resolves as the top
+  configuration layer, so `prism hub enroll --url <hub> --token <join-token>` restores
+  them. Nothing else changes: `prism cmd` and its ~110 filters, the PATH shims, `read`,
+  `count`, `compress`, `toon`, `memory`, `gain`, `mcp --stdio` and the local `serve`
+  proxy — prompt-cache invariants, context editing and image rightsizing included — are
+  unaffected, need no hub, and make no network call.
+- **prism contains no licence check.** It holds no key, verifies no signature and calls
+  nothing to decide what it may do; it reads two booleans out of the resolved
+  configuration and honours them. "Community" is simply *no policy saying otherwise*.
+  This is the only shape that makes sense for an AGPL-3.0 binary whose source is
+  published: an in-binary gate would be both legally removable and pointless, so
+  entitlement decisions live entirely in the hub.
+- The four feature flags previously had **zero read sites outside `config.rs`** —
+  settable, mergeable and completely inert, which meant a hub could distribute flags
+  nothing honoured. They are now read at the two chokepoints that front everything:
+  `knowledge::find_active_graph` (the mandatory first step of every read-side graph
+  operation) and `cache::global_cache` (which every module-level cache helper routes
+  through). When the cache is disabled the sled store is never opened, so no directory
+  is created and no lock taken.
+- **A disabled feature says so, distinguishably.** Both chokepoints return `Option`, so
+  a naive gate would make "off" indistinguishable from "no graph indexed" or "cache
+  unreachable" — the argument `cache::open_error` already made for a locked store, now
+  extended: `GraphUnavailable::{Disabled, NotFound}` and
+  `cache::Unavailable::{Disabled, Unopenable}`. `prism cache stats` reports *disabled*
+  rather than `Total entries: 0` or a misleading lock error; `prism graph query` says
+  the feature is off rather than sending the user to `prism graph index`, which would
+  have changed nothing. Every message names the feature, carries the `prism hub enroll`
+  command, and lists what still works. `prism serve` logs it once at startup instead of
+  relaying silently uncached, and the MCP tools return it as an error so an agent cannot
+  read "off" as "nothing found".
+- `cache_enabled` sits **above** `PRISM_CACHE_RECORD`, `PRISM_CACHE_SERVE` and
+  `PRISM_CACHE_MIN_SIMILARITY`. Those are preferences within a cache that exists — a
+  privacy kill switch and a replay opt-in — so none may reach a store policy has not
+  enabled, and `PRISM_CACHE_SERVE=always` is not a way to switch the feature on. The
+  gate sits on the cache *key*: with no key the serve leg has nothing to look up, the
+  record leg nothing to write, and `PRISM_CACHE_MIN_SIMILARITY` (which only ranks inside
+  a similarity search) is unreachable. With the cache on, all three behave exactly as
+  before.
+- `toon_enabled` (on) and `tron_enabled` (off) are unchanged.
 - **Toolchain moved to Rust 1.98.1 and pinned.** The build machine's `rustup stable`
   had been left on 1.92.0 (2025-12-08) while upstream stable was 1.98.1 (2026-09-01),
   and neither the repo nor CI pinned anything — so a GitHub runner used current stable

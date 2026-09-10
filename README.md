@@ -22,8 +22,8 @@ With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.open
 - **Transparent MITM Proxy (`:27181`)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
 - **Prefix-Preserving & Invariant-Compliant Prompt Caching**: Strictly preserves system prompts and conversation prefixes while dynamically enforcing Anthropic cache ordering invariants (auto-promotes preceding breakpoints to `1h` when later blocks use `1h` to prevent HTTP 400 errors, strictly enforces Anthropic's 4-breakpoint limit, and honors caller-defined caching strategies). Guarantees **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**.
 - **Anthropic Context Pruning**: Opts long agent runs into server-side `clear_tool_uses` context pruning, preventing stale tool results from accumulating across long agent interactions.
-- **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval.
-- **GraphRAG & Graphify Integration (`prism graph`)**: Ingests and queries codebase dependency graphs (`graphify-out/graph.json` or custom graphs) for architectural explanations, shortest path tracing, and god-node detection.
+- **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
+- **GraphRAG & Graphify Integration (`prism graph`)**: Ingests and queries codebase dependency graphs (`graphify-out/graph.json` or custom graphs) for architectural explanations, shortest path tracing, and god-node detection. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
 - **Failure Tee Mechanism (`prism cmd`)**: Strips terminal noise from build and test commands while automatically preserving raw, unstripped stdout/stderr in `~/.local/share/prism/tee/` whenever a process exits non-zero.
 - **XDG Base Directory Compliance**: Clean multi-user POSIX isolation adhering to FreeDesktop.org standards.
 
@@ -136,12 +136,19 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
       ↓
 [2] Environment Vars   (HTTP_PROXY, PRISM_NO_CONTEXT_EDITING)
       ↓
-[3] Project Config     (<workspace>/.prismrc)
+[3] Hub Policy         (<data>/hub-config.yaml, written by `prism hub config`)
       ↓
-[4] Global Config      (~/.config/prism/config.yaml)
+[4] Project Config     (<workspace>/.prismrc)
       ↓
-[5] Defaults           (PrismConfig::default())
+[5] Global Config      (~/.config/prism/config.yaml)
+      ↓
+[6] Defaults           (PrismConfig::default())
 ```
+
+A layer wins wherever it *states* a value, so hub policy can switch a feature both on
+and off. `graph_enabled` and `cache_enabled` default to `false` and are enabled by hub
+policy — see [`prism graph`](#graphrag--codebase-intelligence-prism-graph) and
+[Semantic Cache](#semantic-cache--analytics).
 
 ---
 
@@ -319,6 +326,11 @@ lists the rules that loaded and the files that failed, so a typo is reported rat
 silently doing nothing.
 
 ### GraphRAG & Codebase Intelligence (`prism graph`)
+
+**Requires a licensed PRISM Hub.** `graph_enabled` defaults to `false`; hub policy sets
+it to `true`. Without it every `prism graph` subcommand exits non-zero saying the feature
+is disabled and how to enable it — it does not report an empty or missing graph.
+
 ```bash
 prism graph query "how does proxy work?"   # Query auto-detected Graphify knowledge graph
 prism graph explain proxy_server           # Explain specific node and connected edges
@@ -326,13 +338,27 @@ prism graph path cli proxy                 # Find shortest dependency path betwe
 prism graph god-nodes --top 5              # Identify architectural bottleneck nodes
 ```
 
+The gate is the resolved `graph_enabled` flag and nothing else: prism performs no licence
+check, holds no key, and makes no network call to decide. It reads the configuration
+layer a hub wrote and honours it. The five `prism_graph_*` MCP tools return the same
+message rather than empty results, so an agent cannot mistake "off" for "nothing found".
+
 ### Semantic Cache & Analytics
+
+The **semantic cache requires a licensed PRISM Hub**: `cache_enabled` defaults to `false`
+and hub policy sets it to `true`. `prism gain` and the analytics are free and unaffected.
+
 ```bash
 prism cache query "prompt query"           # Lexical re-rank over stored prompts, thresholded
 prism cache stats                          # Entries and store location
 prism gain                                 # Real-time token and dollar savings dashboard
 prism gain --history                       # View detailed historical command log
 ```
+
+With the cache disabled, `prism cache` exits non-zero reporting *disabled* — not
+`Total entries: 0`, and not the store-locked error, which is a different problem with a
+different fix. `prism serve` logs the same once at startup and relays without recording
+or replaying; nothing else about the proxy changes.
 
 The proxy fills the cache as it relays. Recording and serving are separate switches
 because they carry different risk:
@@ -343,6 +369,14 @@ because they carry different risk:
 | `PRISM_CACHE_SERVE=deterministic` | serving **off** | replay a cached response when the caller pinned `temperature: 0` |
 | `PRISM_CACHE_SERVE=always` | serving **off** | replay whatever matches, at any temperature |
 | `PRISM_CACHE_MIN_SIMILARITY` | 0.55 | floor for `prism cache query`; below it a match is noise |
+
+**`cache_enabled` sits above all three.** They are preferences *within* a cache that
+exists — a privacy kill switch and a replay opt-in — so none of them can reach a store
+the configuration has not enabled, and `PRISM_CACHE_SERVE=always` is not a way to switch
+the feature on. With the cache off the proxy never keys a request at all, so the serve
+leg has nothing to look up, the record leg nothing to write, and
+`PRISM_CACHE_MIN_SIMILARITY` (which only ranks inside a similarity search) is
+unreachable. With the cache on, all three behave exactly as documented above.
 
 Recording never changes what the client receives — it only fills a store that was
 previously always empty. Serving *replaces* a live model call, which is why it is opt-in:
@@ -384,7 +418,23 @@ filed under when it happened.
 
 Hub policy (`PrismConfig`, `FilterLimits`, YAML filter rules) merges as the top layer of
 the [configuration hierarchy](#configuration-resolution-hierarchy-12-factor-app):
-hub-enforced → project `.prismrc` → global `config.yaml` → defaults.
+hub-enforced → project `.prismrc` → global `config.yaml` → defaults. A layer wins
+wherever it states a value, so policy can switch a feature on as well as off.
+
+**Two features need policy from a licensed hub to run at all:** GraphRAG
+(`graph_enabled`, all of `prism graph` and the `prism_graph_*` MCP tools) and the
+semantic cache (`cache_enabled`, `prism cache` and the proxy's record/replay legs). Both
+default to `false`, and an agent with no hub policy therefore has them off.
+
+Everything else is free and needs no hub, no account and no network: `prism cmd` and its
+~110 filters, the PATH shims, `read`, `count`, `compress`, `toon`, `memory`, `gain`,
+`mcp --stdio`, and the local `serve` proxy including its prompt-cache invariants, context
+editing and image rightsizing.
+
+prism itself contains **no licence check**. It has no key, verifies no signature, and
+calls nothing to decide what it may do — it reads `graph_enabled`/`cache_enabled` out of
+the resolved configuration and honours them. What a hub will and will not distribute is
+the hub's business; prism only ever states which policy it is running under.
 
 Events are typed structs with `#[serde(rename_all = "camelCase")]` rather than
 hand-written JSON, and the shape is pinned by `tests/fixtures/hub-events.json`, which the
