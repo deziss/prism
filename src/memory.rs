@@ -285,9 +285,16 @@ pub fn memory_palace_dir_pub() -> std::path::PathBuf {
     memory_palace_dir()
 }
 
-pub async fn search(query: &str) -> anyhow::Result<()> {
+/// Struct-returning search, shared by the CLI's `--json` mode and the MCP
+/// `prism_memory_search` tool — the single place that touches `MemoryPalace` for a
+/// search, so both callers see identical results.
+pub fn search_blocks(query: &str, max_results: usize) -> anyhow::Result<Vec<MemoryBlock>> {
     let palace = MemoryPalace::new(memory_palace_dir()).map_err(|e| anyhow::anyhow!(e))?;
-    let results = palace.search(query, 10);
+    Ok(palace.search(query, max_results))
+}
+
+pub async fn search(query: &str) -> anyhow::Result<()> {
+    let results = search_blocks(query, 10)?;
     if results.is_empty() {
         println!("No memories found for: {query}");
     } else {
@@ -324,12 +331,30 @@ pub async fn list() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn stats() -> anyhow::Result<()> {
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryStats {
+    pub recall: usize,
+    pub core: usize,
+    pub archive: usize,
+}
+
+/// Struct-returning stats, shared by the CLI's `--json` mode and the MCP
+/// `prism_memory_stats` tool.
+pub fn stats_data() -> anyhow::Result<MemoryStats> {
     let palace = MemoryPalace::new(memory_palace_dir()).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(MemoryStats {
+        recall: palace.count(MemoryLayer::Recall),
+        core: palace.count(MemoryLayer::Core),
+        archive: palace.count(MemoryLayer::Archive),
+    })
+}
+
+pub async fn stats() -> anyhow::Result<()> {
+    let stats = stats_data()?;
     println!("Memory Palace Statistics:");
-    println!("  Recall:  {} blocks", palace.count(MemoryLayer::Recall));
-    println!("  Core:    {} blocks", palace.count(MemoryLayer::Core));
-    println!("  Archive: {} blocks", palace.count(MemoryLayer::Archive));
+    println!("  Recall:  {} blocks", stats.recall);
+    println!("  Core:    {} blocks", stats.core);
+    println!("  Archive: {} blocks", stats.archive);
     Ok(())
 }
 

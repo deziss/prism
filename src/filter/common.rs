@@ -16,7 +16,9 @@ pub use crate::config::FilterLimits as Limits;
 pub fn limits() -> &'static Limits {
     static L: OnceLock<Limits> = OnceLock::new();
     L.get_or_init(|| {
-        let mut l = crate::config::load_global().map(|c| c.filters).unwrap_or_default();
+        // Full chain (hub > project `.prismrc` > global > defaults), not just the
+        // global file — a hub-pushed or project-local filter cap now actually applies.
+        let mut l = crate::config::resolve().filters;
         l.apply_env();
         l
     })

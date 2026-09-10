@@ -151,17 +151,68 @@ pub fn load_global() -> Option<PrismConfig> {
     None
 }
 
-/// Load project-local config from .prismrc
-pub fn load_project<P: AsRef<std::path::Path>>(dir: P) -> Option<PrismConfig> {
+/// Load project-local config from `.prismrc`.
+///
+/// A missing file is `Ok(None)` — most projects do not have one. A file that exists but
+/// fails to read or parse is `Err`, never a silent `None`: this used to be
+/// `if let Ok(...)`, which swallowed a parse failure indistinguishably from "no file
+/// here" — the exact failure mode that let a stray, invalid `.prismrc` (a shell `source`
+/// line, not YAML) sit unnoticed. Callers decide how loud to be with the error (see
+/// [`resolve`]), matching how `filter::rules::load_from` reports a bad rule file instead
+/// of skipping it quietly.
+pub fn load_project<P: AsRef<std::path::Path>>(dir: P) -> Result<Option<PrismConfig>, String> {
     let file = dir.as_ref().join(".prismrc");
-    if file.is_file() {
-        if let Ok(s) = std::fs::read_to_string(&file) {
-            if let Ok(cfg) = serde_yaml::from_str::<PrismConfig>(&s) {
-                return Some(cfg);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let s = std::fs::read_to_string(&file).map_err(|e| format!("{}: {}", file.display(), e))?;
+    serde_yaml::from_str::<PrismConfig>(&s)
+        .map(Some)
+        .map_err(|e| format!("{}: {}", file.display(), e))
+}
+
+/// Load hub-enforced policy from `<data>/hub-config.yaml`, written by `prism hub config`
+/// (see `hub::fetch_config`). `None` when this agent has never fetched one.
+pub fn load_hub() -> Option<PrismConfig> {
+    let file = crate::prism_data_dir().join("hub-config.yaml");
+    if !file.is_file() {
+        return None;
+    }
+    match std::fs::read_to_string(&file) {
+        Ok(s) => match serde_yaml::from_str::<PrismConfig>(&s) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                eprintln!("prism: warning: {} did not parse as YAML: {}", file.display(), e);
+                None
             }
+        },
+        Err(e) => {
+            eprintln!("prism: warning: could not read {}: {}", file.display(), e);
+            None
         }
     }
-    None
+}
+
+/// Full configuration resolution: hub-enforced > project `.prismrc` > global
+/// `config.yaml` > defaults. This is the one place that should be called from `proxy.rs`
+/// / `filter::common::limits()` / `cli::config` — everywhere else that only ever read
+/// `load_global()` was blind to both the project layer and the hub layer.
+pub fn resolve() -> PrismConfig {
+    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let global = load_global().unwrap_or_default();
+    let project = match load_project(&dir) {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => PrismConfig::default(),
+        Err(e) => {
+            eprintln!("prism: warning: {e}");
+            PrismConfig::default()
+        }
+    };
+    let merged = merge_config(&global, &project);
+    match load_hub() {
+        Some(hub_cfg) => merge_config(&merged, &hub_cfg),
+        None => merged,
+    }
 }
 
 /// Merge project config over global (project keys take precedence)

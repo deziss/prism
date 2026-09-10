@@ -51,6 +51,27 @@ pub struct NodeExplanation<'a> {
     pub incoming: Vec<(&'a GraphNode, EdgeKind, f32)>,
 }
 
+/// Owned, `Serialize`-able copy of [`NodeExplanation`]. `NodeExplanation` borrows from
+/// the `GraphRAG` it was produced by, which cannot cross an `async fn`/function boundary
+/// — this is what lets `knowledge::explain_node_data` hand the same computation to both
+/// the CLI printer and the MCP tool without either reimplementing `explain_node`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeExplanationOwned {
+    pub node: GraphNode,
+    pub outgoing: Vec<(GraphNode, EdgeKind, f32)>,
+    pub incoming: Vec<(GraphNode, EdgeKind, f32)>,
+}
+
+impl From<NodeExplanation<'_>> for NodeExplanationOwned {
+    fn from(e: NodeExplanation<'_>) -> Self {
+        NodeExplanationOwned {
+            node: e.node,
+            outgoing: e.outgoing.into_iter().map(|(n, k, w)| (n.clone(), k, w)).collect(),
+            incoming: e.incoming.into_iter().map(|(n, k, w)| (n.clone(), k, w)).collect(),
+        }
+    }
+}
+
 // PRISM knowledge/graph_rag.rs — GraphRAG pipeline for cross-file codebase understanding
 // Builds a dependency graph from source files and runs retrieval-augmented generation queries
 

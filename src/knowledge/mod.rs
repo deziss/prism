@@ -44,9 +44,17 @@ pub fn find_active_graph(custom: Option<&Path>) -> Option<(PathBuf, GraphRAG)> {
     None
 }
 
+/// Struct-returning graph query, shared by the CLI's `--json` mode and the MCP
+/// `prism_graph_query` tool. `None` means no active graph was found (custom path,
+/// local `graphify-out/graph.json`, or the PRISM default all missed).
+pub fn query_graph_data(query: &str, top_k: usize, custom_path: Option<&Path>) -> Option<(PathBuf, Vec<GraphNode>)> {
+    let (path, rag) = find_active_graph(custom_path)?;
+    let matches = rag.query(query, top_k);
+    Some((path, matches))
+}
+
 pub async fn query_graph(query: &str, custom_path: Option<&Path>) -> Result<()> {
-    if let Some((path, rag)) = find_active_graph(custom_path) {
-        let matches = rag.query(query, 8);
+    if let Some((path, matches)) = query_graph_data(query, 8, custom_path) {
         if !matches.is_empty() {
             println!("\n  Graph Query Results (Source: {})", path.display());
             println!("  {}", "═".repeat(60));
@@ -75,72 +83,85 @@ pub async fn query_graph(query: &str, custom_path: Option<&Path>) -> Result<()> 
     Ok(())
 }
 
+/// Struct-returning node explanation, shared by the CLI's `--json` mode and the MCP
+/// `prism_graph_explain` tool.
+pub fn explain_node_data(node_name: &str, custom_path: Option<&Path>) -> Option<(PathBuf, NodeExplanationOwned)> {
+    let (path, rag) = find_active_graph(custom_path)?;
+    let exp = rag.explain_node(node_name)?;
+    Some((path, exp.into()))
+}
+
 pub async fn explain_node(node_name: &str, custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
-    let (path, rag) = match find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => {
+    let Some((path, exp)) = explain_node_data(node_name, custom_path) else {
+        if find_active_graph(custom_path).is_none() {
             println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
-            return Ok(());
+        } else {
+            println!("Node '{}' not found in graph.", node_name);
         }
+        return Ok(());
     };
 
-    match rag.explain_node(node_name) {
-        Some(exp) => {
-            println!("\n  Node: {}", exp.node.label.green().bold());
-            println!("  {}", "═".repeat(50));
-            println!("  Source Graph:  {}", path.display());
-            println!("  ID:            {}", exp.node.id.cyan());
-            println!("  Kind:          {}", exp.node.kind);
-            println!("  Location:      {}", exp.node.path);
-            if let Some(comm) = exp.node.community {
-                println!("  Community:     {}", comm);
-            }
-            println!("  Degree:        {}", exp.outgoing.len() + exp.incoming.len());
+    println!("\n  Node: {}", exp.node.label.green().bold());
+    println!("  {}", "═".repeat(50));
+    println!("  Source Graph:  {}", path.display());
+    println!("  ID:            {}", exp.node.id.cyan());
+    println!("  Kind:          {}", exp.node.kind);
+    println!("  Location:      {}", exp.node.path);
+    if let Some(comm) = exp.node.community {
+        println!("  Community:     {}", comm);
+    }
+    println!("  Degree:        {}", exp.outgoing.len() + exp.incoming.len());
 
-            if !exp.outgoing.is_empty() {
-                println!("\n  Outgoing Connections ({}):", exp.outgoing.len());
-                for (target, kind, weight) in exp.outgoing.iter().take(15) {
-                    println!("    --> {} [{}] (w: {:.1}) in {}", target.label.yellow(), kind, weight, target.path);
-                }
-            }
-
-            if !exp.incoming.is_empty() {
-                println!("\n  Incoming Connections ({}):", exp.incoming.len());
-                for (source, kind, weight) in exp.incoming.iter().take(15) {
-                    println!("    <-- {} [{}] (w: {:.1}) in {}", source.label.cyan(), kind, weight, source.path);
-                }
-            }
-            println!();
-        }
-        None => {
-            println!("Node '{}' not found in graph ({})", node_name, path.display());
+    if !exp.outgoing.is_empty() {
+        println!("\n  Outgoing Connections ({}):", exp.outgoing.len());
+        for (target, kind, weight) in exp.outgoing.iter().take(15) {
+            println!("    --> {} [{}] (w: {:.1}) in {}", target.label.yellow(), kind, weight, target.path);
         }
     }
+
+    if !exp.incoming.is_empty() {
+        println!("\n  Incoming Connections ({}):", exp.incoming.len());
+        for (source, kind, weight) in exp.incoming.iter().take(15) {
+            println!("    <-- {} [{}] (w: {:.1}) in {}", source.label.cyan(), kind, weight, source.path);
+        }
+    }
+    println!();
     Ok(())
+}
+
+/// Struct-returning shortest path, shared by the CLI's `--json` mode and the MCP
+/// `prism_graph_path` tool.
+pub fn shortest_path_data(
+    from: &str,
+    to: &str,
+    custom_path: Option<&Path>,
+) -> Option<(PathBuf, Vec<(GraphNode, String, GraphNode)>)> {
+    let (path, rag) = find_active_graph(custom_path)?;
+    let steps = rag.shortest_path(from, to)?;
+    Some((path, steps))
 }
 
 pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
-    let (path, rag) = match find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => {
-            println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
-            return Ok(());
-        }
-    };
+    if find_active_graph(custom_path).is_none() {
+        println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
+        return Ok(());
+    }
 
     println!("\n  Finding dependency path: {} ➔ {}", from.cyan(), to.green());
-    println!("  Source Graph: {}", path.display());
+    if let Some((path, _)) = find_active_graph(custom_path) {
+        println!("  Source Graph: {}", path.display());
+    }
     println!("  {}", "═".repeat(50));
 
-    match rag.shortest_path(from, to) {
-        Some(steps) if steps.is_empty() => {
+    match shortest_path_data(from, to, custom_path) {
+        Some((_, steps)) if steps.is_empty() => {
             println!("  Identical node: '{}' is '{}'.", from, to);
         }
-        Some(steps) => {
+        Some((_, steps)) => {
             println!("  Shortest path ({} hops):\n", steps.len());
             for (i, (src, rel, tgt)) in steps.iter().enumerate() {
                 println!("    [{}] {}  --[{}]-->  {}", i + 1, src.label.cyan(), rel.yellow(), tgt.label.green());
@@ -154,21 +175,25 @@ pub async fn shortest_path(from: &str, to: &str, custom_path: Option<&Path>) -> 
     Ok(())
 }
 
+/// Struct-returning god-nodes listing, shared by the CLI's `--json` mode and the MCP
+/// `prism_graph_god_nodes` tool.
+pub fn god_nodes_data(top: usize, custom_path: Option<&Path>) -> Option<(PathBuf, Vec<(GraphNode, usize)>)> {
+    let (path, rag) = find_active_graph(custom_path)?;
+    let hubs = rag.god_nodes(top).into_iter().map(|(n, d)| (n.clone(), d)).collect();
+    Some((path, hubs))
+}
+
 pub async fn god_nodes(top: usize, custom_path: Option<&Path>) -> Result<()> {
     use colored::Colorize;
 
-    let (path, rag) = match find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => {
-            println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
-            return Ok(());
-        }
+    let Some((path, hubs)) = god_nodes_data(top, custom_path) else {
+        println!("No graph found. Run `prism graph index` or provide `--graph <path>`.");
+        return Ok(());
     };
 
     println!("\n  God Nodes / Architectural Hubs (Source: {})", path.display());
     println!("  {}", "═".repeat(60));
 
-    let hubs = rag.god_nodes(top);
     for (i, (node, degree)) in hubs.iter().enumerate() {
         let comm_str = node.community.map(|c| format!("comm: {}", c)).unwrap_or_else(|| "none".to_string());
         println!("  {:2}. {:<28} {:>3} edges  [{}] in {} ({})",

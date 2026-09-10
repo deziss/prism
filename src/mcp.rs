@@ -20,9 +20,7 @@ use crate::{analytics, encode, memory};
 // ── Internal helpers that return String (memory::search prints to stdout) ─────
 
 async fn memory_search_str(query: &str) -> anyhow::Result<String> {
-    let palace = memory::MemoryPalace::new(memory::memory_palace_dir_pub())
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let results = palace.search(query, 10);
+    let results = memory::search_blocks(query, 10)?;
     if results.is_empty() {
         Ok(format!("No memories found for: {}", query))
     } else {
@@ -42,6 +40,13 @@ async fn memory_save_str(key: &str, value: &str) -> anyhow::Result<String> {
 }
 
 async fn graph_query_str(query: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
+    if let Some((path, matches)) = crate::knowledge::query_graph_data(query, 8, custom_path) {
+        if !matches.is_empty() {
+            let mut lines = vec![format!("Graph Query Results (Source: {}):", path.display())];
+            lines.extend(matches.iter().map(|n| format!("  • [{}] {} (path: {})", n.kind, n.label, n.path)));
+            return Ok(lines.join("\n"));
+        }
+    }
     use crate::knowledge::search_graph_with_path;
     let results = search_graph_with_path(query, custom_path)?;
     if results.is_empty() {
@@ -52,66 +57,58 @@ async fn graph_query_str(query: &str, custom_path: Option<&std::path::Path>) -> 
 }
 
 async fn graph_explain_str(node: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
-    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => return Ok("No active graph found. Run `prism graph index` or provide a graph path.".to_string()),
+    let Some((path, exp)) = crate::knowledge::explain_node_data(node, custom_path) else {
+        return Ok(if crate::knowledge::find_active_graph(custom_path).is_none() {
+            "No active graph found. Run `prism graph index` or provide a graph path.".to_string()
+        } else {
+            format!("Node '{}' not found in graph.", node)
+        });
     };
 
-    match rag.explain_node(node) {
-        Some(exp) => {
-            let mut lines = Vec::new();
-            lines.push(format!("Node: {} (id: {})", exp.node.label, exp.node.id));
-            lines.push(format!("Source Graph: {}", path.display()));
-            lines.push(format!("Kind: {} | Path: {}", exp.node.kind, exp.node.path));
-            if let Some(comm) = exp.node.community {
-                lines.push(format!("Community: {}", comm));
-            }
-            lines.push(format!("Total Degree: {}", exp.outgoing.len() + exp.incoming.len()));
-
-            if !exp.outgoing.is_empty() {
-                lines.push(format!("\nOutgoing Connections ({}):", exp.outgoing.len()));
-                for (target, kind, weight) in exp.outgoing.iter().take(15) {
-                    lines.push(format!("  --> {} [{}] (w: {:.1}) in {}", target.label, kind, weight, target.path));
-                }
-            }
-            if !exp.incoming.is_empty() {
-                lines.push(format!("\nIncoming Connections ({}):", exp.incoming.len()));
-                for (source, kind, weight) in exp.incoming.iter().take(15) {
-                    lines.push(format!("  <-- {} [{}] (w: {:.1}) in {}", source.label, kind, weight, source.path));
-                }
-            }
-            Ok(lines.join("\n"))
-        }
-        None => Ok(format!("Node '{}' not found in graph ({})", node, path.display())),
+    let mut lines = Vec::new();
+    lines.push(format!("Node: {} (id: {})", exp.node.label, exp.node.id));
+    lines.push(format!("Source Graph: {}", path.display()));
+    lines.push(format!("Kind: {} | Path: {}", exp.node.kind, exp.node.path));
+    if let Some(comm) = exp.node.community {
+        lines.push(format!("Community: {}", comm));
     }
+    lines.push(format!("Total Degree: {}", exp.outgoing.len() + exp.incoming.len()));
+
+    if !exp.outgoing.is_empty() {
+        lines.push(format!("\nOutgoing Connections ({}):", exp.outgoing.len()));
+        for (target, kind, weight) in exp.outgoing.iter().take(15) {
+            lines.push(format!("  --> {} [{}] (w: {:.1}) in {}", target.label, kind, weight, target.path));
+        }
+    }
+    if !exp.incoming.is_empty() {
+        lines.push(format!("\nIncoming Connections ({}):", exp.incoming.len()));
+        for (source, kind, weight) in exp.incoming.iter().take(15) {
+            lines.push(format!("  <-- {} [{}] (w: {:.1}) in {}", source.label, kind, weight, source.path));
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 async fn graph_path_str(from: &str, to: &str, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
-    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => return Ok("No active graph found.".to_string()),
-    };
-
-    match rag.shortest_path(from, to) {
-        Some(steps) if steps.is_empty() => Ok(format!("Identical node: '{}' is '{}'.", from, to)),
-        Some(steps) => {
+    match crate::knowledge::shortest_path_data(from, to, custom_path) {
+        Some((_, steps)) if steps.is_empty() => Ok(format!("Identical node: '{}' is '{}'.", from, to)),
+        Some((path, steps)) => {
             let mut lines = vec![format!("Shortest path in {} ({} hops):", path.display(), steps.len())];
             for (i, (src, rel, tgt)) in steps.iter().enumerate() {
                 lines.push(format!("  [{}] {} --[{}]--> {}", i + 1, src.label, rel, tgt.label));
             }
             Ok(lines.join("\n"))
         }
+        None if crate::knowledge::find_active_graph(custom_path).is_none() => Ok("No active graph found.".to_string()),
         None => Ok(format!("No path found between '{}' and '{}' in graph.", from, to)),
     }
 }
 
 async fn graph_god_nodes_str(top: usize, custom_path: Option<&std::path::Path>) -> anyhow::Result<String> {
-    let (path, rag) = match crate::knowledge::find_active_graph(custom_path) {
-        Some(pair) => pair,
-        None => return Ok("No active graph found.".to_string()),
+    let Some((path, hubs)) = crate::knowledge::god_nodes_data(top, custom_path) else {
+        return Ok("No active graph found.".to_string());
     };
 
-    let hubs = rag.god_nodes(top);
     let mut lines = vec![format!("God Nodes / Architectural Hubs (Source: {}):", path.display())];
     for (i, (node, degree)) in hubs.iter().enumerate() {
         lines.push(format!("  {:2}. {:<25} {:>3} edges [{}] in {}", i + 1, node.label, degree, node.kind, node.path));
@@ -510,13 +507,11 @@ async fn call_tool(name: &str, arguments: &Value) -> (Value, bool) {
         }
 
         "prism_memory_stats" => {
-            match memory::MemoryPalace::new(memory::memory_palace_dir_pub()) {
-                Ok(palace) => {
+            match memory::stats_data() {
+                Ok(stats) => {
                     let stats_str = format!(
                         "Memory Palace Statistics:\n  Recall:  {} blocks\n  Core:    {} blocks\n  Archive: {} blocks",
-                        palace.count(memory::MemoryLayer::Recall),
-                        palace.count(memory::MemoryLayer::Core),
-                        palace.count(memory::MemoryLayer::Archive),
+                        stats.recall, stats.core, stats.archive,
                     );
                     (text_content(stats_str), false)
                 }
