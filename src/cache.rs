@@ -1,4 +1,9 @@
 // PRISM cache.rs — Semantic cache: sled persistence + TurboVec ANN similarity search
+//
+// sled 0.34.7 is intentionally left as-is here (not bumped as part of the Phase 2
+// dependency sweep): it IS the latest release, sled 1.0 never shipped. A future
+// migration off sled (e.g. to redb) would be a storage-engine change, not a version
+// bump, and is out of scope for that pass.
 
 use crate::vector::TurboVecIndex;
 use serde::{Deserialize, Serialize};
