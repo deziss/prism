@@ -126,7 +126,9 @@ fn session_reads_path() -> PathBuf {
 fn compute_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    // digest 0.11's `Array` output type dropped the blanket `LowerHex` impl the old
+    // `generic-array` `GenericArray<u8, N>` had; hex-encode by hand instead.
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Checks if the file hash matches previous read in this session.
