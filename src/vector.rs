@@ -93,19 +93,3 @@ impl Default for TurboVecIndex {
         Self::new()
     }
 }
-
-// Optional: candle ONNX embedding generation (768-dim; quantized separately via TurboVecIndex with dim=768)
-#[cfg(feature = "candle")]
-pub mod candle_embed {
-    use std::path::PathBuf;
-
-    pub fn generate_embedding(model_path: &PathBuf, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let mut embedding = vec![0.0f32; 768];
-        for (i, &b) in text.as_bytes().iter().enumerate() {
-            embedding[i % 768] += b as f32;
-        }
-        let norm: f32 = embedding.iter().map(|e| e * e).sum::<f32>().sqrt().max(0.001);
-        for e in &mut embedding { *e /= norm; }
-        Ok(embedding)
-    }
-}

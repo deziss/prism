@@ -15,9 +15,7 @@ name = "prism"
 path = "src/lib.rs"
 
 [features]
-default = ["graphrag"]
-graphrag = []
-candle = []
+default = []
 
 [dependencies]
 # CLI & parsing

@@ -80,7 +80,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use walkdir::WalkDir;
 
-#[cfg(feature = "graphrag")]
 use petgraph::graph::DiGraph;
 
 /// A graph node representing a source file or code entity
@@ -157,12 +156,10 @@ impl std::fmt::Display for EdgeKind {
 pub struct GraphRAG {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
-    #[cfg(feature = "graphrag")]
     #[serde(skip, default = "default_digraph")]
     pub graph: DiGraph<GraphNode, GraphEdge>,
 }
 
-#[cfg(feature = "graphrag")]
 fn default_digraph() -> DiGraph<GraphNode, GraphEdge> {
     DiGraph::new()
 }
@@ -173,18 +170,15 @@ impl GraphRAG {
         let mut rag = GraphRAG {
             nodes,
             edges,
-            #[cfg(feature = "graphrag")]
             graph: default_digraph(),
         };
 
-        #[cfg(feature = "graphrag")]
         rag.rebuild_graph();
 
         rag
     }
 
     /// Rebuild petgraph internal DiGraph from nodes and edges
-    #[cfg(feature = "graphrag")]
     pub fn rebuild_graph(&mut self) {
         self.graph.clear();
         let mut node_map = std::collections::HashMap::new();
@@ -407,7 +401,6 @@ impl GraphRAG {
     }
 
     /// Detect communities using simple connected-component analysis
-    #[cfg(feature = "graphrag")]
     fn detect_communities(&mut self) {
         let nodes = self.graph.node_indices().collect::<Vec<_>>();
         let mut community_id = 0usize;
@@ -497,7 +490,6 @@ impl GraphRAG {
 
         // Try PRISM native GraphRAG first
         if let Ok(mut rag) = serde_json::from_str::<GraphRAG>(&raw) {
-            #[cfg(feature = "graphrag")]
             rag.rebuild_graph();
             return Ok(rag);
         }
