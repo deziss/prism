@@ -22,13 +22,13 @@ candle = []
 [dependencies]
 # CLI & parsing
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-colored = "2.1"
-indicatif = "0.17"
+colored = "=3.1.1"
+indicatif = "=0.18.6"
 anyhow = "1.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "=1.1.5"
 
 # Async runtime
 tokio = { version = "=1.53.1", features = ["full"] }
@@ -72,7 +72,7 @@ time = "=0.3.36"
 flate2 = "=1.1.10"
 
 # Utilities
-dirs = "5.0"
+dirs = "=7.0.0"
 home = "0.5"
 futures = "=0.3.34"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
@@ -82,7 +82,7 @@ petgraph = { version = "0.7", features = ["serde-1"] }
 sha2 = "0.10"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "=0.8.2"
 
 [profile.release]
 opt-level = 3
