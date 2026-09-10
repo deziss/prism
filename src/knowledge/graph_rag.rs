@@ -701,7 +701,7 @@ impl GraphRAG {
             .map(|(i, n)| (n, degrees[i]))
             .collect();
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.1));
         scored.truncate(top_k);
         scored
     }

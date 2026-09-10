@@ -1,0 +1,13 @@
+# Pin the toolchain channel so a local build and CI resolve to the same rustc.
+#
+# Previously neither side was pinned: this machine's rustup had been left on
+# 1.92.0 (2025-12-08) while GitHub's runner used current stable, so a clippy
+# lint added after 1.92 would pass locally and fail in CI (or the reverse).
+#
+# `stable` rather than an exact version keeps the project on the latest release
+# without a maintenance commit every six weeks. The floor that actually matters
+# for consumers is `rust-version` in Cargo.toml (1.85, edition 2024's minimum),
+# which is checked independently by cargo.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

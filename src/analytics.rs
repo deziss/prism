@@ -224,7 +224,7 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
         *by_cmd.entry(&e.command).or_default() += e.tokens();
     }
     let mut top: Vec<_> = by_cmd.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|a| std::cmp::Reverse(a.1));
     let top_commands = top
         .into_iter()
         .take(10)

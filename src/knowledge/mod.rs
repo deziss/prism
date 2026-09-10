@@ -403,7 +403,7 @@ pub async fn graph_stats(custom_path: Option<&Path>) -> Result<()> {
         *connection_counts.entry(&rel.target).or_default() += 1;
     }
     let mut top: Vec<_> = connection_counts.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|a| std::cmp::Reverse(a.1));
     if !top.is_empty() {
         println!("\n  Most connected entities:");
         for (name, count) in top.into_iter().take(5) {

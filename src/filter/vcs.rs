@@ -125,6 +125,9 @@ fn compact_list(output: &str, what: &str) -> String {
 
 // ─── stat compaction (log --stat, diff --stat, commit, pull) ─────────────────
 
+// `bar == 0` below returns early with a different rendering rather than guarding
+// the division, so clippy::manual_checked_ops misreads it as a checked-div idiom.
+#[allow(clippy::manual_checked_ops)]
 fn plus_minus(n: usize, plus: usize, minus: usize) -> String {
     if n == 0 {
         return "0".into();

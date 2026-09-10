@@ -11,8 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install rustfmt and clippy
-        run: rustup component add rustfmt clippy
+      # rust-toolchain.toml pins the channel and pulls in rustfmt + clippy.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
 
       - name: cargo fmt --check
         run: cargo fmt --all --check

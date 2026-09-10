@@ -390,6 +390,9 @@ fn resize_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
                 }
             }
             let d = (dy * dw as usize + dx) * 4;
+            // One branch guards all four channel divisions; checked_div here would
+            // cost four Option checks per destination pixel in a hot resample loop.
+            #[allow(clippy::manual_checked_ops)]
             if n > 0 {
                 for c in 0..4 {
                     out[d + c] = (acc[c] / n) as u8;

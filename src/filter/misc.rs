@@ -425,7 +425,7 @@ pub(crate) fn filter_ps(_args: &[&str], output: &str) -> String {
     if rows.is_empty() && header.is_none() {
         return generic(output);
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.0));
     let total = rows.len();
     let mut out: Vec<String> = header.into_iter().collect();
     let shown = total.min(l.ps_max_rows);
@@ -522,7 +522,7 @@ pub(crate) fn filter_du(output: &str) -> String {
         let bytes = parse_size(size).unwrap_or(0);
         rows.push((bytes, format!("{} {}", size, path)));
     }
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.0));
     cap_vec(
         rows.into_iter().map(|(_, r)| r).collect(),
         l.list_max_lines,

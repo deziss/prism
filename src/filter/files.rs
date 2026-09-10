@@ -186,7 +186,7 @@ pub(crate) fn filter_grep(args: &[&str], output: &str) -> String {
     if count_mode && !counts.is_empty() {
         let zero = counts.iter().filter(|(_, n)| *n == 0).count();
         let mut hits: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n > 0).collect();
-        hits.sort_by(|a, b| b.1.cmp(&a.1));
+        hits.sort_by_key(|a| std::cmp::Reverse(a.1));
         let total: usize = hits.iter().map(|(_, n)| n).sum();
         out.push(format!("{} matches in {} files", total, hits.len()));
         let shown = hits.len().min(l.grep_max_results);
