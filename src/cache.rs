@@ -497,14 +497,19 @@ mod similarity_tests {
 
     #[test]
     fn threshold_is_configurable_but_clamped() {
-        // default when unset or unparseable
-        std::env::remove_var("PRISM_CACHE_MIN_SIMILARITY");
-        assert!((min_similarity() - 0.55).abs() < 1e-6);
-        std::env::set_var("PRISM_CACHE_MIN_SIMILARITY", "9");
-        assert_eq!(min_similarity(), 1.0);
-        std::env::set_var("PRISM_CACHE_MIN_SIMILARITY", "-1");
-        assert_eq!(min_similarity(), 0.0);
-        std::env::remove_var("PRISM_CACHE_MIN_SIMILARITY");
+        // Single-threaded env mutation in a test — safe (edition 2024 requires the
+        // block because set_var/remove_var are unsound under concurrent access from
+        // other threads, not applicable to this one process-wide var in this test).
+        unsafe {
+            // default when unset or unparseable
+            std::env::remove_var("PRISM_CACHE_MIN_SIMILARITY");
+            assert!((min_similarity() - 0.55).abs() < 1e-6);
+            std::env::set_var("PRISM_CACHE_MIN_SIMILARITY", "9");
+            assert_eq!(min_similarity(), 1.0);
+            std::env::set_var("PRISM_CACHE_MIN_SIMILARITY", "-1");
+            assert_eq!(min_similarity(), 0.0);
+            std::env::remove_var("PRISM_CACHE_MIN_SIMILARITY");
+        }
     }
 }
 

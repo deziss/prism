@@ -712,7 +712,8 @@ mod tests {
             std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("PRISM_DATA_DIR", &dir);
+        // SAFETY: single-threaded env mutation scoped to this test's own temp dir name.
+        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
 
         let ev = HubEvent::Command(CommandEvent {
             tool: "ls".to_string(),
@@ -741,7 +742,7 @@ mod tests {
         confirm_sent(&rotated2);
         assert_eq!(status().spool_events, 0);
 
-        std::env::remove_var("PRISM_DATA_DIR");
+        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

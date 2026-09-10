@@ -1845,7 +1845,8 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     let hub = Arc::new(crate::hub::HubSender::spawn());
 
     info!("PRISM MITM proxy listening on :{} (compression ratio {})", port, ratio);
-    info!("CA cert: {}", ca_dir().join("ca.crt").display());
+    let ca_cert_path = ca_dir().join("ca.crt");
+    info!("CA cert: {}", ca_cert_path.display());
     info!(
         "Set HTTP_PROXY=http://localhost:{0} and HTTPS_PROXY=http://localhost:{0}",
         port
@@ -2270,7 +2271,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::env::set_var("PRISM_DATA_DIR", &store);
+        // SAFETY: single-threaded env mutation scoped to this test's own temp dir name.
+        unsafe { std::env::set_var("PRISM_DATA_DIR", &store) };
 
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         let (up, mut fake_upstream) = tokio::io::duplex(64 * 1024);
@@ -2375,7 +2377,7 @@ mod tests {
         // ── replay leg ────────────────────────────────────────────────────────
         // Same request again, with serving switched on. The upstream this time never
         // answers, so if the reply arrives at all it came from the store.
-        std::env::set_var("PRISM_CACHE_SERVE", "deterministic");
+        unsafe { std::env::set_var("PRISM_CACHE_SERVE", "deterministic") };
         let (mut client2, server2) = tokio::io::duplex(64 * 1024);
         let (up2, silent_upstream) = tokio::io::duplex(64 * 1024);
         let slot2 = std::sync::Arc::new(std::sync::Mutex::new(Some(up2)));
@@ -2424,7 +2426,7 @@ mod tests {
         drop(silent_upstream);
         drop(client2);
         let _ = session2.await;
-        std::env::remove_var("PRISM_CACHE_SERVE");
+        unsafe { std::env::remove_var("PRISM_CACHE_SERVE") };
         let _ = std::fs::remove_dir_all(&store);
     }
 

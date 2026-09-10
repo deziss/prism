@@ -1794,9 +1794,9 @@ func (s *Server) Start() error {
         assert!(cfg.contains("[package]"), "{}", cfg);
         assert!(cfg.contains("name: prism"), "{}", cfg);
 
-        let gen = skeleton_generic(&"x\n".repeat(50));
-        assert!(gen.contains("[+30 more lines]"), "{}", gen);
-        assert!(gen.contains("lines: 50, bytes: 100"), "{}", gen);
+        let generic_out = skeleton_generic(&"x\n".repeat(50));
+        assert!(generic_out.contains("[+30 more lines]"), "{}", generic_out);
+        assert!(generic_out.contains("lines: 50, bytes: 100"), "{}", generic_out);
     }
 
     #[test]

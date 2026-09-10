@@ -1,7 +1,8 @@
 [package]
 name = "prism"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "PRISM — Prompt Reduction, Indexing & Semantic Memory. Enterprise token optimizer."
 license = "AGPL-3.0-only"
 authors = ["PRISM Team"]
