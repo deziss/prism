@@ -2196,15 +2196,18 @@ pub fn install_ca_nss(ca_cert_pem: &[u8]) -> Result<Vec<String>> {
     std::fs::write(&tmp, ca_cert_pem)?;
     let mut done = Vec::new();
     for db in dbs {
-        // -A refuses a duplicate nickname, so drop any previous entry first
+        // -A refuses a duplicate nickname, so drop any previous entry first.
+        // Use -f /dev/null and Stdio::null() on stdin to prevent interactive password prompts on tty.
         let _ = std::process::Command::new("certutil")
-            .args(["-D", "-d", &db, "-n", NSS_NICKNAME])
+            .args(["-D", "-d", &db, "-n", NSS_NICKNAME, "-f", "/dev/null"])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
         let ok = std::process::Command::new("certutil")
-            .args(["-A", "-d", &db, "-n", NSS_NICKNAME, "-t", "C,,", "-i"])
+            .args(["-A", "-d", &db, "-n", NSS_NICKNAME, "-t", "C,,", "-f", "/dev/null", "-i"])
             .arg(&tmp)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -2223,7 +2226,8 @@ pub fn remove_ca_nss() -> Vec<String> {
     let mut done = Vec::new();
     for db in nss_dbs() {
         let ok = std::process::Command::new("certutil")
-            .args(["-D", "-d", &db, "-n", NSS_NICKNAME])
+            .args(["-D", "-d", &db, "-n", NSS_NICKNAME, "-f", "/dev/null"])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

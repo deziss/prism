@@ -55,7 +55,7 @@ if command -v certutil > /dev/null 2>&1; then
         [ -f "${prof}cert9.db" ] && dbs="$dbs sql:${prof%/}"
     done
     for db in $dbs; do
-        if certutil -D -d "$db" -n "$NSS_NICKNAME" > /dev/null 2>&1; then
+        if certutil -D -d "$db" -n "$NSS_NICKNAME" -f /dev/null > /dev/null 2>&1; then
             count=$((count + 1))
         fi
     done

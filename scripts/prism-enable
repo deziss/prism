@@ -62,8 +62,8 @@ install_nss() {
     fi
     local count=0 db
     for db in $(prism_nss_dbs); do
-        certutil -D -d "$db" -n "$NSS_NICKNAME" > /dev/null 2>&1 || true
-        if certutil -A -d "$db" -n "$NSS_NICKNAME" -t "C,," -i "$CA_PATH" > /dev/null 2>&1; then
+        certutil -D -d "$db" -n "$NSS_NICKNAME" -f /dev/null > /dev/null 2>&1 || true
+        if certutil -A -d "$db" -n "$NSS_NICKNAME" -t "C,," -f /dev/null -i "$CA_PATH" > /dev/null 2>&1; then
             count=$((count + 1))
         fi
     done

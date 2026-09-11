@@ -43,7 +43,7 @@ mkdir -p "$BIN_DIR"
 echo "[1/4] Compiling PRISM release binary with Link-Time Optimization (LTO)..."
 cd "$REPO_ROOT"
 cargo build --release --quiet
-cp "$REPO_ROOT/target/release/prism" "$BIN_DIR/prism"
+install -m 0755 "$REPO_ROOT/target/release/prism" "$BIN_DIR/prism"
 chmod +x "$BIN_DIR/prism"
 echo "  ✓ Installed binary: $BIN_DIR/prism"
 
