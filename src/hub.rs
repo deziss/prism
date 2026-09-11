@@ -160,20 +160,108 @@ fn in_flight_path() -> PathBuf {
     spool_dir().join("hub_spool.jsonl.sending")
 }
 
+use std::sync::OnceLock;
+
+static ENROLLED_CACHE: OnceLock<bool> = OnceLock::new();
+static STAT_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_ENROLLED_OVERRIDE: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
+}
+
+/// True if this machine has an enrolled agent identity.
+/// Cached in a `OnceLock` so the `prism cmd` hot path pays at most one filesystem check per process.
+pub fn is_enrolled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(forced) = TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow()) {
+            return forced;
+        }
+    }
+    *ENROLLED_CACHE.get_or_init(|| {
+        STAT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        credentials_path().is_file()
+    })
+}
+
+pub fn spool_max_bytes() -> u64 {
+    std::env::var("PRISM_SPOOL_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 * 1024 * 1024)
+}
+
+fn dropped_events_path() -> PathBuf {
+    spool_dir().join("hub_spool.dropped")
+}
+
+pub fn load_dropped_count() -> u64 {
+    std::fs::read_to_string(dropped_events_path())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn add_dropped_count(n: u64) {
+    if n == 0 {
+        return;
+    }
+    let current = load_dropped_count();
+    let _ = std::fs::write(dropped_events_path(), (current + n).to_string());
+}
+
 /// Append one event to the on-disk spool. Synchronous and allocation-light: one
 /// `serde_json::to_string` plus one buffered `write_all` under a mutex, mirroring the
 /// `PROXY_EVENTS_LOCK` pattern in `analytics.rs`. Safe to call from the `prism cmd` hot
 /// path — this function never touches the network.
 pub fn spool_event(event: &HubEvent) -> std::io::Result<()> {
+    if !is_enrolled() {
+        return Ok(());
+    }
+
     let mut line = serde_json::to_string(event)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     line.push('\n');
     let _guard = lock_spool();
     std::fs::create_dir_all(spool_dir())?;
+    let path = spool_path();
+    let max_bytes = spool_max_bytes();
+
+    let line_len = line.len() as u64;
+    let current_len = path.metadata().map(|m| m.len()).unwrap_or(0);
+    if current_len + line_len > max_bytes && current_len > 0 {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+            let target_bytes = max_bytes.saturating_sub(line_len) / 2;
+            let mut kept = Vec::new();
+            let mut accumulated_bytes = 0usize;
+            for l in lines.iter().rev() {
+                let entry_len = l.len() + 1;
+                if accumulated_bytes + entry_len > target_bytes as usize {
+                    break;
+                }
+                accumulated_bytes += entry_len;
+                kept.push(*l);
+            }
+            kept.reverse();
+            let dropped = lines.len().saturating_sub(kept.len());
+            if dropped > 0 {
+                add_dropped_count(dropped as u64);
+                tracing::warn!(dropped, "spool exceeded cap; dropped oldest events");
+                let mut new_content = kept.join("\n");
+                if !new_content.is_empty() {
+                    new_content.push('\n');
+                }
+                let _ = std::fs::write(&path, new_content);
+            }
+        }
+    }
+
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(spool_path())?;
+        .open(&path)?;
     f.write_all(line.as_bytes())?;
     f.flush()
 }
@@ -691,6 +779,8 @@ pub struct HubStatus {
     pub agent_id: Option<String>,
     pub spool_events: usize,
     pub spool_bytes: u64,
+    pub spool_max_bytes: u64,
+    pub dropped_events: u64,
 }
 
 pub fn status() -> HubStatus {
@@ -708,6 +798,8 @@ pub fn status() -> HubStatus {
         agent_id: creds.as_ref().map(|c| c.agent_id.clone()),
         spool_events: events,
         spool_bytes: bytes,
+        spool_max_bytes: spool_max_bytes(),
+        dropped_events: load_dropped_count(),
     }
 }
 
@@ -1040,16 +1132,19 @@ mod tests {
     }
     use super::*;
 
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn spool_rotate_confirm_round_trip() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-hub-spool-test-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: single-threaded env mutation scoped to this test's own temp dir name.
         unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(true));
 
         let ev = HubEvent::Command(CommandEvent {
             tool: "ls".to_string(),
@@ -1084,7 +1179,113 @@ mod tests {
         confirm_sent(&rotated2);
         assert_eq!(status().spool_events, 0);
 
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
         unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unenrolled_writes_nothing() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "prism-hub-unenrolled-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(false));
+
+        let ev = HubEvent::Command(CommandEvent {
+            tool: "ls".to_string(),
+            subcommand: String::new(),
+            exit_code: 0,
+            duration_ms: 5,
+            input_bytes: 10,
+            output_bytes: 10,
+            filtered_bytes: 0,
+            truncated: false,
+            via_shim: false,
+            ts: now(),
+        });
+        spool_event(&ev).unwrap();
+        assert_eq!(status().spool_events, 0);
+        assert!(
+            !spool_path().exists(),
+            "spool file must not be created when unenrolled"
+        );
+
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn over_cap_spool_drops_oldest_and_reports_loss() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "prism-hub-cap-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("PRISM_DATA_DIR", &dir);
+            std::env::set_var("PRISM_SPOOL_MAX_BYTES", "1000");
+        };
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(true));
+
+        for i in 0..15 {
+            let ev = HubEvent::Command(CommandEvent {
+                tool: format!("tool_{i}"),
+                subcommand: String::new(),
+                exit_code: 0,
+                duration_ms: 1,
+                input_bytes: 50,
+                output_bytes: 50,
+                filtered_bytes: 0,
+                truncated: false,
+                via_shim: false,
+                ts: now(),
+            });
+            spool_event(&ev).unwrap();
+        }
+
+        let st = status();
+        assert!(
+            st.dropped_events > 0,
+            "must report dropped events: {}",
+            st.dropped_events
+        );
+        assert!(
+            st.spool_bytes <= 1000,
+            "spool bytes ({}) must stay below cap (1000)",
+            st.spool_bytes
+        );
+
+        let content = std::fs::read_to_string(spool_path()).unwrap();
+        assert!(
+            content.contains("tool_14"),
+            "newest event must be preserved"
+        );
+
+        TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        unsafe {
+            std::env::remove_var("PRISM_DATA_DIR");
+            std::env::remove_var("PRISM_SPOOL_MAX_BYTES");
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enrolment_check_is_evaluated_once() {
+        let _ = is_enrolled();
+        let c1 = STAT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = is_enrolled();
+        let c2 = STAT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            c1, c2,
+            "enrolment check must be evaluated at most once and cached"
+        );
     }
 }

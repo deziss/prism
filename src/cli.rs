@@ -197,6 +197,31 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
         let bundle = crate::proxy::ensure_ca_bundle(&ca.cert_pem)?;
         println!("  CA bundle:    {}", bundle.display());
 
+        // Safeguard: Ensure no legacy ~/.config/environment.d/10-prism.conf exists
+        if let Some(home) = dirs::home_dir() {
+            let env_d_prism = home
+                .join(".config")
+                .join("environment.d")
+                .join("10-prism.conf");
+            if env_d_prism.exists() {
+                let _ = std::fs::remove_file(&env_d_prism);
+                println!("  Cleaned legacy environment.d/10-prism.conf");
+            }
+        }
+        // Scrub any lingering proxy exports from systemd user session
+        let _ = std::process::Command::new("systemctl")
+            .args([
+                "--user",
+                "unset-environment",
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ])
+            .output();
+
         // Write env vars to shell rc files
         write_shell_env(
             ca_path.to_str().unwrap_or(""),
@@ -282,52 +307,51 @@ pub async fn guide(topic: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn write_shell_env(ca_cert_path: &str, ca_bundle_path: &str) -> Result<()> {
-    // NODE_EXTRA_CA_CERTS *adds* a CA, so it takes the bare cert. SSL_CERT_FILE,
-    // REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE *replace* the trust store, so they take
-    // the combined bundle — with the bare CA there, nothing on the machine can verify
-    // a host PRISM does not intercept.
-    let block = format!(
-        "\n# PRISM — transparent LLM proxy (added by `prism init --global`)\n\
-         export HTTP_PROXY=http://localhost:27181\n\
-         export HTTPS_PROXY=http://localhost:27181\n\
-         export NO_PROXY=localhost,127.0.0.1,::1\n\
+fn write_shell_env(_ca_cert_path: &str, _ca_bundle_path: &str) -> Result<()> {
+    // Only benign environment variables like PRISM_HUB_URL are exported globally.
+    // Global HTTP_PROXY and HTTPS_PROXY are deliberately NOT placed in shell startup
+    // files (.bashrc, .profile, .zshrc) to prevent breaking system tools, VS Code,
+    // and IDEs when the proxy is offline. Use `prism proxy <cmd>` or `eval $(prism proxy env)`.
+    let block = "\n# PRISM environment (added by `prism init --global`)\n\
          export PRISM_HUB_URL=http://localhost:27183\n\
-         export NODE_EXTRA_CA_CERTS={ca}\n\
-         export REQUESTS_CA_BUNDLE={bundle}\n\
-         export CURL_CA_BUNDLE={bundle}\n\
-         export SSL_CERT_FILE={bundle}\n\
-         # end PRISM\n",
-        ca = ca_cert_path,
-        bundle = ca_bundle_path
-    );
+         # end PRISM\n"
+        .to_string();
 
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
     let rc_files = [".bashrc", ".zshrc", ".profile"];
-    let mut wrote = false;
 
     for rc in &rc_files {
         let path = home.join(rc);
         if path.exists() {
             let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            if !existing.contains("PRISM — transparent LLM proxy") {
+            if existing.contains("PRISM — transparent LLM proxy") {
+                let cleaned: Vec<&str> = existing
+                    .lines()
+                    .filter(|line| {
+                        !line.contains("PRISM — transparent LLM proxy")
+                            && !line.contains("HTTP_PROXY=http://localhost:27181")
+                            && !line.contains("HTTPS_PROXY=http://localhost:27181")
+                            && !line.contains("NO_PROXY=localhost,127.0.0.1,::1")
+                            && !line.contains("NODE_EXTRA_CA_CERTS=")
+                            && !line.contains("REQUESTS_CA_BUNDLE=")
+                            && !line.contains("CURL_CA_BUNDLE=")
+                            && !line.contains("SSL_CERT_FILE=")
+                    })
+                    .collect();
+                let mut new_text = cleaned.join("\n");
+                if !new_text.is_empty() && !new_text.ends_with('\n') {
+                    new_text.push('\n');
+                }
+                new_text.push_str(&block);
+                std::fs::write(&path, new_text)?;
+                println!("  Shell env:    cleaned legacy proxy & updated ~/{}", rc);
+            } else if !existing.contains("PRISM environment") {
                 let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
                 use std::io::Write;
                 write!(f, "{}", block)?;
                 println!("  Shell env:    written to ~/{}", rc);
-                wrote = true;
-            } else {
-                println!("  Shell env:    already in ~/{} (skipped)", rc);
-                wrote = true;
             }
         }
-    }
-
-    if !wrote {
-        // Create ~/.bashrc if none exist
-        let path = home.join(".bashrc");
-        std::fs::write(&path, format!("#!/usr/bin/env bash{}", block))?;
-        println!("  Shell env:    created ~/.bashrc");
     }
 
     Ok(())
@@ -393,10 +417,72 @@ fn write_claude_mcp_config() -> Result<()> {
 // --- proxy ---
 pub async fn proxy(cmd: Vec<String>) -> Result<()> {
     if cmd.is_empty() {
-        anyhow::bail!("Usage: prism proxy <cmd> [args...]");
+        println!("Run a command through the PRISM proxy, or manage proxy variables:");
+        println!("\n  Run command: prism proxy <cmd> [args...]");
+        println!("  Shell eval:  eval $(prism proxy env)");
+        println!("  Turn off:    eval $(prism proxy off)");
+        println!("  Status:      prism proxy status");
+        return Ok(());
+    }
+    if cmd.len() == 1 && cmd[0] == "env" {
+        println!("export HTTP_PROXY=http://localhost:27181");
+        println!("export HTTPS_PROXY=http://localhost:27181");
+        println!("export NO_PROXY=localhost,127.0.0.1,::1");
+        let ca_path = crate::proxy::ca_dir().join("ca.crt");
+        if ca_path.exists() {
+            println!("export NODE_EXTRA_CA_CERTS={}", ca_path.display());
+        }
+        return Ok(());
+    }
+    if cmd.len() == 1 && (cmd[0] == "off" || cmd[0] == "unset") {
+        println!(
+            "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NODE_EXTRA_CA_CERTS"
+        );
+        return Ok(());
+    }
+    if cmd.len() == 1 && cmd[0] == "status" {
+        let is_running = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()?
+            .get("http://127.0.0.1:27181/health")
+            .send()
+            .await
+            .is_ok();
+        if is_running {
+            println!("  PRISM Proxy is active on http://127.0.0.1:27181");
+        } else {
+            println!("  PRISM Proxy is NOT running on http://127.0.0.1:27181");
+            println!("  Start proxy daemon with: prism serve --port 27181");
+        }
+        let env_http = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy"));
+        let env_https = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy"));
+        if let Ok(p) = env_http {
+            println!("  Current shell HTTP_PROXY: {}", p);
+            if !is_running && p.contains("27181") {
+                eprintln!(
+                    "  WARNING: Current shell points to PRISM proxy on 27181, but proxy is offline!"
+                );
+                eprintln!(
+                    "  Run `eval $(prism proxy off)` to restore direct internet connectivity."
+                );
+            }
+        }
+        if let Ok(p) = env_https {
+            println!("  Current shell HTTPS_PROXY: {}", p);
+        }
+        return Ok(());
     }
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..]);
+    c.env("HTTP_PROXY", "http://localhost:27181");
+    c.env("HTTPS_PROXY", "http://localhost:27181");
+    c.env("http_proxy", "http://localhost:27181");
+    c.env("https_proxy", "http://localhost:27181");
+    c.env("NO_PROXY", "localhost,127.0.0.1,::1");
+    let ca_path = crate::proxy::ca_dir().join("ca.crt");
+    if ca_path.exists() {
+        c.env("NODE_EXTRA_CA_CERTS", ca_path);
+    }
     let status = c.status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
@@ -795,7 +881,13 @@ pub async fn hub(cmd: HubCmd) -> Result<()> {
                     status.agent_id.as_deref().unwrap_or("(none)")
                 );
                 println!("  Spool events:  {}", status.spool_events);
-                println!("  Spool bytes:   {}", status.spool_bytes);
+                println!(
+                    "  Spool bytes:   {} / {} (cap)",
+                    status.spool_bytes, status.spool_max_bytes
+                );
+                if status.dropped_events > 0 {
+                    println!("  Dropped events: {}", status.dropped_events);
+                }
                 if !status.enrolled {
                     println!(
                         "\n  Not enrolled — run `prism hub enroll --url <hub> --token <join-token>`."

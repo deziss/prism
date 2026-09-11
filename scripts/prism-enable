@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# prism-enable — make PRISM the default LLM interceptor for this user session.
+# prism-enable — enable PRISM background proxy and MCP services on this laptop.
 #
-# Trust model (this is where earlier versions went wrong):
-#   * NODE_EXTRA_CA_CERTS  ADDS a CA        → bare ca.crt
-#   * SSL_CERT_FILE
-#     REQUESTS_CA_BUNDLE   REPLACE the      → combined bundle (system roots + PRISM CA)
-#     CURL_CA_BUNDLE       trust store
-#   * Chromium/Electron apps and Firefox read NSS, not the OpenSSL variables and not
-#     the system store, so the CA is also added to every NSS database found.
-# Pointing the replacing variables at the bare CA leaves every client unable to verify
-# any host PRISM does not intercept, which is what broke Electron IDEs (Antigravity,
-# VS Code) while the proxy was on.
+# Safe architecture:
+#   * Background proxy daemon runs under systemd user session (localhost:27181).
+#   * MCP server runs under systemd user session (localhost:27182).
+#   * Global HTTP_PROXY/HTTPS_PROXY are NEVER placed in environment.d or shell rc
+#     to prevent breaking desktop IDEs (VS Code, Claude Code, Antigravity) if
+#     the proxy is stopped or rebooting.
+#   * Commands can be run through the proxy via `prism proxy <cmd>` or
+#     temporarily in a shell via `eval $(prism proxy env)`.
 # ==============================================================================
 set -euo pipefail
 
@@ -26,7 +24,7 @@ NSS_NICKNAME="PRISM Local CA"
 BLOCK_START="# >>> PRISM DEFAULT LLM PROXY >>>"
 BLOCK_END="# <<< PRISM DEFAULT LLM PROXY <<<"
 
-echo "[*] Setting PRISM as default LLM interceptor on this laptop..."
+echo "[*] Setting up PRISM background services..."
 
 if [ ! -f "$CA_PATH" ]; then
     echo "  ! No CA at $CA_PATH — run 'prism init --global' first." >&2
@@ -83,7 +81,7 @@ prism_nss_dbs() {
 install_nss
 
 # 3. systemd user units for the proxy and MCP server.
-mkdir -p "$HOME/.config/systemd/user" "$HOME/.config/environment.d"
+mkdir -p "$HOME/.config/systemd/user"
 
 cat << UNIT_PROXY > "$HOME/.config/systemd/user/prism-proxy.service"
 [Unit]
@@ -123,46 +121,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now prism-proxy.service prism-mcp.service
 echo "  ✓ Services: prism-proxy (:$PORT), prism-mcp (:$MCP_PORT)"
 
-# 4. Session environment (affects desktop apps started after the next login).
-cat << ENV_CONF > "$ENV_FILE"
-# PRISM System Proxy Configuration (Port $PORT)
-HTTP_PROXY=http://127.0.0.1:$PORT
-HTTPS_PROXY=http://127.0.0.1:$PORT
-http_proxy=http://127.0.0.1:$PORT
-https_proxy=http://127.0.0.1:$PORT
-ALL_PROXY=http://127.0.0.1:$PORT
-all_proxy=http://127.0.0.1:$PORT
-NO_PROXY=localhost,127.0.0.1,::1,.local,.internal
-no_proxy=localhost,127.0.0.1,::1,.local,.internal
-PRISM_HUB_URL=http://127.0.0.1:$HUB_PORT
+# 4. Clean up any legacy global environment.d proxy configuration
+if [ -f "$ENV_FILE" ]; then
+    rm -f "$ENV_FILE"
+    echo "  ✓ Removed legacy global proxy from $ENV_FILE"
+fi
+systemctl --user unset-environment HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy 2>/dev/null || true
 
-# Adds a CA (bare cert is correct here)
-NODE_EXTRA_CA_CERTS=$CA_PATH
-# Replace the trust store — must be the combined bundle, never the bare CA
-REQUESTS_CA_BUNDLE=$BUNDLE_PATH
-CURL_CA_BUNDLE=$BUNDLE_PATH
-SSL_CERT_FILE=$BUNDLE_PATH
-ENV_CONF
-echo "  ✓ Environment: $ENV_FILE"
-
-# 5. Shell rc block for interactive shells.
+# 5. Safe shell rc configuration: exports PRISM_HUB_URL and aliases only, NEVER global proxy vars
 PAYLOAD="
 $BLOCK_START
-# PRISM System Proxy Configuration (Port $PORT)
-export HTTP_PROXY=\"http://127.0.0.1:$PORT\"
-export HTTPS_PROXY=\"http://127.0.0.1:$PORT\"
-export http_proxy=\"http://127.0.0.1:$PORT\"
-export https_proxy=\"http://127.0.0.1:$PORT\"
-export ALL_PROXY=\"http://127.0.0.1:$PORT\"
-export all_proxy=\"http://127.0.0.1:$PORT\"
-export NO_PROXY=\"localhost,127.0.0.1,::1,.local,.internal\"
-export no_proxy=\"localhost,127.0.0.1,::1,.local,.internal\"
-
-# CA trust: NODE_EXTRA_CA_CERTS adds, the rest replace — see prism-enable header
-export NODE_EXTRA_CA_CERTS=\"$CA_PATH\"
-export REQUESTS_CA_BUNDLE=\"$BUNDLE_PATH\"
-export CURL_CA_BUNDLE=\"$BUNDLE_PATH\"
-export SSL_CERT_FILE=\"$BUNDLE_PATH\"
+# PRISM Environment
+export PRISM_HUB_URL=\"http://127.0.0.1:$HUB_PORT\"
 
 # PRISM Aliases
 alias p=\"prism\"
@@ -179,27 +149,35 @@ for RC in "$HOME/.bashrc" "$HOME/.profile"; do
     if [ -f "$RC" ]; then
         sed -i "/$BLOCK_START/,/$BLOCK_END/d" "$RC"
         echo "$PAYLOAD" >> "$RC"
-        echo "  ✓ Updated $RC"
+        echo "  ✓ Updated $RC (safe aliases & hub url)"
     fi
 done
 
 cat << SUMMARY
 
 ==========================================================================
-  [✓] PRISM is now the default LLM interceptor for this user.
+  [✓] PRISM background services active:
   - Proxy:        127.0.0.1:$PORT (systemd --user: prism-proxy)
   - MCP server:   127.0.0.1:$MCP_PORT (systemd --user: prism-mcp)
   - Trust bundle: $BUNDLE_PATH
-  - Environment:  $ENV_FILE
 
-  Only provider API hosts are intercepted. Loopback traffic is tunnelled
-  untouched except on local model ports (11434, 1234) — override with
-  PRISM_LOCAL_AI_PORTS.
+  SAFETY GUARANTEE:
+  Global HTTP_PROXY is NOT set across your laptop. Your IDEs (VS Code,
+  Antigravity, Claude Code) and browser will never lose direct internet
+  connectivity if PRISM is stopped or restarted.
 
-  Desktop apps read environment.d at login, so log out and back in (or
-  restart the app) for GUI editors to pick this up.
+  HOW TO USE THE PROXY:
+  - Route a single command/tool through PRISM:
+      prism proxy <cmd> [args...]
+      (e.g. prism proxy claude)
 
-  Reload this shell:  source ~/.bashrc
-  Disable everything: prism-disable
+  - Enable proxy for this terminal session:
+      eval \$(prism proxy env)
+
+  - Disable proxy in this terminal session:
+      eval \$(prism proxy off)
+
+  - Check proxy status:
+      prism proxy status
 ==========================================================================
 SUMMARY

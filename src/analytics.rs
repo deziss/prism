@@ -365,14 +365,14 @@ pub async fn discover() -> Result<()> {
 }
 
 // --- internal types ---
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct History {
     commands: Vec<CommandEntry>,
     total_savings_tokens: usize,
     sessions: usize,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommandEntry {
     timestamp: chrono::DateTime<chrono::Utc>,
     command: String,
@@ -413,17 +413,74 @@ impl CommandEntry {
     }
 }
 
+/// Attempt to repair a partially written or truncated .
+/// Discards any incomplete trailing entry, closes the JSON structure,
+/// and parses the valid portion.
+fn try_repair_history(content: &str) -> Option<History> {
+    let mut idx = content.len();
+    while let Some(pos) = content[..idx].rfind('}') {
+        let candidate = format!(
+            "{}\n  ],\n  \"total_savings_tokens\": 0,\n  \"sessions\": 0\n}}",
+            &content[..=pos]
+        );
+        if let Ok(hist) = serde_json::from_str::<History>(&candidate) {
+            return Some(hist);
+        }
+        idx = pos;
+    }
+    None
+}
+
 fn load_history() -> Result<History> {
     let path = history_path();
-    if path.exists() {
-        let content = std::fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&content)?)
-    } else {
-        Ok(History {
+    if !path.exists() {
+        return Ok(History {
             commands: Vec::new(),
             total_savings_tokens: 0,
             sessions: 0,
-        })
+        });
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to read history file at {}: {}", path.display(), e);
+            return Ok(History {
+                commands: Vec::new(),
+                total_savings_tokens: 0,
+                sessions: 0,
+            });
+        }
+    };
+
+    match serde_json::from_str::<History>(&content) {
+        Ok(h) => Ok(h),
+        Err(err) => {
+            let corrupt_path = analytics_dir().join("history.json.corrupt");
+            tracing::warn!(
+                "history.json failed to parse ({err}); attempting repair and moving corrupt file to {}",
+                corrupt_path.display()
+            );
+            eprintln!("Warning: history.json was corrupt ({err}); moved to history.json.corrupt");
+            let _ = std::fs::rename(&path, &corrupt_path);
+
+            if let Some(repaired) = try_repair_history(&content) {
+                let count = repaired.commands.len();
+                tracing::info!("recovered {count} commands from truncated history.json");
+                let _ = save_history(History {
+                    commands: repaired.commands.clone(),
+                    total_savings_tokens: repaired.total_savings_tokens,
+                    sessions: repaired.sessions,
+                });
+                Ok(repaired)
+            } else {
+                Ok(History {
+                    commands: Vec::new(),
+                    total_savings_tokens: 0,
+                    sessions: 0,
+                })
+            }
+        }
     }
 }
 
@@ -431,4 +488,79 @@ fn save_history(history: History) -> Result<()> {
     std::fs::create_dir_all(analytics_dir())?;
     std::fs::write(history_path(), serde_json::to_string_pretty(&history)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static TEST_ANALYTICS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn load_history_recovers_from_truncated_file() {
+        let _guard = TEST_ANALYTICS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "prism-history-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("analytics")).unwrap();
+        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+
+        // Write a partially cut history file (cut in the middle of command 2)
+        let broken = r#"{
+  "commands": [
+    {
+      "timestamp": "2026-09-11T12:00:00Z",
+      "command": "git status",
+      "input_bytes": 100,
+      "output_tokens": 0,
+      "output_bytes": 50,
+      "savings": 0
+    },
+    {
+      "timestamp": "2026-09-11T12:01:00Z",
+      "command": "cargo build"#;
+        std::fs::write(history_path(), broken).unwrap();
+
+        let loaded = load_history().unwrap();
+        assert_eq!(loaded.commands.len(), 1);
+        assert_eq!(loaded.commands[0].command, "git status");
+
+        let corrupt_path = analytics_dir().join("history.json.corrupt");
+        assert!(
+            corrupt_path.exists(),
+            "corrupt file must be preserved as history.json.corrupt"
+        );
+
+        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_history_handles_unrepairable_garbage_safely() {
+        let _guard = TEST_ANALYTICS_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "prism-history-garbage-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("analytics")).unwrap();
+        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+
+        std::fs::write(history_path(), "THIS IS NOT JSON AT ALL").unwrap();
+
+        let loaded = load_history().unwrap();
+        assert_eq!(loaded.commands.len(), 0);
+
+        let corrupt_path = analytics_dir().join("history.json.corrupt");
+        assert!(corrupt_path.exists());
+
+        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

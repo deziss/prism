@@ -68,15 +68,13 @@ prism-disable    # (or alias: prism-off)
 1. **Systemd User Daemons**:
    - `prism-proxy.service`: Transparent MITM Proxy active on `http://127.0.0.1:27181`
    - `prism-mcp.service`: Model Context Protocol server active on `http://127.0.0.1:27182`
-2. **Environment Injection (`~/.config/environment.d/10-prism.conf` & `~/.bashrc`)**:
-   - Sets `HTTP_PROXY` and `HTTPS_PROXY` to `http://127.0.0.1:27181`
-   - Sets `NO_PROXY=localhost,127.0.0.1,::1,.local,.internal`
-   - Adds the PRISM root CA for Node.js (`NODE_EXTRA_CA_CERTS=ca.crt`)
-   - Points the trust-store-*replacing* variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
-     `CURL_CA_BUNDLE`) at `ca-bundle.crt` — system roots **plus** the PRISM CA, so hosts
-     PRISM does not intercept still verify
-   - Registers the CA in the NSS databases used by Chromium/Electron apps and Firefox
-     (requires `libnss3-tools`), which ignore both the variables above and the system store
+2. **Safe Proxy Scoping (No Global Environment Hijacking)**:
+   - Global `HTTP_PROXY` is NOT injected into desktop environment files or shell startup files, preventing IDE/browser connectivity failure if the proxy is stopped.
+   - Run any command through PRISM proxy: `prism proxy <command>` (e.g. `prism proxy claude`).
+   - Enable proxy for current shell session only: `eval $(prism proxy env)`.
+   - Disable proxy in current shell session: `eval $(prism proxy off)`.
+   - Adds the PRISM root CA for Node.js (`NODE_EXTRA_CA_CERTS=ca.crt`) and combined bundle for clients that replace the store (`ca-bundle.crt`).
+   - Registers the CA in the NSS databases used by Chromium/Electron apps and Firefox (requires `libnss3-tools`).
 
    If `certutil` was missing when you ran `prism-enable`, or an app (VS Code,
    Antigravity, Chrome, Firefox) still shows certificate errors, register it manually:
@@ -120,12 +118,12 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
 | Storage Area | Environment Variable | Default Path on Linux | Purpose |
 | :--- | :--- | :--- | :--- |
 | **Global Config** | `$XDG_CONFIG_HOME/prism/` | `~/.config/prism/config.yaml` | User preferences, enabled engines, port mappings |
-| **Project Config** | `<project_root>/` | `.prismrc` or `.prism/config.yaml` | Local repository overrides (precedes global config) |
+| **Project Config** | `<project_root>/` | `.prismrc` | Local repository overrides (precedes global config) |
 | **Persistent Data** | `$XDG_DATA_HOME/prism/` | `~/.local/share/prism/` | Persistent databases and stateful assets: |
 | ↳ *CA Certificates* | `$XDG_DATA_HOME/prism/ca/` | `~/.local/share/prism/ca/` | Root CA private key (`ca.key`, mode 0600) and cert (`ca.crt`) |
 | ↳ *Semantic Cache* | `$XDG_DATA_HOME/prism/cache/` | `~/.local/share/prism/cache/` | TurboVec quantized SIMD vector embeddings cache |
 | ↳ *Knowledge Graph*| `$XDG_DATA_HOME/prism/graph/` | `~/.local/share/prism/graph/` | GraphRAG Petgraph serialized node relations |
-| ↳ *Memory Palace* | `$XDG_DATA_HOME/prism/memory/`| `~/.local/share/prism/memory/` | Sled database for 7-tier associative memory |
+| ↳ *Memory Palace* | `$XDG_DATA_HOME/prism/memory/`| `~/.local/share/prism/memory/` | JSONL database for 3-tier associative memory (recall/core/archive) |
 | ↳ *Analytics* | `$XDG_DATA_HOME/prism/analytics/`| `~/.local/share/prism/analytics/` | Token logs and `proxy_events.jsonl` |
 | **State / Tees** | `$XDG_STATE_HOME/prism/` | `~/.local/share/prism/tee/` | Raw crash and failure logs from `prism cmd` |
 | **Runtime Daemons** | Systemd User Units | `~/.config/systemd/user/` | `prism-proxy.service` (:27181) and `prism-mcp.service` (:27182) |
@@ -222,7 +220,7 @@ extending it — always give them `ca-bundle.crt` (system roots + PRISM CA), nev
 ```bash
 prism read src/lib.rs --mode signatures    # Function signatures, structs, traits (72% token savings)
 prism read src/main.rs --mode skeleton      # Outline of symbols without bodies (77% token savings)
-prism read src/proxy.rs --mode imports      # External dependencies & imports (93% token savings)
+prism read src/proxy.rs --mode map          # Structural outline map of symbols & ranges (93% token savings)
 prism read src/cli.rs --lines 50-120 -n     # Line range slice with line numbers (68% token savings)
 ```
 
@@ -464,7 +462,7 @@ Clients / IDEs / Agents (Claude Code, Cursor, Windsurf, Aider)
          ├── JSON-RPC 2.0 (:27182) ─────────────► PRISM MCP Server
          │                                         ├── prism_read (AST Smart Reader)
          │                                         ├── prism_graph_query (GraphRAG)
-         │                                         ├── prism_memory_search (7-tier Sled KV)
+         │                                         ├── prism_memory_search (3-tier Memory Palace)
          │                                         └── prism_compress (BM25 Compressor)
          │
          └── CLI Terminal ─────────────────────► PRISM Command Gateway

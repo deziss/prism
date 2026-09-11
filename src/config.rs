@@ -1,5 +1,5 @@
 // PRISM config.rs — YAML config loader + .prismrc parser
-// Supports 7-layer memory, 5 MCP tools, GraphRAG
+// Supports 3-tier memory (recall/core/archive), 17 MCP tools, GraphRAG
 
 use serde::{Deserialize, Serialize};
 use serde_yaml;
@@ -228,7 +228,7 @@ pub fn known_field_names() -> std::collections::BTreeSet<String> {
     }
 }
 
-/// Load global config from ~/.prism/config.yaml
+/// Load global config from ~/.config/prism/config.yaml
 pub fn load_global() -> Option<PrismConfig> {
     if let Some(dir) = dirs::config_dir() {
         let file = dir.join("prism").join("config.yaml");
@@ -362,7 +362,7 @@ pub fn save_global(cfg: &PrismConfig) -> std::io::Result<()> {
     std::fs::write(dir.join("config.yaml"), yaml)
 }
 
-/// Initialize ~/.prism directory
+/// Initialize prism configuration directory
 pub fn init_global(data_dir: &Option<PathBuf>) -> std::io::Result<()> {
     let dir = data_dir.clone().unwrap_or_else(default_config_dir);
     ensure_config_dir(&dir)?;

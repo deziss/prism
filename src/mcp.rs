@@ -778,6 +778,20 @@ async fn serve_stdio() -> Result<()> {
     Ok(())
 }
 
+/// Which bearer token, if any, guards the HTTP transport.
+///
+/// Blank is not a token. Each source is filtered independently rather than
+/// `explicit.or(stored)` on the raw values, so an empty `--auth-token ""` — what a
+/// shell produces from an unset variable — falls through to an enrolled agent token
+/// instead of shadowing it with nothing. That is the documented behaviour: the flag,
+/// *or* the credential from `prism hub enroll`.
+fn effective_token(explicit: Option<String>, stored: Option<String>) -> Option<String> {
+    let non_blank = |t: &String| !t.trim().is_empty();
+    explicit
+        .filter(non_blank)
+        .or_else(|| stored.filter(non_blank))
+}
+
 /// `prism mcp --port <p> [--bind <addr>] [--auth-token <token>]` — streamable HTTP,
 /// for the hub's remote MCP client. Loopback by default; going wider requires an
 /// explicit `--bind` and a bearer token (`--auth-token`, or the hub agent token from
@@ -788,7 +802,17 @@ async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result
         .with_context(|| format!("invalid --bind address: {bind}"))?;
     let off_loopback = !bind_ip.is_loopback();
 
-    let token = auth_token.or_else(|| crate::hub::load_credentials().map(|c| c.agent_token));
+    // A blank token is treated as no token at all. This matters because the usual way
+    // to pass one is a shell expansion — the hub's image runs
+    // `prism mcp --bind 0.0.0.0 --auth-token "$PRISM_MCP_TOKEN"` — and an unset or
+    // empty variable yields `--auth-token ""`, i.e. `Some("")`. Testing only
+    // `is_none()` would let that through and bind the LAN behind a bearer token that
+    // every request trivially matches, which is worse than no auth because the log
+    // then claims auth is required.
+    let token = effective_token(
+        auth_token,
+        crate::hub::load_credentials().map(|c| c.agent_token),
+    );
     if off_loopback && token.is_none() {
         anyhow::bail!(
             "refusing to bind {bind} (not loopback) without a bearer token — pass \
@@ -846,5 +870,52 @@ pub async fn start_mcp_server(
         serve_stdio().await
     } else {
         serve_http(port, &bind, auth_token).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_token;
+
+    /// The hub's image runs `prism mcp --bind 0.0.0.0 --auth-token "$PRISM_MCP_TOKEN"`,
+    /// so an unset or empty variable arrives as `Some("")`, not `None`. The
+    /// off-loopback guard tested `is_none()`, which that value satisfies — so it would
+    /// have bound the LAN behind a bearer token every request matches, while logging
+    /// "bearer auth required". That is worse than no auth, because it reads as
+    /// protected.
+    #[test]
+    fn a_blank_token_is_not_a_token() {
+        assert_eq!(effective_token(Some(String::new()), None), None);
+        assert_eq!(effective_token(Some("   ".into()), None), None);
+        assert_eq!(effective_token(None, Some(String::new())), None);
+        assert_eq!(effective_token(None, None), None);
+    }
+
+    #[test]
+    fn a_real_token_from_either_source_is_used() {
+        assert_eq!(
+            effective_token(Some("flag".into()), None).as_deref(),
+            Some("flag")
+        );
+        assert_eq!(
+            effective_token(None, Some("enrolled".into())).as_deref(),
+            Some("enrolled")
+        );
+        // The explicit flag wins when both are real.
+        assert_eq!(
+            effective_token(Some("flag".into()), Some("enrolled".into())).as_deref(),
+            Some("flag")
+        );
+    }
+
+    /// Each source is filtered independently, so an empty flag does not shadow a real
+    /// enrolled credential: `--auth-token ""` behaves like omitting the flag, which is
+    /// exactly the container case.
+    #[test]
+    fn an_empty_flag_falls_through_to_the_enrolled_token() {
+        assert_eq!(
+            effective_token(Some(String::new()), Some("enrolled".into())).as_deref(),
+            Some("enrolled")
+        );
     }
 }
