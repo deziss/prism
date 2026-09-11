@@ -122,7 +122,7 @@ pub enum HubEvent {
 
 /// RFC3339 timestamp for `ts` fields, factored out so every call site stamps the same way.
 pub fn now() -> String {
-    chrono::Utc::now().to_rfc3339()
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// `sent/orig`, the same derived ratio `record_proxy_event` always computed — factored
@@ -444,12 +444,16 @@ async fn post_batch(
     if body.is_empty() {
         return Ok(());
     }
+    let payload = serde_json::json!({
+        "agentId": &creds.agent_id,
+        "events": body,
+    });
     let url = format!("{}/ingest/events", api_base(&creds.hub_url));
     let resp = client
         .post(&url)
         .bearer_auth(&creds.agent_token)
         .header("X-Prism-Agent-Id", &creds.agent_id)
-        .json(&body)
+        .json(&payload)
         .send()
         .await
         .with_context(|| format!("POST {url}"))?;
