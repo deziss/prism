@@ -16,6 +16,7 @@ pub mod memory;
 pub mod proxy;
 pub mod reader;
 pub mod shim;
+pub mod uninstall;
 pub mod utils;
 pub mod vector;
 pub mod vscode;

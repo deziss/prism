@@ -157,8 +157,19 @@ fn print_quickstart() {
     );
     println!("     $ {}", "prism-enable".cyan().bold());
     println!("     • Starts systemd user daemons for Proxy (:27181) and MCP (:27182)");
-    println!("     • Injects proxy settings into environment.d and ~/.bashrc");
-    println!("     • Mounts root CA certificate into Node.js, Python, and Curl trust stores\n");
+    println!("     • Does NOT set a global HTTP_PROXY — nothing is written to");
+    println!("       environment.d, and stale entries there are removed");
+    println!("     • Adds the root CA to the NSS stores used by Electron IDEs and Firefox");
+    println!("     • Use `prism-env <cmd>` to route a single command through the proxy\n");
+
+    println!(
+        "     $ {}   # audit what PRISM put on this machine",
+        "prism uninstall".cyan().bold()
+    );
+    println!(
+        "     $ {}   # and take it all back off\n",
+        "prism uninstall --remove".cyan().bold()
+    );
 
     println!(
         "  {}",
@@ -554,8 +565,11 @@ fn print_troubleshooting() {
     println!("     • Node.js:  export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt");
     println!("     • Python:   export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt");
     println!("     • OpenSSL:  export SSL_CERT_FILE=~/.local/share/prism/ca/ca-bundle.crt");
+    println!("     • System-wide is deliberately NOT set up by `prism init`: nothing");
+    println!("       removed it, and it outlived the private key that uninstalling");
+    println!("       deletes. If you add it by hand, undo it with:");
     println!(
-        "     • System:   sudo cp ~/.local/share/prism/ca/ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates"
+        "       sudo rm -f /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates --fresh"
     );
     println!("     • Chromium/Electron IDEs & Firefox read NSS, not the above:");
     println!(

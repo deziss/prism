@@ -13,16 +13,39 @@
 # ==============================================================================
 set -euo pipefail
 
-CA_DIR="$HOME/.local/share/prism/ca"
-CA_PATH="$CA_DIR/ca.crt"
-BUNDLE_PATH="$CA_DIR/ca-bundle.crt"
-ENV_FILE="$HOME/.config/environment.d/10-prism.conf"
-PORT="27181"
-MCP_PORT="27182"
-HUB_PORT="27183"
-NSS_NICKNAME="PRISM Local CA"
-BLOCK_START="# >>> PRISM DEFAULT LLM PROXY >>>"
-BLOCK_END="# <<< PRISM DEFAULT LLM PROXY <<<"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Every path, port, marker and nickname below comes from the manifest, which is
+# also what prism-disable and remove-prism.sh read. When the two sides kept
+# separate copies of these lists they drifted, and whichever "off" switch you ran
+# left behind whatever the other one knew about.
+for candidate in \
+    "$SCRIPT_DIR/prism-manifest.sh" \
+    "$SCRIPT_DIR/scripts/prism-manifest.sh" \
+    "$HOME/.local/share/prism/prism-manifest.sh"
+do
+    if [ -f "$candidate" ]; then
+        # shellcheck source=prism-manifest.sh
+        source "$candidate"
+        break
+    fi
+done
+
+if [ -z "${PRISM_MANIFEST_LOADED:-}" ]; then
+    echo "ERROR: prism-manifest.sh not found next to this script." >&2
+    exit 2
+fi
+
+CA_DIR="$PRISM_CA_DIR"
+CA_PATH="$PRISM_CA_CERT"
+BUNDLE_PATH="$PRISM_CA_BUNDLE"
+ENV_FILE="$PRISM_LEGACY_ENV_FILE"
+PORT="$PRISM_PROXY_PORT"
+MCP_PORT="$PRISM_MCP_PORT"
+HUB_PORT="$PRISM_HUB_PORT"
+NSS_NICKNAME="$PRISM_NSS_NICKNAME"
+BLOCK_START="${PRISM_RC_BLOCKS[0]%%|||*}"
+BLOCK_END="${PRISM_RC_BLOCKS[0]##*|||}"
 
 echo "[*] Setting up PRISM background services..."
 
@@ -70,14 +93,7 @@ install_nss() {
     echo "  ✓ NSS trust: $count database(s) updated"
 }
 
-prism_nss_dbs() {
-    [ -d "$HOME/.pki/nssdb" ] && echo "sql:$HOME/.pki/nssdb"
-    local prof
-    for prof in "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/; do
-        [ -f "${prof}cert9.db" ] && echo "sql:${prof%/}"
-    done
-    return 0
-}
+# prism_nss_dbs comes from the manifest — see scripts/prism-manifest.sh.
 install_nss
 
 # 3. systemd user units for the proxy and MCP server.
@@ -90,7 +106,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$HOME/.local/bin/prism serve --port $PORT
+ExecStart=$HOME/.local/bin/prism serve --bind 127.0.0.1 --port $PORT
 Restart=always
 RestartSec=3
 Environment=RUST_LOG=info
@@ -107,7 +123,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$HOME/.local/bin/prism mcp --port $MCP_PORT
+ExecStart=$HOME/.local/bin/prism mcp --bind 127.0.0.1 --port $MCP_PORT
 Restart=always
 RestartSec=3
 Environment=RUST_LOG=info

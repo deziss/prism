@@ -5,7 +5,7 @@
 //! Start proxy:       prism serve --port 27181
 //! All apps using HTTP_PROXY / HTTPS_PROXY will route through automatically.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2272,7 +2272,7 @@ fn install_crypto_provider() {
 
 // ── Main server ───────────────────────────────────────────────────────────────
 
-pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
+pub async fn start_server(bind: &str, port: u16, _upstream: Option<String>) -> Result<()> {
     install_crypto_provider();
 
     let ca = ensure_ca()?;
@@ -2290,7 +2290,20 @@ pub async fn start_server(port: u16, _upstream: Option<String>) -> Result<()> {
     let cfg = crate::config::resolve();
     let ratio = cfg.compression_ratio.unwrap_or(0.75).clamp(0.1, 1.0);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Loopback unless the operator asks otherwise. This process holds a CA
+    // private key and will mint a certificate for any host a client requests, so
+    // a wider bind hands that capability to the whole network. It bound 0.0.0.0
+    // unconditionally before `--bind` existed.
+    let ip: std::net::IpAddr = bind
+        .parse()
+        .with_context(|| format!("--bind: '{bind}' is not a valid IP address"))?;
+    let addr = SocketAddr::new(ip, port);
+    if !ip.is_loopback() {
+        warn!(
+            "proxy bound to {ip}, not loopback — this machine will accept \
+             intercepted TLS connections from any host that can reach it"
+        );
+    }
     let listener = TcpListener::bind(addr).await?;
 
     // Owns the batching background task that ships telemetry to the hub, when this
@@ -2558,6 +2571,19 @@ pub fn remove_ca_nss() -> Vec<String> {
     done
 }
 
+/// Install the PRISM CA into the OS-wide trust store.
+///
+/// Intentionally has no caller. `prism init` used to run this, and nothing ever
+/// removed what it wrote: the anchor at `/usr/local/share/ca-certificates/prism.crt`
+/// outlived the private key that uninstallation deleted, leaving the machine
+/// trusting an interception root that could not be audited and that no removal
+/// path looked for. NSS covers the clients that actually need the CA and is
+/// removable, so that is what `init` does now.
+///
+/// Kept so the documented manual commands have a single reference implementation,
+/// and so the removal path in `scripts/prism-manifest.sh` has something concrete
+/// to stay symmetric with.
+#[allow(dead_code)]
 pub fn install_ca_system(ca_cert_pem: &[u8]) -> Result<String> {
     #[cfg(target_os = "linux")]
     {

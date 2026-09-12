@@ -52,13 +52,20 @@ echo "[2/4] Initializing XDG storage and CA certificates..."
 "$BIN_DIR/prism" init --global < /dev/null
 
 # 3. Install toggle helper scripts
-echo "[3/4] Installing system control helpers (prism-enable, prism-disable)..."
-for helper in prism-enable prism-disable; do
+echo "[3/4] Installing system control helpers (prism-enable, prism-disable, prism-env)..."
+
+# The manifest goes in first: every helper sources it, and prism-disable needs to
+# find it after a checkout is gone. It is the single list of everything PRISM
+# writes outside its own tree, and the reason the enable and disable sides can no
+# longer drift apart.
+install -m 0644 "$SCRIPT_DIR/prism-manifest.sh" "$BIN_DIR/prism-manifest.sh"
+
+for helper in prism-enable prism-disable prism-env; do
     install -m 0755 "$SCRIPT_DIR/$helper" "$BIN_DIR/$helper"
 done
 ln -sf "$BIN_DIR/prism-enable" "$BIN_DIR/prism-on" 2>/dev/null || true
 ln -sf "$BIN_DIR/prism-disable" "$BIN_DIR/prism-off" 2>/dev/null || true
-echo "  ✓ Helpers active: prism-enable (alias: prism-on), prism-disable (alias: prism-off)"
+echo "  ✓ Helpers active: prism-enable (alias: prism-on), prism-disable (alias: prism-off), prism-env"
 
 # certutil is what lets Chromium/Electron apps and Firefox trust the MITM CA
 if ! command -v certutil > /dev/null 2>&1; then
@@ -71,6 +78,10 @@ echo "[4/4] Installation completed successfully!"
 echo "=========================================================================="
 echo "  PRISM is installed at: $BIN_DIR/prism"
 echo "  Run 'prism --help' or 'prism guide' at any time."
+echo ""
+echo "  To check what PRISM has put on this machine, or to take it all back off:"
+echo "    prism uninstall              # audit only, changes nothing"
+echo "    prism uninstall --remove"
 echo "=========================================================================="
 
 # 4. User Guide Option

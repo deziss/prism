@@ -34,9 +34,33 @@ enum Args {
         #[arg(trailing_var_arg = true)]
         cmd: Vec<String>,
     },
+    /// Audit — or with --remove, delete — every trace of PRISM on this machine.
+    ///
+    /// Reports by default and changes nothing, including the running processes
+    /// that are still holding PRISM environment variables and that no uninstaller
+    /// can repair. Exits non-zero while anything remains.
+    Uninstall {
+        /// Actually remove what was found. Without this the command only reports.
+        #[arg(long, default_value_t = false)]
+        remove: bool,
+        /// With --remove, skip the confirmation prompt.
+        #[arg(short, long, default_value_t = false)]
+        yes: bool,
+        /// List every affected process individually rather than a summary.
+        #[arg(short, long, default_value_t = false)]
+        verbose: bool,
+    },
     Serve {
         #[arg(short, long, default_value_t = 27181)]
         port: u16,
+        /// Address to bind the proxy to. Loopback by default.
+        ///
+        /// This is an intercepting TLS proxy holding a CA private key: bound to
+        /// 0.0.0.0 it accepts connections from the entire network and will mint a
+        /// certificate for any host the caller asks for. It used to bind 0.0.0.0
+        /// unconditionally, with no way to narrow it.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
         #[arg(long)]
         upstream: Option<String>,
     },
@@ -151,7 +175,16 @@ async fn main() -> Result<()> {
         Args::Gain { history, json } => analytics::show_gains(history, json).await,
         Args::Discover => analytics::discover().await,
         Args::Proxy { cmd } => cli::proxy(cmd).await,
-        Args::Serve { port, upstream } => proxy::start_server(port, upstream).await,
+        Args::Uninstall {
+            remove,
+            yes,
+            verbose,
+        } => prism::uninstall::run(remove, yes, verbose),
+        Args::Serve {
+            port,
+            bind,
+            upstream,
+        } => proxy::start_server(&bind, port, upstream).await,
         Args::Mcp {
             port,
             stdio,

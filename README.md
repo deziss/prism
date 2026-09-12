@@ -61,7 +61,11 @@ PRISM includes zero-friction system toggle scripts for managing background execu
 prism-enable     # (or alias: prism-on)
 
 # Disable PRISM and revert to direct internet
-prism-disable    # (or alias: prism-off)
+prism-disable    # (or alias: prism-off) — stops the daemons, keeps the install
+
+# Complete removal, and the only reliable way to check what is actually left:
+prism uninstall              # audits and changes nothing; exits non-zero if traces remain
+prism uninstall --remove
 ```
 
 ### What `prism-enable` Configures:

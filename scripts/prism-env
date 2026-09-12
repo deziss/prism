@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# prism-env — run one command through the PRISM proxy.
+#
+#   prism-env curl https://api.example.com
+#   prism-env claude
+#
+# Scoped to the single command it launches. Nothing is written to your shell, to
+# environment.d, or to any config file, so there is nothing to undo afterwards
+# and a crashed proxy cannot take the rest of your session with it.
+# ==============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+for candidate in \
+    "$SCRIPT_DIR/prism-manifest.sh" \
+    "$SCRIPT_DIR/scripts/prism-manifest.sh" \
+    "$HOME/.local/share/prism/prism-manifest.sh"
+do
+    if [ -f "$candidate" ]; then
+        # shellcheck source=prism-manifest.sh
+        source "$candidate"
+        break
+    fi
+done
+
+if [ -z "${PRISM_MANIFEST_LOADED:-}" ]; then
+    echo "prism-env: prism-manifest.sh not found — is PRISM installed?" >&2
+    exit 2
+fi
+
+if [ "$#" -eq 0 ]; then
+    echo "Usage: prism-env <command> [args...]" >&2
+    exit 2
+fi
+
+# The CA bundle, never the bare CA.
+#
+# SSL_CERT_FILE, CURL_CA_BUNDLE and REQUESTS_CA_BUNDLE REPLACE the trust store
+# rather than adding to it. Pointing them at ca.crt alone — which an earlier
+# version of this script did — leaves the command trusting PRISM and nothing
+# else, so every ordinary HTTPS request fails with an opaque verification error.
+# ca-bundle.crt is the system roots with the PRISM CA appended.
+if [ ! -f "$PRISM_CA_BUNDLE" ]; then
+    echo "prism-env: no trust bundle at $PRISM_CA_BUNDLE" >&2
+    echo "           Run 'prism init --global' to generate it." >&2
+    exit 1
+fi
+
+# Refuse to proxy into a void: with nothing listening, every request from the
+# wrapped command fails with ERR_PROXY_CONNECTION_FAILED and no clue why.
+if ! ss -ltn 2>/dev/null | grep -q ":$PRISM_PROXY_PORT "; then
+    echo "prism-env: nothing is listening on 127.0.0.1:$PRISM_PROXY_PORT." >&2
+    echo "           Start it with 'prism-enable', or run the command directly." >&2
+    exit 1
+fi
+
+export HTTP_PROXY="http://127.0.0.1:$PRISM_PROXY_PORT"
+export HTTPS_PROXY="$HTTP_PROXY"
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTP_PROXY"
+export NO_PROXY="localhost,127.0.0.1,::1"
+export no_proxy="$NO_PROXY"
+
+export SSL_CERT_FILE="$PRISM_CA_BUNDLE"
+export CURL_CA_BUNDLE="$PRISM_CA_BUNDLE"
+export REQUESTS_CA_BUNDLE="$PRISM_CA_BUNDLE"
+# Node appends this to its built-in roots rather than replacing them, so the
+# bare CA is correct here.
+export NODE_EXTRA_CA_CERTS="$PRISM_CA_CERT"
+
+exec "$@"

@@ -240,21 +240,28 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
             Err(e) => println!("  NSS trust:    failed: {}", e),
         }
 
-        // Try to install CA to system trust store (requires sudo)
-        match crate::proxy::install_ca_system(&ca.cert_pem) {
-            Ok(msg) => println!("  System trust: {}", msg),
-            Err(_) => {
-                println!("  System trust: manual install required:");
-                println!(
-                    "    Linux: sudo cp {} /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates",
-                    ca_path.display()
-                );
-                println!(
-                    "    macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
-                    ca_path.display()
-                );
-            }
-        }
+        // The system trust store is deliberately NOT written.
+        //
+        // This used to call install_ca_system(), which writes
+        // /usr/local/share/ca-certificates/prism.crt and runs
+        // update-ca-certificates. Nothing in the project ever removed it, while
+        // uninstalling *did* delete the CA private key under the data directory —
+        // so a "complete removal" could leave the machine trusting an interception
+        // root whose key no longer exists and which nobody would think to look for.
+        //
+        // NSS (above) already covers the browsers and Electron IDEs that actually
+        // need it, and it is removable. Anyone who genuinely wants the system-wide
+        // anchor can add it deliberately, and is told here how to take it back out.
+        println!("  System trust: not modified (NSS above covers browsers and IDEs)");
+        println!("    To add it system-wide anyway:");
+        println!(
+            "      sudo cp {} /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates",
+            ca_path.display()
+        );
+        println!("    To undo that later:");
+        println!(
+            "      sudo rm -f /usr/local/share/ca-certificates/prism.crt && sudo update-ca-certificates --fresh"
+        );
 
         // Write Claude Code MCP config
         write_claude_mcp_config()?;
@@ -1245,14 +1252,24 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
                     "  GUI-launched editors do not read your shell rc. Set it in the client instead:"
                 );
                 println!(
-                    "    Claude Code    ~/.claude/settings.json   {{\"env\": {{\"PATH\": \"{}:${{PATH}}\"}}}}",
-                    sh::shim_dir().display()
-                );
-                println!(
-                    "    Cursor/VS Code settings.json             \"terminal.integrated.env.linux\": {{\"PATH\": \"{}:${{env:PATH}}\"}}",
+                    "    Cursor/VS Code settings.json   \"terminal.integrated.env.linux\": {{\"PATH\": \"{}:${{env:PATH}}\"}}",
                     sh::shim_dir().display()
                 );
                 println!("    anything else  export PATH before launching it");
+                println!();
+                // Deliberately not suggested: ~/.claude/settings.json {"env":
+                // {"PATH": "<shims>:${PATH}"}}. Claude Code does not expand
+                // ${PATH} there, so the agent's shell ends up with the shims
+                // directory plus a literal "${PATH}" string and nothing else —
+                // every command becomes "command not found". It then survives
+                // uninstallation, because the shims directory is deleted while the
+                // setting that points at it is not.
+                println!("    Claude Code: launch it from a shell that already has the shims on");
+                println!("                 PATH. Do not set env.PATH in ~/.claude/settings.json —");
+                println!(
+                    "                 ${{PATH}} is not expanded there, which leaves the agent"
+                );
+                println!("                 with no working PATH at all.");
             }
             println!();
             println!("  Mode: {:?} (PRISM_SHIM=auto|always|off).", sh::mode());

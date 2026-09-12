@@ -1,73 +1,167 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# prism-disable — remove PRISM services: stop the daemons, drop proxy environment,
-# and clean up trust databases.
+# prism-disable — turn PRISM off without uninstalling it.
+#
+# Stops the daemons, drops the CA from every trust database, and removes PRISM's
+# blocks from shell startup files. The binary and your data stay put, so
+# `prism-enable` can turn it back on.
+#
+# For complete removal use remove-prism.sh, which additionally deletes the
+# binary, the data directory, the IDE settings and the Claude Code registration.
+#
+# Every path, marker and variable this touches comes from scripts/prism-manifest.sh.
+# Keeping the list in one place is the fix for the bug this script used to have:
+# it and remove-prism.sh each knew about a different subset of what prism-enable
+# created, so whichever one you ran left something behind.
 # ==============================================================================
+
 set -euo pipefail
 
-CA_DIR="$HOME/.local/share/prism/ca"
-ENV_FILE="$HOME/.config/environment.d/10-prism.conf"
-NSS_NICKNAME="PRISM Local CA"
-BLOCK_START="# >>> PRISM DEFAULT LLM PROXY >>>"
-BLOCK_END="# <<< PRISM DEFAULT LLM PROXY <<<"
-INIT_START="# PRISM — transparent LLM proxy (added by \`prism init --global\`)"
-INIT_END="# end PRISM"
-ENV_START="# PRISM environment (added by \`prism init --global\`)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[*] Disabling PRISM background services..."
-
-# 1. Stop and disable the user services.
-for svc in prism-proxy.service prism-mcp.service; do
-    if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
-        systemctl --user stop "$svc" 2>/dev/null || true
+# Installed to ~/.local/bin alongside the manifest; also runnable from a checkout.
+for candidate in \
+    "$SCRIPT_DIR/prism-manifest.sh" \
+    "$SCRIPT_DIR/scripts/prism-manifest.sh" \
+    "$HOME/.local/share/prism/prism-manifest.sh"
+do
+    if [ -f "$candidate" ]; then
+        # shellcheck source=prism-manifest.sh
+        source "$candidate"
+        break
     fi
-    if systemctl --user is-enabled --quiet "$svc" 2>/dev/null; then
-        systemctl --user disable "$svc" 2>/dev/null || true
-    fi
-    rm -f "$HOME/.config/systemd/user/$svc"
 done
-systemctl --user daemon-reload 2>/dev/null || true
-echo "  ✓ Stopped & disabled prism-proxy and prism-mcp."
 
-# 2. Remove the session environment file and unset systemd variables.
-if [ -f "$ENV_FILE" ]; then
-    rm -f "$ENV_FILE"
-    echo "  ✓ Removed $ENV_FILE"
+if [ -z "${PRISM_MANIFEST_LOADED:-}" ]; then
+    echo "ERROR: prism-manifest.sh not found next to this script." >&2
+    echo "Reinstall with scripts/install.sh, or run remove-prism.sh from a checkout." >&2
+    exit 2
 fi
-systemctl --user unset-environment HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy PRISM_HUB_URL 2>/dev/null || true
 
-# 3. Clean the shell rc blocks.
-for RC in "$HOME/.bashrc" "$HOME/.profile" "$HOME/.zshrc"; do
-    if [ -f "$RC" ]; then
-        sed -i "/$BLOCK_START/,/$BLOCK_END/d" "$RC"
-        sed -i "\|$INIT_START|,/$INIT_END/d" "$RC"
-        sed -i "\|$ENV_START|,/$INIT_END/d" "$RC"
-        echo "  ✓ Cleaned $RC"
-    fi
+echo "[*] Disabling PRISM..."
+
+# ------------------------------------------------------------------------------
+# 1. Stop every PRISM unit, found by glob.
+#
+# This used to name prism-proxy.service and prism-mcp.service explicitly, which
+# missed an ad-hoc unit installed by hand. A glob catches units this repo has
+# never heard of, which is the case that actually bit.
+# ------------------------------------------------------------------------------
+
+stopped=0
+while IFS= read -r unit_file; do
+    [ -z "$unit_file" ] && continue
+    unit="$(basename "$unit_file")"
+    systemctl --user stop "$unit" 2> /dev/null || true
+    systemctl --user disable "$unit" 2> /dev/null || true
+    rm -f "$unit_file"
+    stopped=$((stopped + 1))
+done < <(prism_unit_files)
+
+while IFS= read -r link; do
+    [ -z "$link" ] && continue
+    rm -f "$link"
+done < <(prism_unit_wants_links)
+
+systemctl --user daemon-reload 2> /dev/null || true
+systemctl --user reset-failed 2> /dev/null || true
+echo "  ✓ Stopped and removed $stopped PRISM unit(s)"
+
+# Confirm nothing is restarting before reporting success: a Restart=always unit
+# that survived would silently respawn and make the rest of this a lie.
+pkill -f "$PRISM_BIN_DIR/prism serve" 2> /dev/null || true
+pkill -f "$PRISM_BIN_DIR/prism mcp" 2> /dev/null || true
+sleep 1
+if pgrep -f "$PRISM_BIN_DIR/prism (serve|mcp)" > /dev/null 2>&1; then
+    echo "  ! A PRISM daemon is still running — something outside systemd restarts it." >&2
+fi
+
+# ------------------------------------------------------------------------------
+# 2. Session environment.
+# ------------------------------------------------------------------------------
+
+[ -f "$PRISM_LEGACY_ENV_FILE" ] && {
+    rm -f "$PRISM_LEGACY_ENV_FILE"
+    echo "  ✓ Removed $PRISM_LEGACY_ENV_FILE"
+}
+systemctl --user unset-environment "${PRISM_ENV_VARS[@]}" 2> /dev/null || true
+
+# ------------------------------------------------------------------------------
+# 3. Shell startup files: all marker styles, plus the aliases inside them.
+#
+# Removing a block's contents but leaving its markers and eight aliases pointing
+# at a stopped binary was the previous behaviour.
+# ------------------------------------------------------------------------------
+
+for rc in "${PRISM_RC_FILES[@]}"; do
+    [ -f "$rc" ] || continue
+    for block in "${PRISM_RC_BLOCKS[@]}"; do
+        start="${block%%|||*}"
+        end="${block##*|||}"
+        sed -i "\|$start|,\|$end|d" "$rc"
+    done
+    for alias_name in "${PRISM_RC_ALIASES[@]}"; do
+        sed -i -E "/^[[:space:]]*alias[[:space:]]+$alias_name=\"?prism/d" "$rc"
+    done
+    echo "  ✓ Cleaned $rc"
 done
 
-# 4. Remove the CA from NSS databases.
+[ -f "$PRISM_FISH_CONFIG" ] && {
+    sed -i "\|$PRISM_SHIM_DIR|d" "$PRISM_FISH_CONFIG"
+    echo "  ✓ Cleaned $PRISM_FISH_CONFIG"
+}
+
+# ------------------------------------------------------------------------------
+# 4. NSS trust.
+#
+# certutil missing used to mean this step returned silently, leaving the CA
+# trusted by every Electron app and Firefox profile while reporting success.
+# ------------------------------------------------------------------------------
+
 if command -v certutil > /dev/null 2>&1; then
-    count=0
-    dbs=""
-    [ -d "$HOME/.pki/nssdb" ] && dbs="sql:$HOME/.pki/nssdb"
-    for prof in "$HOME"/.mozilla/firefox/*/ "$HOME"/snap/firefox/common/.mozilla/firefox/*/; do
-        [ -f "${prof}cert9.db" ] && dbs="$dbs sql:${prof%/}"
-    done
-    for db in $dbs; do
-        if certutil -D -d "$db" -n "$NSS_NICKNAME" -f /dev/null > /dev/null 2>&1; then
-            count=$((count + 1))
+    removed=0
+    while IFS= read -r db; do
+        [ -z "$db" ] && continue
+        if certutil -D -d "$db" -n "$PRISM_NSS_NICKNAME" -f /dev/null > /dev/null 2>&1; then
+            removed=$((removed + 1))
         fi
-    done
-    echo "  ✓ NSS trust: removed from $count database(s)"
+    done < <(prism_nss_dbs)
+    echo "  ✓ NSS trust: removed from $removed database(s)"
+else
+    echo "  ! certutil not found — the PRISM CA is STILL TRUSTED by every Electron" >&2
+    echo "    app and Firefox profile on this machine. To finish:" >&2
+    echo "      sudo apt install libnss3-tools && prism-disable" >&2
 fi
+
+# ------------------------------------------------------------------------------
+# 5. Report what disabling deliberately does not do.
+# ------------------------------------------------------------------------------
 
 cat << SUMMARY
 
 ==========================================================================
-  [✓] PRISM background services disabled and cleaned.
+  [✓] PRISM is disabled. The binary and your data are still installed.
 
-  If this shell still has old exports active, run:
-    unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
-==========================================================================
+  Still in place (by design — 'disable' is not 'uninstall'):
 SUMMARY
+
+[ -d "$PRISM_SHIM_DIR" ] && cat << SHIMS
+    * $PRISM_SHIM_DIR is still on PATH in new shells, so git/ls/find
+      still resolve through PRISM shims. They fall through to the real tool,
+      but to stop that entirely run: prism shim uninstall
+SHIMS
+
+cat << SUMMARY2
+    * $PRISM_BIN_DIR/prism and $PRISM_DATA_DIR
+    * IDE proxy settings and the Claude Code MCP registration
+
+  For a complete removal, including all of the above:
+      ./remove-prism.sh            # audit first, changes nothing
+      ./remove-prism.sh --remove
+
+  This shell, and every program already running, keeps the environment it
+  started with. Nothing can change that from outside. Log out and back in to
+  clear it, or for this shell only:
+      unset ${PRISM_ENV_VARS[*]}
+==========================================================================
+SUMMARY2
