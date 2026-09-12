@@ -438,6 +438,10 @@ fn hostname_string() -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
+/// How often an idle agent reports in, comfortably inside the hub's five-minute
+/// online window so one dropped heartbeat does not flip the fleet view to `Stale`.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 const MAX_BATCH: usize = 200;
 
 /// POST one batch of already-serialized `HubEvent` JSON lines to `/api/ingest/events`.
@@ -871,6 +875,30 @@ impl HubSender {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        // Heartbeat.
+        //
+        // The hub decides an agent is online purely from `Agent.lastSeenAt`, which it
+        // bumps when telemetry is ingested and when the agent fetches its config. Its
+        // online window is five minutes, and the code comment there assumes "an agent
+        // polls /config well inside this if it's alive".
+        //
+        // Nothing polled. The 2-second tick above only talks to the hub when there is
+        // something to send: an empty batch is skipped, and `flush` returns without any
+        // HTTP call when the spool is empty. So an agent with no LLM traffic sent
+        // nothing at all, and after five idle minutes a perfectly healthy machine
+        // showed up in the fleet as `Stale` — indistinguishable from one that had been
+        // switched off, which is precisely the distinction the column exists to make.
+        //
+        // Fetching config is the right heartbeat rather than a new ping endpoint: the
+        // hub already treats it as proof of life, it is what the online window was
+        // written around, and it makes hub policy changes reach a running agent instead
+        // of waiting for the next restart.
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval` fires immediately; the startup drain above has already announced
+        // this agent, so skip the first tick rather than double-reporting.
+        heartbeat.tick().await;
+
         loop {
             tokio::select! {
                 biased;
@@ -890,6 +918,13 @@ impl HubSender {
                         Self::send_batch(&client, &creds, &mut batch).await;
                     }
                     let _ = flush(&creds).await;
+                }
+                _ = heartbeat.tick() => {
+                    // Best-effort: a hub that is down or a policy that fails to parse
+                    // must never take the proxy with it. The next tick retries.
+                    if let Err(e) = fetch_config(&creds).await {
+                        tracing::debug!("hub heartbeat: {e}");
+                    }
                 }
             }
         }
