@@ -1803,13 +1803,28 @@ async fn serve_session<C, U, F, Fut>(
         } = prepared;
 
         // Replay before opening the request, when the user has opted in and the entry
-        // is safe to reuse.
+        // is safe to reuse (exact match or semantic similarity match).
         if let Some(ck) = &ck {
             let mode = cache_serve_mode();
             if mode != ServeMode::Off {
-                if let Some(entry) = crate::cache::lookup_keyed(&ck.key)
+                let matched_entry = crate::cache::lookup_keyed(&ck.key)
                     .filter(|e| should_serve(mode, ck, e, is_stream))
-                {
+                    .map(|e| (e, 1.0f32))
+                    .or_else(|| {
+                        if mode == ServeMode::Always && !ck.prompt.is_empty() {
+                            let hits = crate::cache::lookup_similar(&ck.prompt, 1);
+                            if let Some(scored) = hits.into_iter().next() {
+                                if scored.score >= crate::cache::min_similarity()
+                                    && should_serve(mode, ck, &scored.entry, is_stream)
+                                {
+                                    return Some((scored.entry, scored.score));
+                                }
+                            }
+                        }
+                        None
+                    });
+
+                if let Some((entry, similarity)) = matched_entry {
                     let bytes = cached_response_bytes(&entry);
                     if client.write_all(&bytes).await.is_err() {
                         return;
@@ -1817,8 +1832,8 @@ async fn serve_session<C, U, F, Fut>(
                     let _ = client.flush().await;
                     let served = extract_resp_tokens(entry.response.as_bytes());
                     info!(
-                        "{} {} cache hit — {} in, {} out served locally, upstream skipped",
-                        provider, model, orig_tokens, served
+                        "{} {} cache hit (score {:.2}) — {} in, {} out served locally, upstream skipped",
+                        provider, model, similarity, orig_tokens, served
                     );
                     let model_s = if model.is_empty() {
                         "unknown".to_string()
@@ -1856,7 +1871,7 @@ async fn serve_session<C, U, F, Fut>(
                         crate::analytics::record_proxy_event(&ev);
                         hub_hit.send(crate::hub::HubEvent::Cache(crate::hub::CacheEvent {
                             event: crate::hub::CacheEventKind::Hit,
-                            similarity: 1.0,
+                            similarity,
                             key_hash,
                             ts: crate::hub::now(),
                         }));
