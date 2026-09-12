@@ -187,6 +187,12 @@ pub struct GainProxySummary {
 pub struct GainTopCommand {
     pub command: String,
     pub tokens: usize,
+    /// How many times this command ran.
+    pub runs: usize,
+    /// Approximate tokens the filters kept out of context for this command.
+    pub saved_tokens: usize,
+    /// Saved as a share of what the command would have cost unfiltered.
+    pub saved_pct: f64,
 }
 
 /// Everything `prism gain` can show, computed once and shared by the human printer and
@@ -195,6 +201,11 @@ pub struct GainTopCommand {
 pub struct GainReport {
     pub total_commands: usize,
     pub total_output_tokens: usize,
+    /// Approximate tokens the raw command output would have cost unfiltered.
+    pub total_input_tokens: usize,
+    /// Approximate tokens the `prism cmd` filters kept out of context.
+    pub total_saved_tokens: usize,
+    pub saved_pct: f64,
     pub proxy: Option<GainProxySummary>,
     pub top_commands: Vec<GainTopCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,18 +236,47 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
         }
     });
 
-    let mut by_cmd: HashMap<&str, usize> = HashMap::new();
+    let total_input_tokens: usize = hist.commands.iter().map(|e| e.input_tokens()).sum();
+    let total_saved_tokens: usize = hist.commands.iter().map(|e| e.saved_tokens()).sum();
+    let saved_pct = if total_input_tokens > 0 {
+        (total_saved_tokens as f64 / total_input_tokens as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Rank by tokens *saved*, not tokens spent. The old ordering answered "which
+    // command produced the most output", which reads as a cost ranking; what the
+    // report is for is showing where the filtering earns its keep.
+    #[derive(Default)]
+    struct CmdAgg {
+        tokens: usize,
+        input: usize,
+        saved: usize,
+        runs: usize,
+    }
+    let mut by_cmd: HashMap<&str, CmdAgg> = HashMap::new();
     for e in &hist.commands {
-        *by_cmd.entry(&e.command).or_default() += e.tokens();
+        let agg = by_cmd.entry(&e.command).or_default();
+        agg.tokens += e.tokens();
+        agg.input += e.input_tokens();
+        agg.saved += e.saved_tokens();
+        agg.runs += 1;
     }
     let mut top: Vec<_> = by_cmd.into_iter().collect();
-    top.sort_by_key(|a| std::cmp::Reverse(a.1));
+    top.sort_by_key(|(_, a)| std::cmp::Reverse(a.saved));
     let top_commands = top
         .into_iter()
         .take(10)
-        .map(|(command, tokens)| GainTopCommand {
+        .map(|(command, agg)| GainTopCommand {
             command: command.to_string(),
-            tokens,
+            tokens: agg.tokens,
+            runs: agg.runs,
+            saved_tokens: agg.saved,
+            saved_pct: if agg.input > 0 {
+                (agg.saved as f64 / agg.input as f64) * 100.0
+            } else {
+                0.0
+            },
         })
         .collect();
 
@@ -256,6 +296,9 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
     Ok(GainReport {
         total_commands: hist.commands.len(),
         total_output_tokens,
+        total_input_tokens,
+        total_saved_tokens,
+        saved_pct,
         proxy,
         top_commands,
         history,
@@ -297,6 +340,33 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
             report.total_output_tokens.to_string().cyan().bold()
         );
 
+        // The headline number. `prism cmd` filtering is what runs on every shimmed
+        // command, so this is the figure that represents what PRISM actually did —
+        // and it read a flat 0 until the report learned to derive it from the bytes
+        // that were being recorded all along.
+        println!("\n  {}", "CLI FILTERING (prism cmd):".bold().yellow());
+        println!(
+            "    {:<28} {}",
+            "Raw output tokens:",
+            report.total_input_tokens.to_string().cyan()
+        );
+        println!(
+            "    {:<28} {}",
+            "After filtering:",
+            report.total_output_tokens.to_string().cyan()
+        );
+        println!(
+            "    {:<28} {} ({:.1}%)",
+            "Tokens saved:",
+            report.total_saved_tokens.to_string().green().bold(),
+            report.saved_pct
+        );
+        println!(
+            "    {}",
+            "approximate: bytes/3.5, not a tokenizer pass — counting exactly on the".dimmed()
+        );
+        println!("    {}", "hot path costs ~0.5s per command.".dimmed());
+
         // Measured proxy savings — read from the event log, not estimated.
         if let Some(proxy) = &report.proxy {
             println!("\n  {}", "PROXY INTERCEPTION:".bold().yellow());
@@ -332,12 +402,21 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
             );
         }
 
-        println!("\n  {}", "TOP COMMANDS BY TOKEN SPEND:".bold().yellow());
+        println!("\n  {}", "TOP COMMANDS BY TOKENS SAVED:".bold().yellow());
+        println!(
+            "    {:<14} {:>7} {:>12} {:>8}",
+            "command".dimmed(),
+            "runs".dimmed(),
+            "saved".dimmed(),
+            "saved %".dimmed()
+        );
         for top in &report.top_commands {
             println!(
-                "    {:<18} {:>10} tokens",
-                top.command.cyan(),
-                top.tokens.to_string().white()
+                "    {:<14} {:>7} {:>12} {:>7.1}%",
+                top.command,
+                top.runs,
+                top.saved_tokens.to_string().green(),
+                top.saved_pct
             );
         }
         println!("  {}\n", "─".repeat(65).dimmed());
@@ -407,6 +486,25 @@ impl CommandEntry {
         } else {
             (self.output_bytes as f64 / 3.5) as usize
         }
+    }
+
+    /// Tokens the command *would* have cost unfiltered, approximated from the raw
+    /// byte count by the same chars/3.5 rule `tokens()` uses for the filtered side.
+    ///
+    /// Recorded entries carry `savings: 0` because counting tokens on the hot path
+    /// costs ~0.54s per invocation (see `record_command`). The bytes to derive it
+    /// from were always there; nothing ever derived it, so `prism gain` reported a
+    /// flat zero saving no matter how much the filters actually removed.
+    fn input_tokens(&self) -> usize {
+        (self.input_bytes as f64 / 3.5) as usize
+    }
+
+    /// Approximate tokens this invocation kept out of the model's context.
+    ///
+    /// Saturating: a filter may add a byte or two (the `↳ /tee/path` pointer) on
+    /// output it otherwise passed through, and a negative saving is not meaningful.
+    fn saved_tokens(&self) -> usize {
+        self.input_tokens().saturating_sub(self.tokens())
     }
 }
 
@@ -500,20 +598,56 @@ fn save_history(history: History) -> Result<()> {
 mod tests {
     use super::*;
 
-    static TEST_ANALYTICS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_env::TestEnv;
+
+    fn entry(command: &str, input_bytes: usize, output_bytes: usize) -> CommandEntry {
+        CommandEntry {
+            timestamp: chrono::Utc::now(),
+            command: command.to_string(),
+            input_bytes,
+            output_tokens: 0,
+            output_bytes,
+            savings: 0,
+        }
+    }
+
+    /// Savings must be derived from the recorded bytes.
+    ///
+    /// `record_command` deliberately stores `savings: 0` and `output_tokens: 0` —
+    /// counting tokens on the hot path costs ~0.5s per invocation. Nothing then
+    /// derived them at report time, so `prism gain` reported a flat zero saving no
+    /// matter how much the filters removed: a real 121,258 -> 6,611 byte reduction
+    /// (95%) displayed as "0 (0.0%)".
+    #[test]
+    fn saved_tokens_are_derived_from_bytes_not_the_stored_zero() {
+        let e = entry("ps", 121_258, 6_611);
+        assert_eq!(
+            e.savings, 0,
+            "storage stays cheap: nothing is counted inline"
+        );
+        assert!(e.saved_tokens() > 30_000, "got {}", e.saved_tokens());
+        let pct = e.saved_tokens() as f64 / e.input_tokens() as f64 * 100.0;
+        assert!((94.0..=96.0).contains(&pct), "expected ~95%, got {pct:.1}");
+    }
+
+    /// A filter that passes output through unchanged saves nothing, and a filter that
+    /// adds a byte (the `↳ /tee/path` pointer) must not report a negative saving.
+    #[test]
+    fn passthrough_and_growth_never_report_a_saving() {
+        assert_eq!(entry("docker", 28_630, 28_630).saved_tokens(), 0);
+        assert_eq!(entry("git", 100, 4_000).saved_tokens(), 0);
+        assert_eq!(entry("noop", 0, 0).saved_tokens(), 0);
+    }
 
     #[test]
     fn load_history_recovers_from_truncated_file() {
-        let _guard = TEST_ANALYTICS_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-history-test-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         std::fs::create_dir_all(dir.join("analytics")).unwrap();
-        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        let _env = TestEnv::redirect(&dir);
 
         // Write a partially cut history file (cut in the middle of command 2)
         let broken = r#"{
@@ -541,22 +675,18 @@ mod tests {
             "corrupt file must be preserved as history.json.corrupt"
         );
 
-        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_history_handles_unrepairable_garbage_safely() {
-        let _guard = TEST_ANALYTICS_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-history-garbage-{}-{}",
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         std::fs::create_dir_all(dir.join("analytics")).unwrap();
-        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        let _env = TestEnv::redirect(&dir);
 
         std::fs::write(history_path(), "THIS IS NOT JSON AT ALL").unwrap();
 
@@ -566,7 +696,6 @@ mod tests {
         let corrupt_path = analytics_dir().join("history.json.corrupt");
         assert!(corrupt_path.exists());
 
-        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

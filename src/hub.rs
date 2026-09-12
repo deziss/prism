@@ -65,7 +65,16 @@ pub struct CommandEvent {
     pub tool: String,
     pub subcommand: String,
     pub exit_code: i32,
+    /// Wall clock of the **wrapped command**, not of PRISM.
+    ///
+    /// `prism cmd sleep 3` sets this to ~3002. The hub charts it as "Avg cmd time";
+    /// it says nothing about PRISM's own cost — see `filter_us` for that.
     pub duration_ms: u64,
+    /// Microseconds PRISM itself spent: filtering, truncation detection, teeing and
+    /// the stdout write. This is PRISM's actual overhead, and the only figure that
+    /// can be compared against another wrapper like rtk.
+    #[serde(default)]
+    pub filter_us: u64,
     pub input_bytes: usize,
     pub output_bytes: usize,
     /// Bytes elided by the filter (`input_bytes - output_bytes`, floored at 0) — the
@@ -1021,6 +1030,7 @@ mod contract {
                 subcommand: "status".to_string(),
                 exit_code: 0,
                 duration_ms: 37,
+                filter_us: 0,
                 input_bytes: 4096,
                 output_bytes: 512,
                 filtered_bytes: 3584,
@@ -1181,18 +1191,17 @@ mod tests {
     }
     use super::*;
 
-    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_env::TestEnv;
 
     #[test]
     fn spool_rotate_confirm_round_trip() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-hub-spool-test-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        let _env = TestEnv::redirect(&dir);
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(true));
 
         let ev = HubEvent::Command(CommandEvent {
@@ -1200,6 +1209,7 @@ mod tests {
             subcommand: String::new(),
             exit_code: 0,
             duration_ms: 5,
+            filter_us: 0,
             input_bytes: 10,
             output_bytes: 10,
             filtered_bytes: 0,
@@ -1229,20 +1239,18 @@ mod tests {
         assert_eq!(status().spool_events, 0);
 
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
-        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn unenrolled_writes_nothing() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-hub-unenrolled-test-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        unsafe { std::env::set_var("PRISM_DATA_DIR", &dir) };
+        let _env = TestEnv::redirect(&dir);
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(false));
 
         let ev = HubEvent::Command(CommandEvent {
@@ -1250,6 +1258,7 @@ mod tests {
             subcommand: String::new(),
             exit_code: 0,
             duration_ms: 5,
+            filter_us: 0,
             input_bytes: 10,
             output_bytes: 10,
             filtered_bytes: 0,
@@ -1265,23 +1274,18 @@ mod tests {
         );
 
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
-        unsafe { std::env::remove_var("PRISM_DATA_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn over_cap_spool_drops_oldest_and_reports_loss() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "prism-hub-cap-test-{}-{:?}",
             std::process::id(),
             std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        unsafe {
-            std::env::set_var("PRISM_DATA_DIR", &dir);
-            std::env::set_var("PRISM_SPOOL_MAX_BYTES", "1000");
-        };
+        let _env = TestEnv::redirect(&dir).spool_max_bytes(1000);
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = Some(true));
 
         for i in 0..15 {
@@ -1290,6 +1294,7 @@ mod tests {
                 subcommand: String::new(),
                 exit_code: 0,
                 duration_ms: 1,
+                filter_us: 0,
                 input_bytes: 50,
                 output_bytes: 50,
                 filtered_bytes: 0,
@@ -1319,10 +1324,6 @@ mod tests {
         );
 
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
-        unsafe {
-            std::env::remove_var("PRISM_DATA_DIR");
-            std::env::remove_var("PRISM_SPOOL_MAX_BYTES");
-        };
         let _ = std::fs::remove_dir_all(&dir);
     }
 

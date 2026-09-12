@@ -1014,6 +1014,11 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
         Ok(o) => o,
         Err(e) => anyhow::bail!("prism cmd: failed to run `{}`: {}", cmd, e),
     };
+    // Stops when the child exits. This is the CHILD's wall clock, not PRISM's cost —
+    // `prism cmd sleep 3` records 3002 here. It was the only timing PRISM reported,
+    // and the hub surfaced it under "Avg / run", which read as PRISM being slow when
+    // it was showing how long the user's own docker builds took. `filter_ms` below is
+    // the number that actually describes PRISM's overhead.
     let duration_ms = cmd_started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1026,7 +1031,12 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
         (false, false) => format!("{}\n{}", stdout.trim_end_matches('\n'), stderr),
     };
 
-    // Filter output through the tool-family filters
+    // Filter output through the tool-family filters.
+    //
+    // Timed separately from the child: this, plus the teeing and the write below, is
+    // the entire cost of putting PRISM in front of a command. Nothing measured it
+    // before, so there was no honest answer to "how much does PRISM add?".
+    let filter_started = std::time::Instant::now();
     let filtered = crate::filter::filter_output(&raw_text, cmd, &args[1..]);
     let truncated = crate::filter::has_truncation(&filtered);
     let failed = !output.status.success();
@@ -1054,6 +1064,9 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
         }
     }
     let _ = std::io::stdout().write_all(out.as_bytes());
+    // Everything PRISM did on top of running the command, in microseconds so that a
+    // sub-millisecond filter pass does not round to a meaningless 0.
+    let filter_us = filter_started.elapsed().as_micros() as u64;
 
     // Record size, not an exact token count: a PATH shim puts this on the critical path
     // of every command, and loading the cl100k table to fill in a dashboard statistic
@@ -1069,6 +1082,7 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
         subcommand: args.get(1).cloned().unwrap_or_default(),
         exit_code: output.status.code().unwrap_or(-1),
         duration_ms,
+        filter_us,
         input_bytes: raw_text.len(),
         output_bytes: out.len(),
         filtered_bytes: raw_text.len().saturating_sub(out.len()),

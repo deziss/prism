@@ -25,6 +25,7 @@
     "subcommand": "status",
     "exitCode": 0,
     "durationMs": 37,
+    "filterUs": 0,
     "inputBytes": 4096,
     "outputBytes": 512,
     "filteredBytes": 3584,

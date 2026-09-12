@@ -2851,9 +2851,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        // SAFETY: single-threaded env mutation scoped to this test's own temp dir name.
-        unsafe { std::env::set_var("PRISM_DATA_DIR", &store) };
+        // This claimed "single-threaded env mutation" and took no lock at all, which
+        // is not true of `cargo test` — and it never restored the variable, so the
+        // override leaked into every test that ran afterwards.
         std::fs::create_dir_all(&store).unwrap();
+        let _env = crate::test_env::TestEnv::redirect(&store);
         std::fs::write(store.join("hub-config.yaml"), "cache_enabled: true\n").unwrap();
         assert!(
             crate::cache::is_enabled(),
