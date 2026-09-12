@@ -54,6 +54,12 @@ const PRICING: &[(&str, f64, f64)] = &[
     ("gemini-1.5-flash", 0.000075, 0.0003),
     ("gemini-1.5-pro", 0.00125, 0.005),
     ("gemini-2.0-flash", 0.0001, 0.0004),
+    ("gemini-2.5-pro", 0.00125, 0.005),
+    ("gemini-2.5-flash", 0.0001, 0.0004),
+    ("gemini-2.5", 0.00125, 0.005),
+    ("gemini-2.0", 0.0001, 0.0004),
+    ("gemini-", 0.001, 0.004),
+    ("gemini", 0.001, 0.004),
 ];
 
 /// Estimate cost in USD for a given model and token counts.

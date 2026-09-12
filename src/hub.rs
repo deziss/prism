@@ -55,6 +55,8 @@ pub struct ProxyEvent {
     pub prompt_cache_write_tokens: u32,
     pub status: u16,
     pub ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +371,11 @@ pub(crate) fn api_base(url: &str) -> String {
 }
 
 fn http_client() -> reqwest::Client {
+    if let Ok(v) = std::env::var("SSL_CERT_FILE") {
+        if v.is_empty() {
+            unsafe { std::env::remove_var("SSL_CERT_FILE"); }
+        }
+    }
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -970,6 +977,7 @@ mod contract {
                 prompt_cache_write_tokens: 0,
                 status: 200,
                 ts: "2026-09-10T00:00:00Z".to_string(),
+                app: None,
             }),
             HubEvent::Command(CommandEvent {
                 tool: "git".to_string(),

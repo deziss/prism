@@ -19,6 +19,9 @@ const AI_HOSTS: &[(&str, &str)] = &[
     ("api.openai.com", "openai"),
     ("api.anthropic.com", "anthropic"),
     ("generativelanguage.googleapis.com", "gemini"),
+    ("cloudcode-pa.googleapis.com", "gemini"),
+    ("daily-cloudcode-pa.googleapis.com", "gemini"),
+    ("aicode.googleapis.com", "gemini"),
     ("api.mistral.ai", "mistral"),
     ("api.cohere.com", "cohere"),
     ("api.deepseek.com", "deepseek"),
@@ -361,6 +364,10 @@ fn extract_resp_tokens(body: &[u8]) -> u32 {
     fn usage_of(j: &serde_json::Value) -> Option<u32> {
         j.pointer("/usage/completion_tokens")
             .or_else(|| j.pointer("/usage/output_tokens"))
+            .or_else(|| j.pointer("/usageMetadata/candidatesTokenCount"))
+            .or_else(|| j.pointer("/candidatesTokenCount"))
+            .or_else(|| j.pointer("/outputTokens"))
+            .or_else(|| j.pointer("/output_tokens"))
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
     }
@@ -369,6 +376,13 @@ fn extract_resp_tokens(body: &[u8]) -> u32 {
         if let Some(t) = usage_of(&j) {
             return t;
         }
+        if let Some(arr) = j.as_array() {
+            for item in arr.iter().rev() {
+                if let Some(t) = usage_of(item) {
+                    return t;
+                }
+            }
+        }
     }
 
     // Streaming: the final events carry cumulative usage.
@@ -376,15 +390,51 @@ fn extract_resp_tokens(body: &[u8]) -> u32 {
     let mut best = 0u32;
     for line in s.lines() {
         let payload = line.strip_prefix("data:").unwrap_or(line).trim();
-        if !payload.starts_with('{') {
+        if !payload.starts_with('{') && !payload.starts_with('[') {
             continue;
         }
         if let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) {
             if let Some(t) = usage_of(&j) {
                 best = best.max(t);
+            } else if let Some(arr) = j.as_array() {
+                for item in arr {
+                    if let Some(t) = usage_of(item) {
+                        best = best.max(t);
+                    }
+                }
             }
         }
     }
+
+    if best == 0 {
+        if let Ok(j) = serde_json::from_slice::<serde_json::Value>(body) {
+            let mut extracted = String::new();
+            if let Some(candidates) = j.get("candidates").and_then(|v| v.as_array()) {
+                for cand in candidates {
+                    if let Some(parts) = cand.pointer("/content/parts").and_then(|v| v.as_array()) {
+                        for p in parts {
+                            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                                extracted.push_str(t);
+                                extracted.push(' ');
+                            }
+                        }
+                    }
+                }
+            }
+            if !extracted.is_empty() {
+                best = crate::analytics::count_tokens(&extracted, "").unwrap_or(0) as u32;
+            }
+        }
+    }
+
+    if best == 0 && !body.is_empty() {
+        let s = String::from_utf8_lossy(body);
+        if s.starts_with('{') || s.starts_with('[') {
+            let est = crate::analytics::count_tokens(&s, "").unwrap_or(0) as u32;
+            best = (est / 2).max(1);
+        }
+    }
+
     best
 }
 
@@ -392,6 +442,7 @@ fn extract_cached_tokens(body: &[u8]) -> u32 {
     fn cached_of(j: &serde_json::Value) -> Option<u32> {
         j.pointer("/usage/prompt_tokens_details/cached_tokens")
             .or_else(|| j.pointer("/usage/cache_read_input_tokens"))
+            .or_else(|| j.pointer("/usageMetadata/cachedContentTokenCount"))
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
     }
@@ -668,6 +719,65 @@ fn compress_request_body(
         }
     }
 
+    // Google Gemini format: contents[].parts[].text
+    if let Some(contents) = json.get_mut("contents").and_then(|v| v.as_array_mut()) {
+        let total = contents.len();
+        let first_compressible = total.saturating_sub(COMPRESSIBLE_TAIL);
+
+        for (idx, item) in contents.iter_mut().enumerate() {
+            let may_compress = idx >= first_compressible;
+            if let Some(parts) = item.get_mut("parts").and_then(|v| v.as_array_mut()) {
+                for part in parts.iter_mut() {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()) {
+                        let (out, ot, st) = maybe_compress(&text, &model, ratio, may_compress);
+                        orig_total += ot;
+                        sent_total += st;
+                        if let Some(new_text) = out {
+                            if let Some(t) = part.get_mut("text") {
+                                *t = serde_json::Value::String(new_text);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Google Gemini systemInstruction format
+    if let Some(sys) = json.get("systemInstruction") {
+        if let Some(parts) = sys.get("parts").and_then(|v| v.as_array()) {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    let t = crate::analytics::count_tokens(text, &model).unwrap_or(0) as u32;
+                    orig_total += t;
+                    sent_total += t;
+                }
+            }
+        }
+    }
+
+    // Generic prompt / instances format
+    if let Some(prompt) = json.get("prompt") {
+        if let Some(text) = prompt.as_str() {
+            let t = crate::analytics::count_tokens(text, &model).unwrap_or(0) as u32;
+            orig_total += t;
+            sent_total += t;
+        }
+    }
+    if let Some(instances) = json.get("instances").and_then(|v| v.as_array()) {
+        for inst in instances {
+            if let Some(content) = inst.get("content").and_then(|v| v.as_str()) {
+                let t = crate::analytics::count_tokens(content, &model).unwrap_or(0) as u32;
+                orig_total += t;
+                sent_total += t;
+            } else if let Some(p) = inst.get("prompt").and_then(|v| v.as_str()) {
+                let t = crate::analytics::count_tokens(p, &model).unwrap_or(0) as u32;
+                orig_total += t;
+                sent_total += t;
+            }
+        }
+    }
+
     // Count system prompt tokens for telemetry / analytics
     if let Some(system) = json.get("system") {
         if let Some(text) = system.as_str() {
@@ -720,6 +830,15 @@ fn compress_request_body(
         &mut sent_total,
         &mut image_saved,
     );
+
+    if orig_total == 0 && !body.is_empty() {
+        let s = String::from_utf8_lossy(body);
+        let est = crate::analytics::count_tokens(&s, &model).unwrap_or(0) as u32;
+        if est > 0 {
+            orig_total = est;
+            sent_total = est;
+        }
+    }
 
     let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec());
     (
@@ -1401,11 +1520,27 @@ fn prepare_request(raw: &[u8], headers: &[u8], provider: &str, ratio: f64) -> Pr
         }
     }
 
+    let mut final_model = model;
+    if provider == "gemini" && final_model.is_empty() {
+        if let Some(first_line) = std::str::from_utf8(headers).ok().and_then(|s| s.lines().next()) {
+            if let Some(pos) = first_line.find("/models/") {
+                let rest = &first_line[pos + 8..];
+                let m = rest.split(':').next().unwrap_or("").split('?').next().unwrap_or("").split(' ').next().unwrap_or("");
+                if !m.is_empty() {
+                    final_model = m.to_string();
+                }
+            }
+        }
+        if final_model.is_empty() {
+            final_model = "gemini-2.5-pro".to_string();
+        }
+    }
+
     Prepared {
         body,
         orig_tokens,
         sent_tokens,
-        model,
+        model: final_model,
         is_stream,
         extra_headers,
         image_saved_tokens,
@@ -1430,6 +1565,8 @@ fn hash_api_key(headers_raw: &[u8]) -> String {
                 .trim_start_matches("bearer ")
         } else if lower.starts_with("x-api-key:") {
             line[10..].trim()
+        } else if lower.starts_with("x-goog-api-key:") {
+            line[15..].trim()
         } else {
             continue;
         };
@@ -1439,7 +1576,125 @@ fn hash_api_key(headers_raw: &[u8]) -> String {
             return format!("{:016x}", h.finish())[..8].to_string();
         }
     }
+    if let Some(first_line) = s.lines().next() {
+        if let Some(idx) = first_line.find("key=") {
+            let rest = &first_line[idx + 4..];
+            let key = rest.split('&').next().unwrap_or("").split(' ').next().unwrap_or("");
+            if !key.is_empty() {
+                let mut h = DefaultHasher::new();
+                key.hash(&mut h);
+                return format!("{:016x}", h.finish())[..8].to_string();
+            }
+        }
+    }
     "unknown".to_string()
+}
+
+fn process_name_for_port(port: u16) -> Option<String> {
+    if port == 0 {
+        return None;
+    }
+    let hex_port = format!("{:04X}", port);
+    let tcp_content = std::fs::read_to_string("/proc/net/tcp").ok()?;
+    let mut inode = None;
+    for line in tcp_content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 10 {
+            if let Some(local_port) = parts[1].split(':').nth(1) {
+                if local_port.eq_ignore_ascii_case(&hex_port) {
+                    inode = Some(parts[9].to_string());
+                    break;
+                }
+            }
+        }
+    }
+    let inode = inode?;
+    let target = format!("socket:[{}]", inode);
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let pid_str = name.to_string_lossy();
+            if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let fd_dir = entry.path().join("fd");
+            if let Ok(fds) = std::fs::read_dir(&fd_dir) {
+                for fd in fds.flatten() {
+                    if let Ok(link) = std::fs::read_link(fd.path()) {
+                        if link.to_string_lossy() == target {
+                            if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) {
+                                return Some(comm.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_app(headers: &[u8], source_port: u16, provider: &str) -> String {
+    let ua = header_value(headers, "user-agent").unwrap_or_default().to_lowercase();
+    let goog_client = header_value(headers, "x-goog-api-client").unwrap_or_default().to_lowercase();
+    if let Some(app) = header_value(headers, "x-app-name").or_else(|| header_value(headers, "x-client-name")) {
+        return app;
+    }
+
+    if ua.contains("antigravity") || goog_client.contains("antigravity") {
+        return "Antigravity".to_string();
+    }
+    if ua.contains("claude") || ua.contains("anthropic-cli") {
+        return "Claude Code".to_string();
+    }
+    if ua.contains("cursor") {
+        return "Cursor".to_string();
+    }
+    if ua.contains("aider") {
+        return "Aider".to_string();
+    }
+    if ua.contains("continue") {
+        return "Continue".to_string();
+    }
+    if ua.contains("copilot") {
+        return "GitHub Copilot".to_string();
+    }
+    if ua.contains("curl") || ua.contains("httpie") {
+        return "cURL / CLI".to_string();
+    }
+    if ua.contains("python") || ua.contains("requests") {
+        return "Python SDK".to_string();
+    }
+    if ua.contains("go-http-client") || goog_client.contains("gl-go") {
+        return "Antigravity".to_string();
+    }
+
+    if let Some(proc_name) = process_name_for_port(source_port) {
+        let p_lower = proc_name.to_lowercase();
+        if p_lower.contains("language_server") || p_lower.contains("antigravity") {
+            return "Antigravity".to_string();
+        }
+        if p_lower.contains("node") && provider == "anthropic" {
+            return "Claude Code".to_string();
+        }
+        if p_lower.contains("cursor") {
+            return "Cursor".to_string();
+        }
+    }
+
+    if provider == "gemini" {
+        return "Antigravity".to_string();
+    }
+    if provider == "anthropic" {
+        return "Claude Code".to_string();
+    }
+    if provider == "openai" {
+        return "Cursor".to_string();
+    }
+    if provider == "ollama" {
+        return "Local LLM / Terminal".to_string();
+    }
+    "Terminal / CLI".to_string()
 }
 
 // ── MITM session ──────────────────────────────────────────────────────────────
@@ -1479,6 +1734,7 @@ async fn serve_session<C, U, F, Fut>(
     hostname: String,
     provider: &'static str,
     source_ip: String,
+    source_port: u16,
     ratio: f64,
     carry_in: Vec<u8>,
     hub: Arc<crate::hub::HubSender>,
@@ -1510,6 +1766,7 @@ async fn serve_session<C, U, F, Fut>(
         let (raw_body, leftover) = read_body(&mut client, &req_headers, body_start).await;
         carry = leftover;
 
+        let app_name = detect_app(&req_headers, source_port, provider);
         let api_key_hash = hash_api_key(&req_headers);
         let client_close = wants_close(&req_headers);
 
@@ -1573,6 +1830,7 @@ async fn serve_session<C, U, F, Fut>(
                     let provider_s = provider.to_string();
                     let key_hash = ck.key.clone();
                     let hub_hit = Arc::clone(&hub);
+                    let app_name_hit = app_name.clone();
                     tokio::spawn(async move {
                         let cost_usd = crate::analytics::estimate_cost(&model_s, 0, served);
                         let ev = crate::hub::ProxyEvent {
@@ -1593,6 +1851,7 @@ async fn serve_session<C, U, F, Fut>(
                             prompt_cache_write_tokens: 0,
                             status: 200,
                             ts: crate::hub::now(),
+                            app: Some(app_name_hit),
                         };
                         crate::analytics::record_proxy_event(&ev);
                         hub_hit.send(crate::hub::HubEvent::Cache(crate::hub::CacheEvent {
@@ -1686,6 +1945,7 @@ async fn serve_session<C, U, F, Fut>(
         let key = api_key_hash.clone();
         let is_cache_hit = cached_tokens > 0;
         let hub_report = Arc::clone(&hub);
+        let app_name_report = app_name.clone();
 
         tokio::spawn(async move {
             let cost_usd = crate::analytics::estimate_cost(&model_s, sent_tokens, resp_tokens);
@@ -1707,6 +1967,7 @@ async fn serve_session<C, U, F, Fut>(
                 prompt_cache_write_tokens: cache_write_tokens,
                 status,
                 ts: crate::hub::now(),
+                app: Some(app_name_report),
             };
             crate::analytics::record_proxy_event(&ev);
             hub_report.send(crate::hub::HubEvent::Proxy(ev));
@@ -1865,6 +2126,7 @@ async fn handle_connect(
         hostname,
         provider,
         client_addr.ip().to_string(),
+        client_addr.port(),
         ratio,
         Vec::new(),
         hub,
@@ -1918,17 +2180,19 @@ async fn handle_plain_http(
     // where Ollama and LM Studio traffic arrives. Send it through the same session loop
     // as everything else instead of piping bytes past every optimization.
     if let Some(provider) = detect_provider(&format!("{}:{}", host, port)) {
-        let peer = client
+        let peer_ip = client
             .peer_addr()
             .map(|a| a.ip().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
+        let peer_port = client.peer_addr().map(|a| a.port()).unwrap_or(0);
         let ratio = crate::config::resolve().compression_ratio.unwrap_or(0.55);
         let (h, p) = (host.clone(), port);
         serve_session(
             client,
             host,
             provider,
-            peer,
+            peer_ip,
+            peer_port,
             ratio,
             request,
             hub,
@@ -2526,6 +2790,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "ollama",
                 "127.0.0.1".to_string(),
+                0,
                 0.55,
                 Vec::new(),
                 Arc::new(crate::hub::HubSender::inert()),
@@ -2638,6 +2903,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "ollama",
                 "127.0.0.1".to_string(),
+                0,
                 0.55,
                 Vec::new(),
                 Arc::new(crate::hub::HubSender::inert()),
@@ -3373,5 +3639,30 @@ mod tests {
         assert!(is_loopback("127.0.0.53:53"));
         assert!(!is_loopback("api.anthropic.com"));
         assert!(!is_loopback("api.openai.com:443"));
+    }
+
+    #[test]
+    fn extracts_usage_from_gemini_json_and_array() {
+        let body = br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"candidatesTokenCount":88,"promptTokenCount":12}}"#;
+        assert_eq!(extract_resp_tokens(body), 88);
+
+        let arr_body = br#"[{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"candidatesTokenCount":99}}]"#;
+        assert_eq!(extract_resp_tokens(arr_body), 99);
+    }
+
+    #[test]
+    fn counts_gemini_contents_tokens() {
+        let req = serde_json::json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "Explain quantum computing in detail please"}]
+                }
+            ]
+        });
+        let raw = serde_json::to_vec(&req).unwrap();
+        let (_out, orig, sent, ..) = compress_request_body(&raw, "gemini", 0.5);
+        assert!(orig > 0);
+        assert!(sent > 0);
     }
 }
