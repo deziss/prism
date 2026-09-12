@@ -19,7 +19,7 @@ With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.open
 ## Key Highlights
 
 - **AST Smart Code Reader (`prism read`)**: Parses source code into AST skeletons, function signatures, and imports across Rust, Python, TypeScript/JavaScript, and Go — slashing context window consumption by **55% to 93%**.
-- **Transparent MITM Proxy (`:27181`)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
+- **Transparent MITM Proxy (`:27181`, loopback-only)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Binds `127.0.0.1` by default — widen with `prism serve --bind` only deliberately, since this process holds a CA private key and mints certificates for any host a client asks for. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
 - **Prefix-Preserving & Invariant-Compliant Prompt Caching**: Strictly preserves system prompts and conversation prefixes while dynamically enforcing Anthropic cache ordering invariants (auto-promotes preceding breakpoints to `1h` when later blocks use `1h` to prevent HTTP 400 errors, strictly enforces Anthropic's 4-breakpoint limit, and honors caller-defined caching strategies). Guarantees **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**.
 - **Anthropic Context Pruning**: Opts long agent runs into server-side `clear_tool_uses` context pruning, preventing stale tool results from accumulating across long agent interactions.
 - **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
@@ -206,11 +206,25 @@ prism vscode --output ~/.vscode/extensions/prism
 ### 3. Python & Node.js AI SDKs (OpenAI, LangChain, LlamaIndex)
 Zero code changes required. Route traffic through environment variables:
 ```bash
+prism-env python my_agent.py    # sets all of the below for one command only
+```
+
+`prism-env` is the safer form: it scopes everything to the process it launches, so a
+stopped proxy cannot strand the rest of your session. It also refuses to run when
+nothing is listening on `:27181`, rather than handing the command a proxy that does not
+answer. To do it by hand:
+
+```bash
 export HTTP_PROXY=http://127.0.0.1:27181
 export HTTPS_PROXY=http://127.0.0.1:27181
 export NODE_EXTRA_CA_CERTS=~/.local/share/prism/ca/ca.crt         # adds a CA
 export REQUESTS_CA_BUNDLE=~/.local/share/prism/ca/ca-bundle.crt   # replaces the store
 ```
+
+Exports like these outlive the proxy. A shell — or a login session — that still has them
+set after PRISM is removed points every client at a dead port and at CA files that no
+longer exist, and nothing can retract them from a process that is already running. See
+`prism uninstall`, which finds and reports exactly that.
 
 `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `CURL_CA_BUNDLE` replace the CA set instead of
 extending it — always give them `ca-bundle.crt` (system roots + PRISM CA), never the bare
@@ -243,8 +257,14 @@ on every later turn that re-sends the conversation.
 ```bash
 prism shim install --path   # shims + the PATH line in every shell rc you have
 prism shim status           # installed? actually first on PATH?
-prism shim uninstall
+prism shim uninstall        # shims only; `prism uninstall` covers the whole machine
 ```
+
+Do not put the shim directory in `~/.claude/settings.json` under `env.PATH`. Claude Code
+does not expand `${PATH}` there, so the agent ends up with the shim directory plus a
+literal string and no working PATH at all — and it survives uninstallation, because the
+shims are deleted while the setting pointing at them is not. Launch Claude Code from a
+shell that already has the shims on PATH instead.
 
 Install prism to a stable location **before** running this. The shims hard-code the path
 of the binary that wrote them, so installing from `target/release` means a later

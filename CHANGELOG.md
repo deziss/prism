@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-12
+
+### Added
+- **`prism uninstall`** — audits, or with `--remove` deletes, every trace of PRISM
+  on the machine. Read-only by default and exits non-zero while anything remains,
+  so "is it actually gone?" is finally a safe question to ask repeatedly. It
+  embeds `remove-prism.sh` and `scripts/prism-manifest.sh` with `include_str!` and
+  runs them, so the copy it executes is byte-identical to the repository's and it
+  works without a checkout present. Deliberately not a reimplementation: a fourth
+  removal path with its own idea of what installation created is the bug being
+  fixed, not a feature.
+- **`prism serve --bind`**, defaulting to `127.0.0.1`.
+- **`scripts/prism-manifest.sh`** — one declarative list of every path, port, unit,
+  marker, trust entry and environment variable PRISM writes outside its own tree.
+  `prism-enable`, `prism-disable` and `remove-prism.sh` all source it and carry no
+  private lists.
+- **`scripts/prism-env`** — run a single command through the proxy without writing
+  anything to the shell, to `environment.d`, or to any config file.
+- **`tests/uninstall_symmetry.rs`** — scans the install side for host writes and
+  fails the build when a target is not declared in the manifest.
+
+### Changed
+- **`prism serve` binds loopback instead of `0.0.0.0`.** It previously bound every
+  interface unconditionally, with no flag to narrow it: an intercepting TLS proxy
+  holding a CA private key and minting certificates on demand, reachable from the
+  whole network. Pass `--bind 0.0.0.0` to restore the old behaviour deliberately;
+  a non-loopback bind now logs a warning.
+- **`prism init --global` no longer writes the OS trust store.** It used to install
+  `/usr/local/share/ca-certificates/prism.crt` and run `update-ca-certificates`,
+  and nothing ever removed it — while uninstalling *did* delete the CA private key,
+  leaving the machine trusting an interception root nobody could audit. NSS already
+  covers the browsers and Electron IDEs that need it, and NSS entries are removable.
+  The commands to add and to undo the system anchor are both printed instead.
+- **`prism shim` no longer advises setting `env.PATH` in `~/.claude/settings.json`.**
+  Claude Code does not expand `${PATH}` there, so following that advice left the
+  agent with the shims directory plus a literal string on PATH — and once the shims
+  directory was removed, every command became "command not found". No uninstaller
+  looked at that file. The help now explains why, and points at launching from a
+  shell that already has the shims.
+- **`remove-prism.sh` rewritten as an auditor that can also remove.** Removal is now
+  opt-in behind `--remove`; `--verbose` lists affected processes individually. Audit
+  and removal share one detector, so the closing verdict cannot disagree with
+  reality the way the old self-confirming grep did.
+- `scripts/prism-env` sets `SSL_CERT_FILE` to `ca-bundle.crt`, not the bare CA.
+  Those variables replace the trust store rather than extending it, so the previous
+  value left the wrapped command trusting PRISM and nothing else.
+
+### Fixed
+- **Removal missed most of what installation created.** Three independent "off"
+  switches — `remove-prism.sh`, `scripts/prism-disable`, and cleanup inside
+  `prism init` — each knew a different subset. Every one reported success. What
+  survived a "COMPLETE REMOVAL":
+  - `prism-mcp.service`, because the remover named `prism-proxy.service` and a
+    `prism-bridge.service` that nothing creates.
+  - NSS trust entries in `~/.pki/nssdb` and every Firefox profile — handled by
+    `prism-disable` and by nothing else.
+  - `~/.claude.json` `mcpServers.prism`, pointing at the binary removal deletes,
+    leaving a permanently failing MCP server.
+  - Two of three `~/.config/Antigravity*` profile directories, because the remover
+    targeted one hardcoded literal path and then printed "OK: Antigravity settings
+    are clean".
+  - `~/.local/bin/prism-{enable,disable,on,off,env}`, each able to re-apply
+    everything that had just been removed.
+  - The system trust anchor described above.
+- **Removal could delete the files a surviving daemon regenerates.** Unit files were
+  removed early without verifying, processes killed several steps later, and the
+  data directory deleted after that — long enough for a `Restart=always` unit to
+  respawn the proxy and recreate the CA. Removal now confirms nothing is running
+  before deleting anything it would rebuild.
+- **`certutil` missing made NSS cleanup a silent no-op.** It now fails loudly and
+  says the CA is still trusted, rather than reporting success.
+- `src/guide.rs` claimed `prism-enable` "injects proxy settings into environment.d
+  and ~/.bashrc". It does the opposite — it removes stale entries and runs
+  `systemctl --user unset-environment` on the proxy variables.
+
+### Note — what no uninstaller can fix
+Environment is copied into a process at `exec`. `unset` changes only the calling
+shell, and `systemctl --user unset-environment` only affects units started
+afterwards. A login session that was poisoned before PRISM was removed keeps
+handing dead variables to everything it spawns, which is why removal has appeared
+to fail: it succeeded every time, and the damage lived in processes it could not
+reach. `prism uninstall` now names those processes, flags dangling paths, and
+calls out a poisoned session leader specifically — restarting individual
+applications cannot fix that case. Logging out and back in can.
+
 ### Changed
 - **BREAKING: GraphRAG and the semantic cache are now hub-policy features, off by
   default.** `graph_enabled` and `cache_enabled` default to `false`. An agent with no

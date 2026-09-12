@@ -2,11 +2,24 @@
 """
 PRISM vs Raw Prompts & Tool Calls Benchmark Suite
 
-Comprehensive automated test verifying:
-1. Prompt Compression: Raw developer prompt vs PRISM compressed prompt (tokens, preservation of code/semantics).
-2. Semantic Caching & Replay: Exact duplicate and semantically similar prompt replay latency & cost savings.
-3. Tool Calls & Schema Integrity: Tool definitions pass-through, argument preservation, and stale replay prevention.
-4. Multi-Turn Agent Loop & Context Editing: Stale tool result trimming and Anthropic cache breakpoint injection.
+Sections 1 and 3 MEASURE. Sections 2 and 4 ILLUSTRATE.
+
+1. Prompt Compression  [MEASURED]
+   Shells out to the installed `prism compress` and parses its real output.
+2. Semantic Caching & Replay  [ILLUSTRATIVE]
+   No LLM is called, no proxy is started and no cache entry is written or read.
+   The latency and token figures are assumed values used to show the shape of the
+   saving, NOT measurements. The similarity score is computed by the Python
+   reimplementation below, not by prism itself.
+3. Tool Calls & Schema Integrity  [MEASURED against source]
+   Quotes and checks the real replay guard in src/proxy.rs.
+4. Multi-Turn Agent Loop & Context Editing  [ILLUSTRATIVE]
+   Builds a synthetic conversation, estimates tokens as len(json)//4, and performs
+   the trim in Python. It demonstrates what CONTEXT_EDIT_KEEP_TOOL_USES=3 does; it
+   does not exercise prism's implementation of it.
+
+Do not quote figures from sections 2 or 4 as benchmark results. To make them real,
+start `prism serve`, send the requests through it, and time them.
 """
 
 import sys
@@ -38,7 +51,13 @@ def run_prism_cli(subcmd: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout, p.stderr
 
 def prism_similarity(a: str, b: str) -> float:
-    """Exact reproduction of PRISM src/cache.rs prompt_similarity(a, b)."""
+    """Python reimplementation of PRISM's src/cache.rs prompt_similarity(a, b).
+
+    NOT a call into prism. It matches the Rust as of 0.3.0 (0.7 * word-cosine +
+    0.3 * trigram-cosine), but nothing enforces that it keeps matching: if the Rust
+    changes, this copy will keep returning the old answer and the benchmark will
+    keep passing. Treat its output as indicative.
+    """
     def norm(s: str) -> list[str]:
         words = []
         cur = []
@@ -168,7 +187,9 @@ Please provide a detailed step-by-step audit of the code above. For any issues i
     return {"raw_tokens": raw_tokens, "prism_tokens": compressed_tokens, "savings_pct": savings_pct}
 
 def test_semantic_caching():
-    print_header("TEST 2: SEMANTIC CACHING & REPLAY (RAW VS PRISM)")
+    print_header("TEST 2: SEMANTIC CACHING & REPLAY  [ILLUSTRATIVE — NOT MEASURED]")
+    print(f"  {YELLOW}Latency and token figures below are assumed, not measured:{RESET}")
+    print(f"  {YELLOW}no LLM is called and no cache entry is written or read.{RESET}\n")
 
     prompt_q1 = "What are the key advantages of using Rust for systems programming?"
     prompt_q2 = "What are the key advantages of using Rust for systems programming?" # Exact duplicate
@@ -180,7 +201,7 @@ def test_semantic_caching():
     print(f"{BOLD}Turn 1: Initial Prompt Submission{RESET}")
     print(f"  Prompt: \"{prompt_q1}\"")
     print(f"  Raw LLM: Network roundtrip to upstream LLM (~1,250ms, 450 tokens billed)")
-    print(f"  PRISM:   Relayed to upstream, token usage metered, entry stored in SQLite cache")
+    print(f"  PRISM:   Relayed to upstream, token usage metered, entry stored in the sled cache")
 
     print(f"\n{BOLD}Turn 2: Identical Prompt (Duplicate Replay){RESET}")
     print(f"  Prompt: \"{prompt_q2}\"")
@@ -233,7 +254,9 @@ def test_tool_calling_integrity():
     print(f"\n{GREEN}✓ PASS: Function schemas remain uncorrupted and tool calls execute with complete safety!{RESET}")
 
 def test_multiturn_agent_context_editing():
-    print_header("TEST 4: MULTI-TURN AGENT WORKFLOW & CONTEXT EDITING")
+    print_header("TEST 4: MULTI-TURN AGENT WORKFLOW & CONTEXT EDITING  [ILLUSTRATIVE]")
+    print(f"  {YELLOW}Synthetic conversation, tokens estimated as len(json)//4, and the{RESET}")
+    print(f"  {YELLOW}trim performed in Python — prism is not invoked here.{RESET}\n")
 
     turns = [
         {"role": "user", "content": "Diagnose the memory leak in proxy.rs"},
@@ -269,22 +292,24 @@ def test_multiturn_agent_context_editing():
     print(f"\n{GREEN}✓ PASS: Context bloat prevented, stale outputs pruned, and prompt caching active!{RESET}")
 
 def print_summary_table():
-    print_header("FINAL BENCHMARK COMPARISON TABLE: RAW VS PRISM")
+    print_header("FINAL COMPARISON TABLE: RAW VS PRISM")
     table = f"""
 ┌──────────────────────────────────────┬────────────────────────┬────────────────────────┬────────────────────────┐
-│ Metric / Dimension                   │ Raw (Direct LLM)       │ PRISM Optimized        │ Net Benefit            │
+│ Metric / Dimension  [M]easured/[I]ll │ Raw (Direct LLM)       │ PRISM Optimized        │ Net Benefit            │
 ├──────────────────────────────────────┼────────────────────────┼────────────────────────┼────────────────────────┤
-│ Long Developer Prompt Tokens         │ 462 tokens             │ 332 tokens             │ 28.1% token reduction  │
-│ Duplicate Prompt Latency             │ ~1,250 ms              │ < 4 ms                 │ 99.7% faster (<5ms)    │
-│ Duplicate Prompt Token Cost          │ 100% billed            │ $0.00 (Local replay)   │ 100% cost elimination  │
-│ Semantically Similar Prompt (>=0.75) │ 100% billed            │ $0.00 (Vector hit)     │ 100% cost elimination  │
-│ Tool Definition Schema Integrity     │ Standard               │ 100% Preserved (Exact) │ Zero schema distortion │
-│ Tool Call Stale Replay Risk          │ High (if cached)       │ Prevented by policy    │ 100% state safe        │
-│ Multi-Turn Tool Result Bloat         │ ~9,100 tokens          │ ~6,100 tokens          │ 33.0% context trimmed  │
+│ [M] Long Developer Prompt Tokens     │ 462 tokens             │ 332 tokens             │ 28.1% token reduction  │
+│ [I] Duplicate Prompt Latency         │ ~1,250 ms              │ < 4 ms                 │ 99.7% faster (<5ms)    │
+│ [I] Duplicate Prompt Token Cost      │ 100% billed            │ $0.00 (Local replay)   │ 100% cost elimination  │
+│ [I] Semantically Similar (>=0.75)    │ 100% billed            │ $0.00 (Vector hit)     │ 100% cost elimination  │
+│ [M] Tool Definition Schema Integrity │ Standard               │ 100% Preserved (Exact) │ Zero schema distortion │
+│ [M] Tool Call Stale Replay Risk      │ High (if cached)       │ Prevented by policy    │ 100% state safe        │
+│ [I] Multi-Turn Tool Result Bloat     │ ~9,100 tokens          │ ~6,100 tokens          │ 33.0% context trimmed  │
 │ Anthropic Prompt Caching Discount    │ Manual / None (0%)     │ Automatic 90% discount │ 90% cached token cut   │
 └──────────────────────────────────────┴────────────────────────┴────────────────────────┴────────────────────────┘
 """
     print(table)
+    print(f"  {YELLOW}[M] measured on this machine.  [I] illustrative — assumed values,{RESET}")
+    print(f"  {YELLOW}    not measured. See the module docstring before quoting these.{RESET}")
 
 def main():
     print(f"\n{BOLD}{MAGENTA}================================================================================{RESET}")

@@ -1,6 +1,7 @@
 # PRISM Troubleshooting Guide
 
 ## Table of Contents
+- [I removed PRISM and my apps are still broken](#i-removed-prism-and-my-apps-are-still-broken)
 - [BLAS / cblas_sgemm Linker Error (obsolete since 0.2.0)](#blas--cblas_sgemm-linker-error)
 - [OpenSSL Not Found](#openssl-not-found)
 - [Sled Database Corruption](#sled-database-corruption)
@@ -13,6 +14,64 @@
 - [Memory Palace Empty After Restart](#memory-palace-empty-after-restart)
 - [Claude Code does not see PRISM tools](#claude-code-does-not-see-prism-tools)
 - [Anthropic 400 Error: cache_control.ttl ordering (1h after 5m)](#anthropic-400-error-cache_controlttl-ordering-1h-after-5m)
+
+---
+
+## I removed PRISM and my apps are still broken
+
+### Symptom
+You uninstalled PRISM. An IDE still reports `ERR_PROXY_CONNECTION_FAILED`, or a
+terminal still warns about a missing CA, or commands fail TLS verification with
+errors that never mention PRISM. Removing it again does not help. Neither does
+restarting the application.
+
+### Cause
+Removal worked. The damage is in processes it cannot reach.
+
+A process receives a **copy** of the environment when it starts. `unset` changes
+only the shell that ran it, and `systemctl --user unset-environment` only affects
+units started afterwards. Nothing can retract a variable from a process that is
+already running.
+
+So if PRISM's variables were in your login session when you removed it, every
+program started from that session still has them — pointing at a proxy port with
+nothing behind it, and at CA files that have been deleted.
+
+`SSL_CERT_FILE`, `CURL_CA_BUNDLE` and `REQUESTS_CA_BUNDLE` are the damaging ones.
+They **replace** the trust store rather than adding to it, so pointed at a deleted
+file the process has no trusted CAs at all and every TLS connection through a
+library honouring them fails.
+
+### Diagnosis
+```bash
+prism uninstall          # read-only; changes nothing
+```
+
+It lists every running process still holding PRISM variables, marks the ones whose
+paths no longer exist, and — most importantly — tells you if your **login session
+leader** is affected (`gnome-session`, `gnome-shell`, `dbus-daemon`, `Xwayland`).
+
+### Fix
+If the session leader is listed, **log out and back in**. That is the only complete
+fix: every program you launch from the desktop inherits the session's environment,
+so restarting applications one at a time cannot get ahead of it.
+
+If it is not, restart just the programs named in the report.
+
+To confirm there is nothing left to inherit on your next login:
+```bash
+prism uninstall --remove   # then log out
+prism uninstall            # should report clean apart from the process list
+```
+
+### Why this used to be worse
+Before 0.3.0 PRISM had three separate "off" switches, each knowing a different
+subset of what installation created, and all of them reported success regardless.
+`prism-mcp.service`, NSS trust entries, the Claude Code MCP registration, two of
+three Antigravity profile directories and the `prism-on`/`prism-off` helpers could
+all survive a "COMPLETE REMOVAL". `scripts/prism-manifest.sh` is now the single
+list all removal paths read, and `tests/uninstall_symmetry.rs` fails the build if
+an install step is added without one.
 
 ---
 
