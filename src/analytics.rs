@@ -588,9 +588,38 @@ fn load_history() -> Result<History> {
     }
 }
 
+/// Write the history file atomically: serialise to a temp file in the same
+/// directory, then rename over the target.
+///
+/// This used to be a plain `std::fs::write`, which truncates the file and then
+/// streams bytes into it. Every shimmed command runs this, each in its *own
+/// process*, so an in-process mutex would not help: two concurrent `prism cmd`
+/// invocations could interleave and leave a half-written file. That is not
+/// theoretical — it happened on this machine during a parallel build, and
+/// `try_repair_history` salvaged 436 of roughly 1,500 entries before moving the
+/// rest aside as `history.json.corrupt`. The repair path exists precisely because
+/// this write was unsafe.
+///
+/// `rename(2)` within one filesystem is atomic, so a reader now sees either the
+/// previous file or the complete new one, never a partial write.
+///
+/// Concurrent writers can still lose an *update* — both read the same state and
+/// the last rename wins, dropping a handful of entries under heavy parallelism.
+/// That is a far better failure than losing the file, and fixing it properly needs
+/// cross-process advisory locking (flock), which would mean a new dependency on
+/// the hot path of every command.
 fn save_history(history: History) -> Result<()> {
-    std::fs::create_dir_all(analytics_dir())?;
-    std::fs::write(history_path(), serde_json::to_string_pretty(&history)?)?;
+    let dir = analytics_dir();
+    std::fs::create_dir_all(&dir)?;
+    let body = serde_json::to_string_pretty(&history)?;
+
+    // Same directory as the target: rename is only atomic within a filesystem.
+    let tmp = dir.join(format!("history.json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, body)?;
+    if let Err(e) = std::fs::rename(&tmp, history_path()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -628,6 +657,42 @@ mod tests {
         assert!(e.saved_tokens() > 30_000, "got {}", e.saved_tokens());
         let pct = e.saved_tokens() as f64 / e.input_tokens() as f64 * 100.0;
         assert!((94.0..=96.0).contains(&pct), "expected ~95%, got {pct:.1}");
+    }
+
+    /// A partial write must never be visible: readers see the old file or the new
+    /// one, never a truncated one. This is what `history.json.corrupt` came from.
+    #[test]
+    fn save_history_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "prism-hist-atomic-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(dir.join("analytics")).unwrap();
+        let _env = TestEnv::redirect(&dir);
+
+        for n in 1..=3 {
+            save_history(History {
+                commands: (0..n).map(|_| entry("git", 100, 10)).collect(),
+                total_savings_tokens: 0,
+                sessions: 0,
+            })
+            .unwrap();
+            // Always parseable after every write.
+            assert_eq!(load_history().unwrap().commands.len(), n);
+        }
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("analytics"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A filter that passes output through unchanged saves nothing, and a filter that
