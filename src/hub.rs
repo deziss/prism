@@ -373,7 +373,9 @@ pub(crate) fn api_base(url: &str) -> String {
 fn http_client() -> reqwest::Client {
     if let Ok(v) = std::env::var("SSL_CERT_FILE") {
         if v.is_empty() {
-            unsafe { std::env::remove_var("SSL_CERT_FILE"); }
+            unsafe {
+                std::env::remove_var("SSL_CERT_FILE");
+            }
         }
     }
     reqwest::Client::builder()

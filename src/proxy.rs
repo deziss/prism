@@ -728,7 +728,11 @@ fn compress_request_body(
             let may_compress = idx >= first_compressible;
             if let Some(parts) = item.get_mut("parts").and_then(|v| v.as_array_mut()) {
                 for part in parts.iter_mut() {
-                    if let Some(text) = part.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()) {
+                    if let Some(text) = part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                    {
                         let (out, ot, st) = maybe_compress(&text, &model, ratio, may_compress);
                         orig_total += ot;
                         sent_total += st;
@@ -1522,10 +1526,22 @@ fn prepare_request(raw: &[u8], headers: &[u8], provider: &str, ratio: f64) -> Pr
 
     let mut final_model = model;
     if provider == "gemini" && final_model.is_empty() {
-        if let Some(first_line) = std::str::from_utf8(headers).ok().and_then(|s| s.lines().next()) {
+        if let Some(first_line) = std::str::from_utf8(headers)
+            .ok()
+            .and_then(|s| s.lines().next())
+        {
             if let Some(pos) = first_line.find("/models/") {
                 let rest = &first_line[pos + 8..];
-                let m = rest.split(':').next().unwrap_or("").split('?').next().unwrap_or("").split(' ').next().unwrap_or("");
+                let m = rest
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .split(' ')
+                    .next()
+                    .unwrap_or("");
                 if !m.is_empty() {
                     final_model = m.to_string();
                 }
@@ -1579,7 +1595,13 @@ fn hash_api_key(headers_raw: &[u8]) -> String {
     if let Some(first_line) = s.lines().next() {
         if let Some(idx) = first_line.find("key=") {
             let rest = &first_line[idx + 4..];
-            let key = rest.split('&').next().unwrap_or("").split(' ').next().unwrap_or("");
+            let key = rest
+                .split('&')
+                .next()
+                .unwrap_or("")
+                .split(' ')
+                .next()
+                .unwrap_or("");
             if !key.is_empty() {
                 let mut h = DefaultHasher::new();
                 key.hash(&mut h);
@@ -1635,9 +1657,15 @@ fn process_name_for_port(port: u16) -> Option<String> {
 }
 
 fn detect_app(headers: &[u8], source_port: u16, provider: &str) -> String {
-    let ua = header_value(headers, "user-agent").unwrap_or_default().to_lowercase();
-    let goog_client = header_value(headers, "x-goog-api-client").unwrap_or_default().to_lowercase();
-    if let Some(app) = header_value(headers, "x-app-name").or_else(|| header_value(headers, "x-client-name")) {
+    let ua = header_value(headers, "user-agent")
+        .unwrap_or_default()
+        .to_lowercase();
+    let goog_client = header_value(headers, "x-goog-api-client")
+        .unwrap_or_default()
+        .to_lowercase();
+    if let Some(app) =
+        header_value(headers, "x-app-name").or_else(|| header_value(headers, "x-client-name"))
+    {
         return app;
     }
 
@@ -2484,7 +2512,18 @@ pub fn install_ca_nss(ca_cert_pem: &[u8]) -> Result<Vec<String>> {
             .stderr(std::process::Stdio::null())
             .status();
         let ok = std::process::Command::new("certutil")
-            .args(["-A", "-d", &db, "-n", NSS_NICKNAME, "-t", "C,,", "-f", "/dev/null", "-i"])
+            .args([
+                "-A",
+                "-d",
+                &db,
+                "-n",
+                NSS_NICKNAME,
+                "-t",
+                "C,,",
+                "-f",
+                "/dev/null",
+                "-i",
+            ])
             .arg(&tmp)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
