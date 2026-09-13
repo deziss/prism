@@ -1875,7 +1875,8 @@ async fn serve_session<C, U, F, Fut>(
                     let hub_hit = Arc::clone(&hub);
                     let app_name_hit = app_name.clone();
                     tokio::spawn(async move {
-                        let cost_usd = crate::analytics::estimate_cost(&model_s, 0, served);
+                        let cost_usd =
+                            crate::analytics::estimate_cost_for(&provider_s, &model_s, 0, served);
                         let ev = crate::hub::ProxyEvent {
                             source_ip: ip,
                             api_key_hash: key,
@@ -1991,7 +1992,12 @@ async fn serve_session<C, U, F, Fut>(
         let app_name_report = app_name.clone();
 
         tokio::spawn(async move {
-            let cost_usd = crate::analytics::estimate_cost(&model_s, sent_tokens, resp_tokens);
+            let cost_usd = crate::analytics::estimate_cost_for(
+                &provider_s,
+                &model_s,
+                sent_tokens,
+                resp_tokens,
+            );
             let ev = crate::hub::ProxyEvent {
                 source_ip: ip,
                 api_key_hash: key,
@@ -2028,7 +2034,7 @@ async fn serve_session<C, U, F, Fut>(
                     format!(
                         " — saved {} tokens (~${:.5})",
                         saved,
-                        crate::analytics::estimate_cost(&model_s, saved, 0)
+                        crate::analytics::estimate_cost_for(&provider_s, &model_s, saved, 0)
                     )
                 } else {
                     String::new()
@@ -2183,11 +2189,101 @@ async fn handle_connect(
 
 // ── Plain HTTP pass-through ───────────────────────────────────────────────────
 
+/// Where reverse-proxy mode forwards to.
+///
+/// `prism serve` is a CONNECT proxy: it only sees traffic from a client that has
+/// been told to use a proxy. That requires MITM, CA trust in five separate stores,
+/// and rerouting that has broken this machine's IDEs before — so in practice
+/// nothing was ever routed through it and the proxy sat idle.
+///
+/// Reverse-proxy mode is the other way in. `--upstream https://api.anthropic.com`
+/// makes prism answer ordinary origin-form requests, so a client can simply be
+/// pointed at it with `ANTHROPIC_BASE_URL=http://127.0.0.1:27181`. No CA trust, no
+/// system-wide proxy setting, and nothing else on the machine can be affected.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Upstream {
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+}
+
+impl Upstream {
+    /// Parse `--upstream`. Accepts `https://host`, `http://host:port`, or a bare
+    /// `host[:port]`, which is assumed to be TLS — every hosted provider is.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let raw = raw.trim().trim_end_matches('/');
+        if raw.is_empty() {
+            anyhow::bail!("--upstream is empty");
+        }
+        let (tls, rest) = match raw.split_once("://") {
+            Some(("https", r)) => (true, r),
+            Some(("http", r)) => (false, r),
+            Some((scheme, _)) => anyhow::bail!("--upstream: unsupported scheme '{scheme}'"),
+            None => (true, raw),
+        };
+        // A path would silently be ignored, and a client that sent one would get
+        // confusing 404s from the provider rather than an error here.
+        let (authority, path) = match rest.split_once('/') {
+            Some((a, p)) => (a, p),
+            None => (rest, ""),
+        };
+        if !path.is_empty() {
+            anyhow::bail!(
+                "--upstream must be a host, not a URL path: got '/{path}'. \
+                 The client's own path is forwarded unchanged."
+            );
+        }
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((h, p)) => (
+                h.to_string(),
+                p.parse::<u16>()
+                    .map_err(|_| anyhow!("--upstream: '{p}' is not a port"))?,
+            ),
+            None => (authority.to_string(), if tls { 443 } else { 80 }),
+        };
+        if host.is_empty() {
+            anyhow::bail!("--upstream has no host");
+        }
+        Ok(Self { host, port, tls })
+    }
+}
+
+/// Rewrite the `Host:` header to the upstream's hostname.
+///
+/// The client addressed prism (`Host: 127.0.0.1:27181`). Forwarding that verbatim
+/// makes the provider reject the request or route it to the wrong virtual host, and
+/// TLS SNI would disagree with it too.
+fn rewrite_host_header(request: &[u8], host: &str, port: u16, tls: bool) -> Vec<u8> {
+    let default_port = if tls { 443 } else { 80 };
+    let value = if port == default_port {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
+    let text = String::from_utf8_lossy(request);
+    let mut out = String::with_capacity(text.len() + value.len());
+    let mut replaced = false;
+    for (i, line) in text.split("\r\n").enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
+        // Only the header block: a body could contain a line starting with "host:".
+        if !replaced && i > 0 && line.to_ascii_lowercase().starts_with("host:") {
+            out.push_str(&format!("Host: {value}"));
+            replaced = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    out.into_bytes()
+}
+
 async fn handle_plain_http(
     mut client: TcpStream,
     request: Vec<u8>,
     proxy_port: u16,
     hub: Arc<crate::hub::HubSender>,
+    upstream: Option<Arc<Upstream>>,
 ) {
     let s = String::from_utf8_lossy(&request);
     let host_line = s
@@ -2207,15 +2303,72 @@ async fn handle_plain_http(
         return;
     }
 
-    // Loop Guard: prevent recursive connections back to our own proxy port
+    // Addressed to prism itself, rather than through it.
+    //
+    // A client using prism as a *proxy* sends the target's Host; a client using it as
+    // a *base URL* sends prism's own. The second case used to hit the loop guard and
+    // get a bare 403 — which is exactly what `ANTHROPIC_BASE_URL=http://127.0.0.1:27181`
+    // produces, so the easiest and safest way to route traffic in was also the one
+    // that looked broken.
     if is_loopback(&host) && port == proxy_port {
-        warn!(
-            "Loop guard blocked recursive plain HTTP connection to {}:{}",
-            host, port
-        );
-        let _ = client
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+        let Some(up) = upstream.clone() else {
+            warn!("origin-form request to the proxy port with no --upstream configured");
+            let body = b"prism: no upstream configured.\n\n                 Start the proxy with `prism serve --upstream https://api.anthropic.com`                  to use it as a base URL, or configure your client to use it as an HTTP                  proxy instead.\n";
+            let head = format!(
+                "HTTP/1.1 501 Not Implemented\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = client.write_all(head.as_bytes()).await;
+            let _ = client.write_all(body).await;
+            return;
+        };
+
+        // Everything else — compression, caching, context editing, telemetry — is the
+        // same pipeline the CONNECT path uses; only the way in differs.
+        let provider = detect_provider(&format!("{}:{}", up.host, up.port)).unwrap_or("unknown");
+        let peer_ip = client
+            .peer_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let peer_port = client.peer_addr().map(|a| a.port()).unwrap_or(0);
+        let ratio = crate::config::resolve().compression_ratio.unwrap_or(0.55);
+        let forwarded = rewrite_host_header(&request, &up.host, up.port, up.tls);
+
+        if up.tls {
+            let u = Arc::clone(&up);
+            serve_session(
+                client,
+                up.host.clone(),
+                provider,
+                peer_ip,
+                peer_port,
+                ratio,
+                forwarded,
+                hub,
+                move || {
+                    let u = Arc::clone(&u);
+                    async move { connect_upstream(&u.host, u.port).await }
+                },
+            )
             .await;
+        } else {
+            let u = Arc::clone(&up);
+            serve_session(
+                client,
+                up.host.clone(),
+                provider,
+                peer_ip,
+                peer_port,
+                ratio,
+                forwarded,
+                hub,
+                move || {
+                    let u = Arc::clone(&u);
+                    async move { Ok(TcpStream::connect(format!("{}:{}", u.host, u.port)).await?) }
+                },
+            )
+            .await;
+        }
         return;
     }
 
@@ -2272,7 +2425,7 @@ fn install_crypto_provider() {
 
 // ── Main server ───────────────────────────────────────────────────────────────
 
-pub async fn start_server(bind: &str, port: u16, _upstream: Option<String>) -> Result<()> {
+pub async fn start_server(bind: &str, port: u16, upstream: Option<String>) -> Result<()> {
     install_crypto_provider();
 
     let ca = ensure_ca()?;
@@ -2285,6 +2438,25 @@ pub async fn start_server(bind: &str, port: u16, _upstream: Option<String>) -> R
     }
     let ca_cert = Arc::new(ca.cert_pem);
     let ca_key = Arc::new(ca.key_pem);
+
+    // `--upstream` was accepted and then ignored: the flag existed, the doc mentioned
+    // it, and nothing read it. Parsed here so a bad value fails at startup rather than
+    // on the first request.
+    let upstream = match upstream.as_deref() {
+        Some(raw) => Some(Arc::new(Upstream::parse(raw)?)),
+        None => None,
+    };
+    if let Some(u) = &upstream {
+        info!(
+            "reverse-proxy mode: origin-form requests forward to {}://{}:{} — point a \
+             client at http://{}:{} (e.g. ANTHROPIC_BASE_URL)",
+            if u.tls { "https" } else { "http" },
+            u.host,
+            u.port,
+            bind,
+            port
+        );
+    }
 
     // Full chain: hub-enforced > project `.prismrc` > global config.yaml > defaults.
     let cfg = crate::config::resolve();
@@ -2355,14 +2527,16 @@ pub async fn start_server(bind: &str, port: u16, _upstream: Option<String>) -> R
         let cc = Arc::clone(&ca_cert);
         let ck = Arc::clone(&ca_key);
         let hub = Arc::clone(&hub);
+        let up = upstream.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio, port, hub).await {
+            if let Err(e) = handle_connection(stream, addr, cc, ck, ratio, port, hub, up).await {
                 warn!("connection error: {}", e);
             }
         });
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
     client_addr: SocketAddr,
@@ -2371,6 +2545,7 @@ async fn handle_connection(
     ratio: f64,
     proxy_port: u16,
     hub: Arc<crate::hub::HubSender>,
+    upstream: Option<Arc<Upstream>>,
 ) -> Result<()> {
     let Some((headers, body_start)) = read_headers(&mut stream, Vec::new()).await else {
         return Ok(());
@@ -2418,7 +2593,7 @@ async fn handle_connection(
     } else {
         let mut request = headers;
         request.extend_from_slice(&body_start);
-        handle_plain_http(stream, request, proxy_port, hub).await;
+        handle_plain_http(stream, request, proxy_port, hub, upstream).await;
     }
     Ok(())
 }
@@ -3057,6 +3232,82 @@ mod tests {
     }
 
     // ── framing ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn upstream_parse_accepts_the_forms_a_user_will_actually_type() {
+        assert_eq!(
+            Upstream::parse("https://api.anthropic.com").unwrap(),
+            Upstream {
+                host: "api.anthropic.com".into(),
+                port: 443,
+                tls: true
+            }
+        );
+        // Bare host: every hosted provider is TLS, so assuming http would fail in a
+        // way that looks like a network problem rather than a config mistake.
+        assert_eq!(
+            Upstream::parse("api.openai.com").unwrap(),
+            Upstream {
+                host: "api.openai.com".into(),
+                port: 443,
+                tls: true
+            }
+        );
+        assert_eq!(
+            Upstream::parse("http://localhost:11434").unwrap(),
+            Upstream {
+                host: "localhost".into(),
+                port: 11434,
+                tls: false
+            }
+        );
+        assert_eq!(
+            Upstream::parse("https://example.com:8443/").unwrap(),
+            Upstream {
+                host: "example.com".into(),
+                port: 8443,
+                tls: true
+            }
+        );
+    }
+
+    #[test]
+    fn upstream_parse_rejects_what_it_cannot_honour() {
+        // A path would be silently dropped and the client would see confusing 404s
+        // from the provider instead of an error at startup.
+        assert!(Upstream::parse("https://api.anthropic.com/v1").is_err());
+        assert!(Upstream::parse("ftp://example.com").is_err());
+        assert!(Upstream::parse("host:notaport").is_err());
+        assert!(Upstream::parse("  ").is_err());
+    }
+
+    #[test]
+    fn host_header_is_rewritten_to_the_upstream() {
+        // The client addressed prism. Forwarding `Host: 127.0.0.1:27181` upstream
+        // gets the request rejected or routed to the wrong virtual host.
+        let req = b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1:27181\r\nAccept: */*\r\n\r\n";
+        let out = rewrite_host_header(req, "api.anthropic.com", 443, true);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Host: api.anthropic.com\r\n"), "{text}");
+        assert!(!text.contains("127.0.0.1:27181"), "{text}");
+        // The request line and other headers are untouched.
+        assert!(text.starts_with("POST /v1/messages HTTP/1.1\r\n"));
+        assert!(text.contains("Accept: */*"));
+    }
+
+    #[test]
+    fn host_header_rewrite_keeps_a_non_default_port_and_ignores_the_body() {
+        let out = rewrite_host_header(
+            b"POST / HTTP/1.1\r\nHost: 127.0.0.1:27181\r\n\r\nhost: not-a-header\r\n",
+            "localhost",
+            11434,
+            false,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Host: localhost:11434"), "{text}");
+        // Only the first Host line in the header block is replaced.
+        assert!(text.contains("host: not-a-header"), "{text}");
+    }
 
     #[test]
     fn header_lookup_is_case_insensitive_and_skips_request_line() {

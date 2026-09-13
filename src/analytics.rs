@@ -62,17 +62,60 @@ const PRICING: &[(&str, f64, f64)] = &[
     ("gemini", 0.001, 0.004),
 ];
 
+/// Providers that run on the user's own hardware and bill nothing.
+const LOCAL_PROVIDERS: &[&str] = &["ollama", "lm-studio", "lmstudio", "local", "llamacpp"];
+
+/// True when this provider charges nothing because the model runs locally.
+pub fn is_local_provider(provider: &str) -> bool {
+    let p = provider.to_lowercase();
+    LOCAL_PROVIDERS.iter().any(|l| p == *l)
+}
+
 /// Estimate cost in USD for a given model and token counts.
-pub fn estimate_cost(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+///
+/// Returns `None` when the model is unrecognised, rather than guessing. The caller
+/// decides what an unknown model is worth — see [`estimate_cost`].
+fn lookup_cost(model: &str, input_tokens: u32, output_tokens: u32) -> Option<f64> {
     let model_lower = model.to_lowercase();
     for (prefix, input_rate, output_rate) in PRICING {
         if model_lower.starts_with(prefix) {
-            return (input_tokens as f64 / 1000.0) * input_rate
-                + (output_tokens as f64 / 1000.0) * output_rate;
+            return Some(
+                (input_tokens as f64 / 1000.0) * input_rate
+                    + (output_tokens as f64 / 1000.0) * output_rate,
+            );
         }
     }
-    // fallback: gpt-4o pricing
-    (input_tokens as f64 / 1000.0) * 0.005 + (output_tokens as f64 / 1000.0) * 0.015
+    None
+}
+
+/// Estimate cost in USD, falling back to gpt-4o rates for an unrecognised model.
+///
+/// Prefer [`estimate_cost_for`] wherever the provider is known: this fallback
+/// invents spend for anything it does not recognise.
+pub fn estimate_cost(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+    lookup_cost(model, input_tokens, output_tokens).unwrap_or(
+        // fallback: gpt-4o pricing
+        (input_tokens as f64 / 1000.0) * 0.005 + (output_tokens as f64 / 1000.0) * 0.015,
+    )
+}
+
+/// Estimate cost, but charge nothing for a model running on the user's own machine.
+///
+/// A request to Ollama or LM Studio costs the user electricity, not API spend. The
+/// unconditional gpt-4o fallback billed local inference at hosted rates — one
+/// `model: "unknown"` Ollama response produced $0.0059 of fictional spend and became
+/// the entirety of `prism gain`'s "Spend on forwarded traffic". Reporting invented
+/// money is worse than reporting none.
+pub fn estimate_cost_for(
+    provider: &str,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> f64 {
+    if is_local_provider(provider) {
+        return 0.0;
+    }
+    estimate_cost(model, input_tokens, output_tokens)
 }
 
 /// Record one proxied request/response to the local analytics log (`prism gain`'s data
@@ -657,6 +700,29 @@ mod tests {
         assert!(e.saved_tokens() > 30_000, "got {}", e.saved_tokens());
         let pct = e.saved_tokens() as f64 / e.input_tokens() as f64 * 100.0;
         assert!((94.0..=96.0).contains(&pct), "expected ~95%, got {pct:.1}");
+    }
+
+    /// A local model bills nothing. The unconditional gpt-4o fallback charged it
+    /// hosted rates: one `model: "unknown"` Ollama response produced $0.0059 of
+    /// fictional spend, which was the whole of `prism gain`'s reported cost.
+    #[test]
+    fn local_providers_cost_nothing_even_with_an_unknown_model() {
+        assert_eq!(estimate_cost_for("ollama", "unknown", 1_000, 1_000), 0.0);
+        assert_eq!(estimate_cost_for("lm-studio", "llama3", 5_000, 5_000), 0.0);
+        // The exact case from the live event log.
+        assert_eq!(estimate_cost_for("ollama", "unknown", 0, 394), 0.0);
+    }
+
+    /// Hosted providers must still be priced, including the unknown-model fallback —
+    /// under-reporting real spend would be its own kind of lie.
+    #[test]
+    fn hosted_providers_are_still_priced() {
+        assert!(estimate_cost_for("anthropic", "claude-3-5-sonnet", 1_000, 1_000) > 0.0);
+        assert!(estimate_cost_for("openai", "some-new-model", 1_000, 1_000) > 0.0);
+        assert_eq!(
+            estimate_cost_for("openai", "gpt-4o", 1_000, 1_000),
+            estimate_cost("gpt-4o", 1_000, 1_000)
+        );
     }
 
     /// A partial write must never be visible: readers see the old file or the new
