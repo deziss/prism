@@ -343,6 +343,30 @@ pub struct AgentCredentials {
     pub hub_url: String,
     pub agent_id: String,
     pub agent_token: String,
+    /// Bearer token the hub presents to this agent's MCP server, when one is
+    /// advertised. Separate from `agent_token` on purpose: the MCP server exposes
+    /// tools that read this machine, so its credential must be revocable on its own —
+    /// rotating it should not force a re-enrolment, and leaking it should not also
+    /// hand over telemetry ingestion.
+    ///
+    /// `default` so credentials written by an older prism still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_token: Option<String>,
+}
+
+/// 32 bytes of OS entropy, hex-encoded.
+///
+/// prism has no `rand` dependency and this is the only place that needs one, so the
+/// kernel CSPRNG is read directly rather than adding a crate to the tree. Falls back
+/// to an error rather than a weaker source: a predictable bearer token protecting
+/// filesystem-reading MCP tools would be worse than refusing to mint one.
+pub fn generate_mcp_token() -> Result<String> {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .context("reading /dev/urandom to mint an MCP token")?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn credentials_path() -> PathBuf {
@@ -570,6 +594,10 @@ struct EnrollRequest<'a> {
     mcp_host: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mcp_port: Option<u16>,
+    /// Only sent when an MCP endpoint is advertised — a loopback-only server needs no
+    /// token, and the hub could not reach it anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_token: Option<&'a str>,
 }
 
 /// Response of `POST /api/agents/enroll`.
@@ -602,6 +630,12 @@ pub async fn enroll(
     let client = http_client();
     let url = format!("{}/agents/enroll", api_base(hub_url));
     let fallback_name = default_agent_name();
+    // Only mint a token when there is something for it to protect. A loopback-only
+    // agent advertises no MCP endpoint, so the hub can never dial it.
+    let mcp_token = match mcp {
+        Some(_) => Some(generate_mcp_token()?),
+        None => None,
+    };
     let req = EnrollRequest {
         join_token,
         name: name.unwrap_or(&fallback_name),
@@ -610,6 +644,7 @@ pub async fn enroll(
         prism_version: env!("CARGO_PKG_VERSION"),
         mcp_host: mcp.map(|(h, _)| h),
         mcp_port: mcp.map(|(_, p)| p),
+        mcp_token: mcp_token.as_deref(),
     };
     let resp = client
         .post(&url)
@@ -627,6 +662,7 @@ pub async fn enroll(
         hub_url: hub_url.trim_end_matches('/').to_string(),
         agent_id: parsed.agent_id,
         agent_token: parsed.token,
+        mcp_token,
     };
     save_credentials(&creds)?;
     Ok(creds)
@@ -781,6 +817,7 @@ pub async fn send_test_event(hub_url_override: Option<String>) -> Result<()> {
             hub_url: url.trim_end_matches('/').to_string(),
             agent_id: "test-agent".to_string(),
             agent_token: "test-token".to_string(),
+            mcp_token: None,
         },
         None => load_credentials()
             .context("not enrolled — run `prism hub enroll` first, or pass --url to test against a scratch endpoint")?,
@@ -1129,6 +1166,7 @@ mod tests {
             prism_version: env!("CARGO_PKG_VERSION"),
             mcp_host: Some("10.0.0.4"),
             mcp_port: Some(27182),
+            mcp_token: Some("0123456789abcdef0123456789abcdef"),
         })
         .expect("request must serialize");
 
@@ -1140,6 +1178,7 @@ mod tests {
             "prismVersion",
             "mcpHost",
             "mcpPort",
+            "mcpToken",
         ] {
             assert!(body.get(key).is_some(), "missing wire key {key}: {body}");
         }
@@ -1154,6 +1193,7 @@ mod tests {
             prism_version: env!("CARGO_PKG_VERSION"),
             mcp_host: None,
             mcp_port: None,
+            mcp_token: None,
         })
         .expect("request must serialize");
         assert!(
@@ -1164,6 +1204,33 @@ mod tests {
             local.get("mcpPort").is_none(),
             "mcpPort must be omitted: {local}"
         );
+        assert!(
+            local.get("mcpToken").is_none(),
+            "mcpToken must be omitted when there is no endpoint to protect: {local}"
+        );
+    }
+
+    /// The MCP token must be real entropy, not a placeholder.
+    ///
+    /// It guards tools that read the developer's filesystem, so a predictable value
+    /// would be worse than none — the log would claim auth is required while every
+    /// request trivially matched.
+    #[test]
+    fn minted_mcp_tokens_are_random_and_hex() {
+        let a = generate_mcp_token().expect("mint");
+        let b = generate_mcp_token().expect("mint");
+        assert_eq!(a.len(), 64, "expected 32 bytes hex-encoded: {a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_ne!(a, b, "two mints must not collide");
+    }
+
+    /// Credentials written before the MCP token existed must still load.
+    #[test]
+    fn credentials_without_an_mcp_token_still_deserialize() {
+        let creds: AgentCredentials =
+            serde_json::from_str(r#"{"hub_url":"http://h","agent_id":"a","agent_token":"t"}"#)
+                .expect("older credentials must still parse");
+        assert!(creds.mcp_token.is_none());
     }
 
     /// A 402 is a licensing decision the hub made, and the operator needs to know which

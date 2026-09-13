@@ -382,6 +382,14 @@ fn cache_gate() -> Option<Result<CallToolResult, McpError>> {
     crate::cache::unavailable().map(|why| text_err(why.message()))
 }
 
+/// Tools refused to an off-loopback caller.
+///
+/// The hub drives the Memory and Graph pages over MCP and needs neither of these.
+/// `prism_read_file` reads any path this user can read, and `prism_filter_cmd` runs a
+/// command. Exposing either to satisfy a stats page is privilege nobody asked for, so
+/// the remote surface is narrowed rather than trusted to a single bearer token.
+const REMOTE_DENIED_TOOLS: &[&str] = &["prism_read_file", "prism_filter_cmd"];
+
 #[derive(Clone)]
 pub struct PrismMcpServer {
     // Read by the #[tool_handler]-generated ServerHandler::list_tools/call_tool through
@@ -389,6 +397,8 @@ pub struct PrismMcpServer {
     // functionally instead: a live server correctly lists and executes all 17 tools.
     #[allow(dead_code)]
     tool_router: ToolRouter<PrismMcpServer>,
+    /// True when this server is bound off-loopback, i.e. every caller is remote.
+    remote: bool,
 }
 
 impl Default for PrismMcpServer {
@@ -402,7 +412,26 @@ impl PrismMcpServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            remote: false,
         }
+    }
+
+    /// Refuse filesystem- and process-reaching tools, for a server bound off-loopback.
+    pub fn with_remote_restrictions(mut self, remote: bool) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    /// `Some(err)` when this tool is not available to the current caller.
+    fn refuse_if_remote(&self, tool: &str) -> Option<Result<CallToolResult, McpError>> {
+        if self.remote && REMOTE_DENIED_TOOLS.contains(&tool) {
+            return Some(text_err(format!(
+                "{tool} is not available to remote callers. This PRISM MCP server is \
+                 bound off-loopback, where it exposes only the memory and graph tools. \
+                 Run the tool on the agent machine instead."
+            )));
+        }
+        None
     }
 
     #[tool(
@@ -431,6 +460,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<ReadFileRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(refusal) = self.refuse_if_remote("prism_read_file") {
+            return refusal;
+        }
         let mode = if let Some(range) = &req.lines {
             crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
         } else {
@@ -457,6 +489,9 @@ impl PrismMcpServer {
         &self,
         Parameters(req): Parameters<FilterCmdRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(refusal) = self.refuse_if_remote("prism_filter_cmd") {
+            return refusal;
+        }
         let parts: Vec<&str> = req.command.split_whitespace().collect();
         let cmd = parts.first().copied().unwrap_or("");
         let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
@@ -809,9 +844,20 @@ async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result
     // `is_none()` would let that through and bind the LAN behind a bearer token that
     // every request trivially matches, which is worse than no auth because the log
     // then claims auth is required.
+    // Preference order: an explicit --auth-token, then the dedicated MCP token minted
+    // at enrolment, and only then the agent token.
+    //
+    // The dedicated token exists so MCP access can be revoked on its own: these tools
+    // read the developer's machine, and rotating that credential must not force a
+    // re-enrolment or take telemetry ingestion down with it. The agent token stays as
+    // a fallback for agents enrolled before the dedicated one existed.
+    let creds = crate::hub::load_credentials();
     let token = effective_token(
         auth_token,
-        crate::hub::load_credentials().map(|c| c.agent_token),
+        creds
+            .as_ref()
+            .and_then(|c| c.mcp_token.clone())
+            .or_else(|| creds.as_ref().map(|c| c.agent_token.clone())),
     );
     if off_loopback && token.is_none() {
         anyhow::bail!(
@@ -821,11 +867,34 @@ async fn serve_http(port: u16, bind: &str, auth_token: Option<String>) -> Result
         );
     }
 
+    // Off-loopback callers get the memory and graph tools only.
+    //
+    // The hub drives the Memory and Graph pages and needs nothing else, while
+    // `prism_read_file` reads any path this user can read. Exposing arbitrary file
+    // read to satisfy a stats page is privilege nobody asked for, so the remote
+    // surface is narrowed rather than trusted to a single bearer token.
+    let remote_only = off_loopback;
     let ct = tokio_util::sync::CancellationToken::new();
+
+    // Allow the address we are actually bound to as a Host.
+    //
+    // rmcp validates the Host header as DNS-rebinding protection and allows only
+    // loopback by default, so a server bound to the docker bridge answered every
+    // authenticated request with "Forbidden: Host header is not allowed". The auth
+    // layer was fine; this sits behind it, and only a request over the wire shows it.
+    //
+    // Adding the bind address does not weaken the check: it still rejects a Host this
+    // server was never asked to answer on, which is what the protection is for.
+    let mut cfg = StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token());
+    if off_loopback {
+        let host = bind_ip.to_string();
+        cfg = cfg.with_allowed_hosts(vec![host.clone(), format!("{host}:{port}")]);
+    }
+
     let service = StreamableHttpService::new(
-        || Ok(PrismMcpServer::new()),
+        move || Ok(PrismMcpServer::new().with_remote_restrictions(remote_only)),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
+        cfg,
     );
 
     let mut router = axum::Router::new().nest_service("/mcp", service);
@@ -875,6 +944,40 @@ pub async fn start_mcp_server(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A remote server must refuse the tools that reach the machine.
+    ///
+    /// The hub needs memory and graph to render two pages; it never needs arbitrary
+    /// file read. Binding off-loopback to serve those pages should not also publish
+    /// `prism_read_file` to whatever can reach the port.
+    #[test]
+    fn remote_servers_refuse_filesystem_tools() {
+        let remote = PrismMcpServer::new().with_remote_restrictions(true);
+        assert!(remote.refuse_if_remote("prism_read_file").is_some());
+        assert!(remote.refuse_if_remote("prism_filter_cmd").is_some());
+        // The tools the hub actually drives stay available.
+        for allowed in [
+            "prism_memory_search",
+            "prism_memory_stats",
+            "prism_graph_query",
+            "prism_graph_god_nodes",
+        ] {
+            assert!(
+                remote.refuse_if_remote(allowed).is_none(),
+                "{allowed} must remain available to the hub"
+            );
+        }
+    }
+
+    /// Loopback keeps the full tool set — this is the local agent's own MCP server.
+    #[test]
+    fn local_servers_keep_every_tool() {
+        let local = PrismMcpServer::new();
+        assert!(local.refuse_if_remote("prism_read_file").is_none());
+        assert!(local.refuse_if_remote("prism_filter_cmd").is_none());
+    }
+
     use super::effective_token;
 
     /// The hub's image runs `prism mcp --bind 0.0.0.0 --auth-token "$PRISM_MCP_TOKEN"`,
