@@ -462,6 +462,22 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
                 top.saved_pct
             );
         }
+        // rtk prints the same nudge when its hook is absent, and it is the right
+        // call: with shims off, prism only sees commands typed as `prism cmd ...`,
+        // so a near-empty report means "not wired up", not "no savings available".
+        // Now that install no longer enables shims, this is the discovery path.
+        if !crate::shim::status().active {
+            println!();
+            println!(
+                "  {} {}",
+                "[warn]".yellow().bold(),
+                "No shims on PATH — only explicit `prism cmd ...` runs are counted.".yellow()
+            );
+            println!(
+                "         {}",
+                "Run `prism shim install --path` for automatic filtering.".dimmed()
+            );
+        }
         println!("  {}\n", "─".repeat(65).dimmed());
     }
 

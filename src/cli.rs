@@ -132,6 +132,12 @@ pub enum ShimCmd {
 #[derive(Parser, Debug)]
 pub enum HookCmd {
     Install,
+    /// Remove the project-local hook templates from `.prism/hooks/`.
+    ///
+    /// Note this is the *project* hook system (`src/hooks.rs`), not the PATH shims —
+    /// those are `prism shim install|uninstall`. The two have unfortunately similar
+    /// names; the shims are the ones that touch your shell.
+    Uninstall,
     Validate,
     Audit,
 }
@@ -178,12 +184,109 @@ fn data_dir() -> std::path::PathBuf {
     crate::prism_data_dir()
 }
 
+/// `prism status` — one place that answers "what has prism actually done to this machine?"
+///
+/// Previously that question had no single answer: `prism shim status` covered shims,
+/// `prism hub status` covered enrolment, and nothing at all reported the rc PATH block,
+/// the CA trust, or the Claude Code MCP registration. Since install used to enable
+/// several of those silently, "is it on?" was genuinely hard to establish.
+pub async fn status() -> Result<()> {
+    use colored::Colorize;
+
+    let on = |b: bool| {
+        if b {
+            "on".green().to_string()
+        } else {
+            "off".dimmed().to_string()
+        }
+    };
+
+    println!(
+        "\n  {}  {}",
+        "PRISM STATUS".bold().cyan(),
+        concat!("v", env!("CARGO_PKG_VERSION")).dimmed()
+    );
+    println!("  {}", "─".repeat(65).dimmed());
+
+    // Shims + the rc block that makes them reachable. Both matter: shims installed but
+    // not on PATH do nothing, and a PATH block with no shims behind it is the state
+    // that used to break every command.
+    let sh = crate::shim::status();
+    println!(
+        "  {:<22} {}  ({} installed, {})",
+        "PATH shims:",
+        on(sh.active),
+        sh.installed,
+        if sh.active {
+            "ahead of the real tools"
+        } else {
+            "not on PATH"
+        }
+    );
+    println!("  {:<22} {}", "  directory:", sh.dir.display());
+    println!("  {:<22} {:?}", "  mode:", sh.mode);
+    if sh.installed > 0 && !sh.active {
+        println!(
+            "  {:<22} {}",
+            "",
+            "shims exist but nothing uses them — `prism shim install --path`".dimmed()
+        );
+    }
+
+    // CA trust.
+    let ca = crate::proxy::ca_dir().join("ca.crt");
+    println!("  {:<22} {}", "CA generated:", on(ca.exists()));
+    let nss_trusted = std::process::Command::new("certutil")
+        .args(["-d", "sql:.", "-L"])
+        .output()
+        .is_ok();
+    if !nss_trusted {
+        println!(
+            "  {:<22} {}",
+            "  browser trust:",
+            "certutil not installed — cannot tell".dimmed()
+        );
+    }
+
+    // Claude Code MCP registration.
+    let claude_json = dirs::home_dir().unwrap_or_default().join(".claude.json");
+    let mcp_registered = std::fs::read_to_string(&claude_json)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("mcpServers")
+                .and_then(|m| m.get("prism"))
+                .map(|_| true)
+        })
+        .unwrap_or(false);
+    println!("  {:<22} {}", "Claude Code MCP:", on(mcp_registered));
+
+    // Hub enrolment.
+    let hub = crate::hub::status();
+    println!("  {:<22} {}", "Hub enrolled:", on(hub.enrolled));
+
+    println!("  {}\n", "─".repeat(65).dimmed());
+    Ok(())
+}
+
 // --- init ---
-pub async fn init(global: bool, guide: bool) -> Result<()> {
+pub async fn init(global: bool, guide: bool, shims: bool, trust_ca: bool) -> Result<()> {
     let scope = if global { "global" } else { "local" };
     println!("Initializing PRISM ({scope})...");
 
-    crate::hook::install(global).await?;
+    // Shims are opt-in.
+    //
+    // This used to be the first unconditional statement of init, and `install.sh` ran
+    // `init --global < /dev/null`, so a plain install put prism in front of ~102
+    // commands — `ls`, `grep`, `find`, `env`, `ps`, `systemctl` among them — and
+    // rewrote every shell rc file, with no prompt and no way to undo it from the CLI.
+    //
+    // The failure mode that argues hardest for this: a shim's exec target is recorded
+    // when the shim is written, so a moved or deleted prism takes `ls` and `grep` with
+    // it — removing the tools needed to diagnose the breakage.
+    if shims {
+        crate::hook::install(global).await?;
+    }
     init_data_dirs().await?;
 
     // Generate CA cert (needed for MITM proxy)
@@ -230,14 +333,24 @@ pub async fn init(global: bool, guide: bool) -> Result<()> {
 
         // Chromium/Electron apps (VS Code, Antigravity, …) and Firefox read NSS, not
         // the system store — without this they reject every intercepted host.
-        match crate::proxy::install_ca_nss(&ca.cert_pem) {
-            Ok(dbs) if !dbs.is_empty() => {
-                println!("  NSS trust:    {} database(s) updated", dbs.len())
+        //
+        // Opt-in, because this is a man-in-the-middle root. It is only needed once
+        // traffic is actually routed through the proxy, and an unattended installer
+        // should not put an interception CA into someone's browser on their behalf.
+        if trust_ca {
+            match crate::proxy::install_ca_nss(&ca.cert_pem) {
+                Ok(dbs) if !dbs.is_empty() => {
+                    println!("  NSS trust:    {} database(s) updated", dbs.len())
+                }
+                Ok(_) => println!(
+                    "  NSS trust:    no NSS database found (install libnss3-tools if an IDE or browser rejects certs)"
+                ),
+                Err(e) => println!("  NSS trust:    failed: {}", e),
             }
-            Ok(_) => println!(
-                "  NSS trust:    no NSS database found (install libnss3-tools if an IDE or browser rejects certs)"
-            ),
-            Err(e) => println!("  NSS trust:    failed: {}", e),
+        } else {
+            println!(
+                "  NSS trust:    not installed (re-run with --trust-ca once you route traffic through the proxy)"
+            );
         }
 
         // The system trust store is deliberately NOT written.
@@ -314,15 +427,23 @@ pub async fn guide(topic: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Strip PRISM's legacy proxy exports from the user's shell startup files.
+///
+/// This used to also *write* a block exporting `PRISM_HUB_URL` into `.bashrc`,
+/// `.zshrc` and `.profile`. Nothing in prism has ever read that variable — the hub
+/// URL comes only from the credentials written by `prism hub enroll`
+/// (`hub::load_credentials`) — so init was permanently editing three shell files for
+/// a value with no effect, and TROUBLESHOOT.md told users the shipper would not start
+/// without it.
+///
+/// The cleaning half is kept and is the entire point now: older versions really did
+/// export `HTTP_PROXY`/`SSL_CERT_FILE` here, and those linger in rc files long after
+/// the proxy is gone. Removing them is a fix; adding anything back is not.
+///
+/// Global `HTTP_PROXY`/`HTTPS_PROXY` are never written: they break system tools and
+/// IDEs whenever the proxy is down. Use `prism-env <cmd>` or `eval $(prism proxy env)`.
 fn write_shell_env(_ca_cert_path: &str, _ca_bundle_path: &str) -> Result<()> {
-    // Only benign environment variables like PRISM_HUB_URL are exported globally.
-    // Global HTTP_PROXY and HTTPS_PROXY are deliberately NOT placed in shell startup
-    // files (.bashrc, .profile, .zshrc) to prevent breaking system tools, VS Code,
-    // and IDEs when the proxy is offline. Use `prism proxy <cmd>` or `eval $(prism proxy env)`.
-    let block = "\n# PRISM environment (added by `prism init --global`)\n\
-         export PRISM_HUB_URL=http://localhost:27183\n\
-         # end PRISM\n"
-        .to_string();
+    let block = String::new();
 
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
     let rc_files = [".bashrc", ".zshrc", ".profile"];
@@ -352,12 +473,8 @@ fn write_shell_env(_ca_cert_path: &str, _ca_bundle_path: &str) -> Result<()> {
                 new_text.push_str(&block);
                 std::fs::write(&path, new_text)?;
                 println!("  Shell env:    cleaned legacy proxy & updated ~/{}", rc);
-            } else if !existing.contains("PRISM environment") {
-                let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
-                use std::io::Write;
-                write!(f, "{}", block)?;
-                println!("  Shell env:    written to ~/{}", rc);
             }
+            // No `else` branch: there is nothing to add. init only removes.
         }
     }
 
@@ -842,6 +959,10 @@ pub async fn hook(cmd: HookCmd) -> Result<()> {
             let msg = system.install().map_err(|e| anyhow::anyhow!(e))?;
             println!("{msg}");
         }
+        HookCmd::Uninstall => {
+            let msg = system.uninstall().map_err(|e| anyhow::anyhow!(e))?;
+            println!("{msg}");
+        }
         HookCmd::Validate => println!("{}", system.validate()),
         HookCmd::Audit => println!("{}", crate::hooks::hook_audit_stats(&root.join(".prism"))),
     }
@@ -1292,11 +1413,17 @@ pub async fn shim(cmd: ShimCmd) -> Result<()> {
             );
         }
         ShimCmd::Uninstall => {
-            let n = sh::uninstall()?;
-            println!("Removed {n} shims.");
-            println!(
-                "Also remove the PATH line from your shell rc / client config if you added one."
-            );
+            // Removal must mirror `shim install --path`, which writes both the shim
+            // files and the rc PATH block. This used to delete only the files and then
+            // print "Also remove the PATH line … if you added one", leaving every shell
+            // with a PATH entry pointing at an empty directory. `hook::uninstall` does
+            // both and already existed — it simply had no caller.
+            crate::hook::uninstall(true).await?;
+            println!();
+            println!("  Shims and the PRISM PATH block are gone from your shell rc files.");
+            println!("  Open a new shell for it to take effect.");
+            println!("  Note: a PATH entry you added to an editor or agent config by hand is not");
+            println!("  touched here — `prism uninstall` audits for those.");
         }
         ShimCmd::Status => {
             let st = sh::status();

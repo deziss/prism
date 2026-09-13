@@ -132,6 +132,19 @@ fn shim_script(prism: &Path, tool: &str) -> String {
 #
 # prism removes this directory from PATH before spawning the real tool, so the
 # lookup stays dynamic and version managers (nvm, rbenv, pyenv) keep working.
+#
+# The prism path is fixed when this shim is written. If prism is later moved,
+# deleted, or replaced by a broken build, fall through to the real tool instead of
+# failing: these shims sit in front of `ls`, `grep`, `find` and `ps`, so dying here
+# would take away the commands needed to diagnose prism itself. Losing filtering is
+# an inconvenience; losing `ls` is an outage.
+if [ ! -x "{prism}" ]; then
+  # Drop this directory from PATH so the lookup below finds the real tool, not us.
+  _prism_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$_prism_dir" | paste -sd: -)
+  export PATH
+  exec {tool} "$@"
+fi
 exec "{prism}" cmd {tool} "$@"
 "#,
         prism = prism.display(),
@@ -270,6 +283,41 @@ pub fn path_line() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shim must survive prism being moved or deleted.
+    ///
+    /// The prism path is baked in when the shim is written. Without a fallback, a
+    /// missing binary turns every shimmed command — `ls`, `grep`, `find`, `ps` — into
+    /// "No such file or directory", which is exactly the set of tools someone needs to
+    /// work out what went wrong. This happened to an agent working in this repo.
+    #[test]
+    fn shim_falls_back_to_the_real_tool_when_prism_is_gone() {
+        let script = shim_script(std::path::Path::new("/nonexistent/prism"), "ls");
+        assert!(
+            script.contains(r#"if [ ! -x "/nonexistent/prism" ]"#),
+            "no existence guard:\n{script}"
+        );
+        assert!(
+            script.contains(r#"exec ls "$@""#),
+            "no passthrough to the real tool:\n{script}"
+        );
+        // The fallback must drop the shim dir from PATH first, or `exec ls` re-enters
+        // this same script and spins.
+        assert!(
+            script.contains("_prism_dir") && script.contains("grep -vxF"),
+            "fallback would recurse into itself:\n{script}"
+        );
+    }
+
+    /// The normal path is unchanged: with prism present, the shim still delegates.
+    #[test]
+    fn shim_still_delegates_to_prism_when_present() {
+        let script = shim_script(std::path::Path::new("/usr/bin/prism"), "git");
+        assert!(
+            script.contains(r#"exec "/usr/bin/prism" cmd git "$@""#),
+            "{script}"
+        );
+    }
 
     #[test]
     fn a_build_directory_binary_is_recognised_as_volatile() {

@@ -89,6 +89,46 @@ impl HookSystem {
 
     /// Install hook templates into the project's .prism/hooks/ directory.
     /// Creates 6 hook files (analogous to OpenWolf's 6 hooks).
+    /// Remove the hook templates this installed, and the `hooks/` directory when it
+    /// is left empty.
+    ///
+    /// `install` had no counterpart, so a project that tried the hooks was stuck with
+    /// them. Only files matching the templates' own marker are removed, so a hook the
+    /// user edited or wrote themselves is left alone rather than silently deleted.
+    pub fn uninstall(&self) -> Result<String, String> {
+        let hooks_dir = self.install_dir.join("hooks");
+        if !hooks_dir.is_dir() {
+            return Ok("No PRISM hooks installed.".to_string());
+        }
+        let mut removed = 0usize;
+        let mut kept = 0usize;
+        let entries = fs::read_dir(&hooks_dir).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            match fs::read_to_string(&path) {
+                Ok(body) if body.contains("# PRISM Hook:") => {
+                    fs::remove_file(&path).map_err(|e| e.to_string())?;
+                    removed += 1;
+                }
+                // Anything without our marker is someone else's file.
+                Ok(_) => kept += 1,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        // Only tidy up the directory if we emptied it.
+        if kept == 0 {
+            let _ = fs::remove_dir(&hooks_dir);
+        }
+        Ok(if kept > 0 {
+            format!("Removed {removed} PRISM hook(s); left {kept} file(s) not written by PRISM.")
+        } else {
+            format!("Removed {removed} PRISM hook(s).")
+        })
+    }
+
     pub fn install(&self) -> Result<String, String> {
         fs::create_dir_all(&self.install_dir).map_err(|e| e.to_string())?;
         let hooks_dir = self.install_dir.join("hooks");

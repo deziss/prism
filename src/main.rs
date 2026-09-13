@@ -18,7 +18,25 @@ enum Args {
         global: bool,
         #[arg(short, long, default_value_t = false)]
         guide: bool,
+        /// Also install PATH shims, so `git`, `ls`, `grep` and ~100 other commands
+        /// are filtered automatically.
+        ///
+        /// Off by default. This rewrites every shell rc file you have and puts prism
+        /// in front of core system utilities — including the ones you would need to
+        /// diagnose prism. `prism shim install --path` does the same thing later, and
+        /// `prism shim uninstall` reverses it.
+        #[arg(long, default_value_t = false)]
+        shims: bool,
+        /// Also add the PRISM CA to your browser and Electron trust stores.
+        ///
+        /// Off by default. This is a man-in-the-middle root: it is only needed once
+        /// traffic is actually routed through the proxy, and installing it
+        /// unattended is not something an installer should decide for you.
+        #[arg(long, default_value_t = false)]
+        trust_ca: bool,
     },
+    /// What has prism actually enabled on this machine? Shims, CA, MCP, hub.
+    Status,
     Guide {
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
@@ -170,7 +188,13 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(matches!(args, Args::Serve { .. } | Args::Mcp { .. }));
     match args {
-        Args::Init { global, guide } => cli::init(global, guide).await,
+        Args::Init {
+            global,
+            guide,
+            shims,
+            trust_ca,
+        } => cli::init(global, guide, shims, trust_ca).await,
+        Args::Status => cli::status().await,
         Args::Guide { topic } => cli::guide(topic).await,
         Args::Gain { history, json } => analytics::show_gains(history, json).await,
         Args::Discover => analytics::discover().await,

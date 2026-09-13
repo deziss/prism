@@ -47,7 +47,17 @@ install -m 0755 "$REPO_ROOT/target/release/prism" "$BIN_DIR/prism"
 chmod +x "$BIN_DIR/prism"
 echo "  ✓ Installed binary: $BIN_DIR/prism"
 
-# 2. Run PRISM initialization (sets up CA certificates & XDG directories)
+# 2. Run PRISM initialization (XDG directories + CA generation only)
+#
+# Deliberately WITHOUT --shims and --trust-ca. This used to be a bare
+# `init --global < /dev/null`, and because init installed shims unconditionally, a
+# plain install put prism in front of ~102 commands -- `ls`, `grep`, `find`, `env`,
+# `ps`, `systemctl` among them -- rewrote every shell rc file, and injected a
+# man-in-the-middle CA into every browser and Electron trust store. No prompt, and
+# until now no CLI verb could undo the first two.
+#
+# The shims are the product's main value, so they are advertised loudly below rather
+# than hidden; they are just no longer applied to someone's shell without consent.
 echo "[2/4] Initializing XDG storage and CA certificates..."
 "$BIN_DIR/prism" init --global < /dev/null
 
@@ -79,7 +89,16 @@ echo "==========================================================================
 echo "  PRISM is installed at: $BIN_DIR/prism"
 echo "  Run 'prism --help' or 'prism guide' at any time."
 echo ""
-echo "  To check what PRISM has put on this machine, or to take it all back off:"
+echo "  Nothing has been added to your shell. To turn on automatic filtering:"
+echo ""
+echo "    prism shim install --path    # put prism in front of git, ls, grep, ..."
+echo "    prism shim uninstall         # and take it back out, rc block included"
+echo ""
+echo "  If you route traffic through the proxy, browsers and Electron IDEs need the CA:"
+echo "    prism init --global --trust-ca"
+echo ""
+echo "  To see what PRISM has enabled, or to take it all back off:"
+echo "    prism status"
 echo "    prism uninstall              # audit only, changes nothing"
 echo "    prism uninstall --remove"
 echo "=========================================================================="
