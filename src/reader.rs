@@ -103,20 +103,134 @@ pub struct ReadOutput {
 
 // ── PathJail Security ─────────────────────────────────────────────────────────
 
+/// Directories whose *entire contents* are credentials, relative to `$HOME`.
+///
+/// Filename rules alone are not enough: a private key saved as `~/.ssh/work` has no
+/// telltale extension, and `~/.aws/config` names a profile that `~/.aws/credentials`
+/// keys. Anything under these is refused regardless of what it is called.
+const SECRET_HOME_DIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".azure",
+    ".config/gcloud",
+    // prism's own agent and MCP tokens live here. An agent that could read them
+    // could impersonate this machine to the hub.
+    ".config/prism",
+];
+
+/// Absolute paths that are credentials or leak them, whatever the caller calls them.
+const SECRET_ABSOLUTE_PREFIXES: &[&str] = &[
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/sudoers",
+    "/etc/ssh/ssh_host_",
+    "/etc/ssl/private",
+    "/etc/pki/tls/private",
+    "/root/",
+    // `/proc/<pid>/environ` is the whole environment of another process — every
+    // token it was started with, in one read.
+    "/proc/",
+    "/sys/",
+];
+
+/// Bare filenames that are credentials wherever they appear.
+const SECRET_FILENAMES: &[&str] = &[
+    ".netrc",
+    "_netrc",
+    ".git-credentials",
+    ".npmrc",
+    ".pypirc",
+    ".htpasswd",
+    ".pgpass",
+    ".my.cnf",
+    "shadow",
+    "sudoers",
+    "authorized_keys",
+    "known_hosts",
+];
+
 /// Protect against exfiltrating secrets, private keys, and environment files.
+///
+/// This is the boundary between "a tool that reads your code" and "a tool that reads
+/// your credentials". It matters more than it looks: `prism_read_file` is exposed over
+/// MCP, so whatever is driving the agent — including text that arrived from a web page
+/// or an issue tracker — chooses the path. A single successful read puts a private key
+/// into a model's context, and from there into whatever that context is sent to.
+///
+/// Three layers, because filename matching alone leaks:
+///   * **canonicalised** first, so `/tmp/../etc/shadow` and a symlink pointing at
+///     `~/.ssh/id_rsa` are both resolved before any comparison;
+///   * **directory** rules, for keys with arbitrary names (`~/.ssh/work`);
+///   * **filename and extension** rules, for credentials that travel (`.npmrc`).
+///
+/// Deliberately has no escape hatch. An override flag would be the first thing a
+/// prompt-injection payload reached for, and the legitimate case — a human who really
+/// wants to look at their own key — is served by `cat`.
 pub fn check_path_jail(path: &Path) -> Result<()> {
-    let file_name = path
+    // Resolve `..`, symlinks and relative paths before deciding. Without this,
+    // `./foo/../../.ssh/id_rsa` reads as file name `id_rsa` but a *directory* check
+    // would miss it, and a symlink named `notes.md` would bypass everything.
+    //
+    // `canonicalize` needs every component to exist, so it fails on a path that is
+    // partly missing. Falling back to the raw path would then skip the directory
+    // rules: `~/x/../.ssh/work` is lexically outside `~/.ssh` until `..` is resolved.
+    // That specific shape is not exploitable — the kernel would fail the same open —
+    // but the check should not depend on that coincidence, so resolve `..` and `.`
+    // ourselves when the filesystem cannot.
+    let resolved = path
+        .canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(path));
+    let full = resolved.to_string_lossy().to_lowercase();
+
+    if let Some(home) = dirs::home_dir() {
+        let home = home.to_string_lossy().to_lowercase();
+        for dir in SECRET_HOME_DIRS {
+            let secret_root = format!("{home}/{dir}");
+            if full == secret_root || full.starts_with(&format!("{secret_root}/")) {
+                return Err(refusal(path, &format!("~/{dir} holds credentials")));
+            }
+        }
+    }
+
+    for prefix in SECRET_ABSOLUTE_PREFIXES {
+        if full.starts_with(prefix) {
+            return Err(refusal(
+                path,
+                &format!("{prefix} is a system credential path"),
+            ));
+        }
+    }
+
+    let file_name = resolved
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_lowercase();
+
+    if SECRET_FILENAMES.contains(&file_name.as_str()) {
+        return Err(refusal(
+            path,
+            "the file name marks it as a credential store",
+        ));
+    }
 
     let is_secret = file_name.starts_with(".env")
         || file_name.ends_with(".pem")
         || file_name.ends_with(".key")
         || file_name.ends_with(".p12")
         || file_name.ends_with(".pfx")
+        || file_name.ends_with(".jks")
+        || file_name.ends_with(".keystore")
+        || file_name.ends_with(".ppk")
+        || file_name.ends_with(".kdbx")
+        // Terraform state embeds provider credentials and resource secrets verbatim.
+        || file_name.ends_with(".tfstate")
+        || file_name.ends_with(".tfstate.backup")
         || file_name.contains("id_rsa")
+        || file_name.contains("id_dsa")
         || file_name.contains("id_ed25519")
         || file_name.contains("id_ecdsa")
         || file_name.contains("credentials")
@@ -126,12 +240,38 @@ pub fn check_path_jail(path: &Path) -> Result<()> {
                 || file_name.ends_with(".yml")));
 
     if is_secret {
-        return Err(anyhow!(
-            "PathJail Security: Refusing to read protected sensitive file: {}",
-            path.display()
-        ));
+        return Err(refusal(path, "the file name marks it as a secret"));
     }
     Ok(())
+}
+
+/// Resolve `.` and `..` without touching the filesystem.
+///
+/// Used only when `canonicalize` cannot run. Symlinks are not followed — nothing here
+/// can know about them — so this is a fallback that closes the traversal hole, not a
+/// replacement for the real thing.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                // Popping past the root is a no-op, matching the kernel.
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn refusal(path: &Path, why: &str) -> anyhow::Error {
+    anyhow!(
+        "PathJail: refusing to read {} — {why}.\n\
+         PRISM will not put credentials into a model's context. Read it yourself if you \
+         genuinely need to.",
+        path.display()
+    )
 }
 
 // ── Session Read Cache ────────────────────────────────────────────────────────
@@ -1606,6 +1746,110 @@ impl User {
         assert!(check_path_jail(Path::new("server.key")).is_err());
         assert!(check_path_jail(Path::new("id_rsa")).is_err());
         assert!(check_path_jail(Path::new("src/main.rs")).is_ok());
+    }
+
+    /// System credential stores, whatever they are called.
+    ///
+    /// The jail was filename-only, so `/etc/shadow` — no dot-prefix, no extension,
+    /// not containing "credentials" — sailed straight through, as did every file in
+    /// `/proc/<pid>/environ`, which is another process's entire environment.
+    #[test]
+    fn path_jail_blocks_system_credential_paths() {
+        for p in [
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/etc/sudoers",
+            "/etc/ssh/ssh_host_rsa_key",
+            "/etc/ssl/private/server.pem",
+            "/proc/1/environ",
+            "/root/notes.txt",
+        ] {
+            assert!(
+                check_path_jail(Path::new(p)).is_err(),
+                "{p} must be refused"
+            );
+        }
+    }
+
+    /// A private key with an arbitrary name is still a private key.
+    ///
+    /// `~/.ssh/work` matches no extension rule and contains none of the magic
+    /// substrings, which is exactly why the directory has to be refused wholesale.
+    #[test]
+    fn path_jail_blocks_everything_under_credential_directories() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        for rel in [
+            ".ssh/work",
+            ".ssh/config",
+            ".gnupg/secring.gpg",
+            ".aws/config",
+            ".kube/config",
+            ".docker/config.json",
+            // prism's own hub credentials: agent token and MCP token.
+            ".config/prism/hub.json",
+        ] {
+            let p = home.join(rel);
+            assert!(
+                check_path_jail(&p).is_err(),
+                "~/{rel} must be refused even though its name looks harmless"
+            );
+        }
+    }
+
+    /// Credentials that travel with a project.
+    #[test]
+    fn path_jail_blocks_portable_credential_files() {
+        for p in [
+            ".netrc",
+            ".git-credentials",
+            ".npmrc",
+            ".pypirc",
+            ".pgpass",
+            "vault.kdbx",
+            "keys.jks",
+            "terraform.tfstate",
+        ] {
+            assert!(
+                check_path_jail(Path::new(p)).is_err(),
+                "{p} must be refused"
+            );
+        }
+    }
+
+    /// Traversal and symlinks must not defeat the directory rules.
+    ///
+    /// Without canonicalising first, `foo/../../.ssh/id_rsa` has file name `id_rsa`
+    /// (caught by luck) while `foo/../../.ssh/work` has file name `work` and would be
+    /// allowed — the traversal hides which directory it actually lands in.
+    #[test]
+    fn path_jail_resolves_traversal_before_deciding() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let sneaky = home.join("x/../.ssh/work");
+        assert!(
+            check_path_jail(&sneaky).is_err(),
+            "traversal into ~/.ssh must still be refused"
+        );
+    }
+
+    /// The jail must not swallow ordinary source files.
+    #[test]
+    fn path_jail_allows_normal_files() {
+        for p in [
+            "src/main.rs",
+            "README.md",
+            "Cargo.toml",
+            "docs/keynote.md",
+            "src/secrets_manager.rs",
+        ] {
+            assert!(
+                check_path_jail(Path::new(p)).is_ok(),
+                "{p} is a normal file and must be readable"
+            );
+        }
     }
 
     #[test]
