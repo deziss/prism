@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`prism gain` rewritten** — human-readable counts, efficiency meter, impact bars, and
   a column rtk structurally cannot have: prism's own overhead (`filter_us`) beside the
   wrapped command's wall clock.
+- **The config poll reports the running version** (`?prismVersion=`). `prismVersion` was
+  sent at enrolment and never again, so an agent upgraded in place reported its
+  enrolment-time version for the life of the hub row — which also meant the fleet's
+  version-skew badge compared every agent against a number that never moved.
 
 ### Changed
 - **`prism shim uninstall` now strips the rc PATH block**, mirroring what

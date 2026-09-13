@@ -694,11 +694,22 @@ struct HubPolicy {
 /// where `config::resolve` picks it up as the highest-precedence file layer.
 pub async fn fetch_config(creds: &AgentCredentials) -> Result<crate::config::PrismConfig> {
     let client = http_client();
+    // Appended to the URL rather than built with `RequestBuilder::query`, which needs
+    // reqwest's `urlencoded` feature — not enabled here, and not worth pulling in for
+    // one semver string, whose charset (digits, dots, `-`, `+`) needs no escaping.
     let url = format!(
-        "{}/agents/{}/config",
+        "{}/agents/{}/config?prismVersion={}",
         api_base(&creds.hub_url),
-        creds.agent_id
+        creds.agent_id,
+        env!("CARGO_PKG_VERSION"),
     );
+    // The config poll doubles as the heartbeat, so it is the only recurring call the
+    // agent makes — and therefore the only place a *running* version can be reported.
+    // `prismVersion` was previously sent at enrolment and never again, so the hub's
+    // fleet view showed whatever version first enrolled the machine, for the life of
+    // the row. Upgrading prism in place left the hub claiming the old version forever,
+    // which quietly disabled the version-skew badge: skew cannot be detected against a
+    // number that never moves.
     let resp = client
         .get(&url)
         .bearer_auth(&creds.agent_token)
@@ -1391,6 +1402,67 @@ mod tests {
         );
 
         TEST_ENROLLED_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The config poll is the only recurring call an agent makes, so it is the only
+    /// place the *running* version can reach the hub. It used to send no query at all,
+    /// which meant `prismVersion` was written once at enrolment and then frozen: an
+    /// agent upgraded in place reported its enrolment-time version forever, and the
+    /// hub's version-skew badge compared every agent against a number that never moved.
+    ///
+    /// Asserted against a real socket rather than by inspecting the builder, because
+    /// what matters is the bytes on the wire — `agents.schema.ts::HeartbeatQuerySchema`
+    /// reads this off the query string.
+    #[tokio::test]
+    async fn config_poll_reports_the_running_version() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test hub");
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).expect("read request");
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"config":{},"filterLimits":{},"rules":[],"revision":0}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).ok();
+            head
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "prism-cfgpoll-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = crate::test_env::TestEnv::redirect(&dir);
+
+        let creds = AgentCredentials {
+            hub_url: format!("http://127.0.0.1:{port}"),
+            agent_id: "agent-1".to_string(),
+            agent_token: "t".to_string(),
+            mcp_token: None,
+        };
+        fetch_config(&creds).await.expect("poll must succeed");
+
+        let head = server.join().expect("server thread");
+        let request_line = head.lines().next().unwrap_or_default().to_string();
+        assert!(
+            request_line.contains(&format!("prismVersion={}", env!("CARGO_PKG_VERSION"))),
+            "config poll must carry the running version: {request_line}"
+        );
+
+        drop(_env);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
