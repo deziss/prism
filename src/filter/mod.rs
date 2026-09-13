@@ -162,6 +162,17 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(cmd);
+    // A hub policy may switch an individual tool's filter off fleet-wide.
+    //
+    // Checked here rather than in each family filter so there is exactly one place the
+    // decision is made, and so a disabled tool behaves identically to one prism has no
+    // filter for: output passes through untouched. Defaults to enabled, so a community
+    // install with no policy — and an install whose hub is unreachable — filters
+    // exactly as it always has.
+    if !common::filter_enabled_for(cmd) {
+        return Cow::Borrowed(output);
+    }
+
     let raw = output; // kept for the never-inflate escape below
     let cleaned = strip_ansi(output);
     let output: &str = &cleaned;

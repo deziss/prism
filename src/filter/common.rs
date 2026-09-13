@@ -24,6 +24,29 @@ pub fn limits() -> &'static Limits {
     })
 }
 
+/// Per-tool filter switches pushed by a licensed hub, resolved once per process.
+///
+/// Cached in a `OnceLock` for the same reason [`limits`] is: `config::resolve()` reads
+/// three files, and `filter_output` runs on every shimmed command. The `cmd` path was
+/// taken from 0.57s to 0.05s per invocation and must not regress — one stat per
+/// process, not three file reads per command.
+pub fn toggles() -> &'static Option<std::collections::BTreeMap<String, bool>> {
+    static T: OnceLock<Option<std::collections::BTreeMap<String, bool>>> = OnceLock::new();
+    T.get_or_init(|| crate::config::resolve().filter_toggles)
+}
+
+/// Whether `prism cmd` should filter this tool's output.
+///
+/// Defaults to true: with no hub policy — or an unreachable hub — every filter behaves
+/// exactly as it always has.
+pub fn filter_enabled_for(tool: &str) -> bool {
+    toggles()
+        .as_ref()
+        .and_then(|t| t.get(tool))
+        .copied()
+        .unwrap_or(true)
+}
+
 // ── truncation markers ────────────────────────────────────────────────────────
 
 /// Standard truncation marker. `what` is a plural noun: "lines", "files", "matches".

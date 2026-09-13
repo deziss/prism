@@ -1192,7 +1192,12 @@ pub async fn run_command(args: Vec<String>) -> Result<()> {
     // Record size, not an exact token count: a PATH shim puts this on the critical path
     // of every command, and loading the cl100k table to fill in a dashboard statistic
     // measured 0.54s per invocation. `prism gain` approximates at report time.
-    crate::analytics::record_command(cmd, raw_text.len(), out.len()).ok();
+    // Both clocks, not just the byte counts: `duration_ms` is the wrapped command's
+    // wall clock and `filter_us` is PRISM's own overhead. Until now only the hub spool
+    // carried them, and that is an outbound queue — it early-returns when unenrolled
+    // and deletes itself as it drains — so `prism gain` had no way to report either.
+    crate::analytics::record_command_timed(cmd, raw_text.len(), out.len(), duration_ms, filter_us)
+        .ok();
 
     // Hub telemetry: append-only, disk-only (see `hub` module docs) — this must never
     // become a network call on this path. `via_shim` is a proxy for "shims are

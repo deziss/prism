@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+### Added
+- **Opt-in installation.** `prism init` gains `--shims` and `--trust-ca`, both off.
+  `install.sh` no longer enables either. A plain install previously put prism in front
+  of ~102 commands (`ls`, `grep`, `find`, `env`, `ps`, `systemctl` among them), wrote a
+  PATH block into every shell rc file, and injected the MITM CA into every browser and
+  Electron trust store — with no prompt.
+- **`prism status`** — shims (and whether they actually lead PATH), CA, Claude Code MCP
+  registration, hub enrolment, in one place. That question previously had no single
+  answer, which mattered because several of those were enabled silently.
+- **`prism hook uninstall`** removes the project-local `.prism/hooks/` templates, which
+  `hook install` had no counterpart for. Only files carrying PRISM's marker are removed,
+  so a hook you edited is left alone.
+- **`prism serve --upstream`** now works, making prism usable as a base URL
+  (`ANTHROPIC_BASE_URL=http://127.0.0.1:27181`). The flag had existed and been ignored.
+- **Per-tool filter toggles** (`filter_toggles`), distributed as hub policy. Additive:
+  the sixteen numeric filter caps stay free and local.
+- **Dedicated MCP token**, minted at enrolment, so a containerised hub can drive the
+  Memory and Graph pages. Separate from the agent token: MCP access must be revocable
+  without re-enrolling.
+- **`prism gain` rewritten** — human-readable counts, efficiency meter, impact bars, and
+  a column rtk structurally cannot have: prism's own overhead (`filter_us`) beside the
+  wrapped command's wall clock.
+
+### Changed
+- **`prism shim uninstall` now strips the rc PATH block**, mirroring what
+  `shim install --path` writes. It previously deleted only the shim files and printed
+  "Also remove the PATH line … if you added one", leaving every shell with a PATH entry
+  pointing at an empty directory.
+- **Shims fall through to the real tool when the prism binary is missing.** The exec
+  target is recorded when the shim is written, so a moved or deleted binary turned `ls`,
+  `grep` and `ps` into "No such file or directory" — removing the tools needed to
+  diagnose the breakage.
+- **`prism serve` binds `127.0.0.1`** by default instead of `0.0.0.0`.
+- **`prism init` no longer writes `PRISM_HUB_URL`** to three shell rc files. Nothing in
+  prism has ever read it; the hub URL comes from the enrolment credentials.
+- **Memory search scores a block's full content**, with BM25/IDF weighting, stemming,
+  and a vector re-rank over the turbovec index already in the binary. It previously
+  scored exact keyword-set intersection only, and `extract_keywords` drops every token
+  of four characters or fewer — so `k8s`, `npm`, `ssh`, `git` and `aws` could never be
+  matched even when present in the block's own text.
+
+### Fixed
+- **`prism gain` reported zero savings, always.** The byte counts were recorded
+  correctly; nothing derived tokens from them at report time.
+- **A unit test could write into, and truncate, the live telemetry spool.**
+- **`history.json` corrupted itself under parallel use** — a non-atomic
+  truncate-then-write on the hot path of every shimmed command.
+- **Local models were billed at gpt-4o rates**, inventing spend for free inference.
+- **PathJail refused only files that looked secret.** `/etc/shadow`, `/etc/sudoers`,
+  `/proc/<pid>/environ`, `~/.ssh/work` (a key with an ordinary name), and prism's own
+  `~/.config/prism/hub.json` all passed. Now resolves the path first, then applies
+  directory, filename and extension rules. MCP reads get a stricter list again —
+  browser profiles, shell history, keyrings, `~/.claude` — because an MCP path is
+  chosen by whatever drives the model, not by the user.
+- **The MCP server rejected authenticated off-loopback requests** with "Host header is
+  not allowed". rmcp's DNS-rebinding protection allows loopback only; the bind address
+  is now in `allowed_hosts`. Every unit test passed while this was broken.
+
+### Security
+- `prism_read_file` and `prism_filter_cmd` are refused to off-loopback MCP callers. The
+  hub needs neither to render a stats page.
+
+
 ## [0.3.0] - 2026-09-12
 
 ### Added

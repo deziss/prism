@@ -38,6 +38,26 @@ pub struct PrismConfig {
     /// Output-filter caps (`prism cmd`). Every cap is announced with a `[+N more …]` marker.
     #[serde(default)]
     pub filters: FilterLimits,
+    /// Per-tool filter switches, keyed by tool name (`{"docker": false}`).
+    ///
+    /// A **hub feature**, on the same mechanism as [`Self::graph_enabled`]: a licensed
+    /// PRISM Hub distributes policy containing these, and prism honours what arrives.
+    /// prism evaluates no entitlement and checks no licence — that decision is the
+    /// hub's, gated on a licencia entitlement server-side.
+    ///
+    /// Deliberately additive. The sixteen numeric caps in [`FilterLimits`] stay local
+    /// and free, so nobody loses configuration they already have; this only adds the
+    /// ability to switch an individual tool's filter off fleet-wide.
+    ///
+    /// `Option` rather than a bare map: with a plain map, "unset" and "explicitly
+    /// empty" are indistinguishable, and policy could then only ever add switches,
+    /// never clear them — useless for a control plane whose job includes undoing.
+    /// No `skip_serializing_if`: [`known_field_names`] derives the legal wire keys from
+    /// the *serialized* default, so a skipped field would be missing from that set and
+    /// prism would reject the very policy the hub sends — the feature would fail closed
+    /// with a confusing "unknown key" error.
+    #[serde(default)]
+    pub filter_toggles: Option<std::collections::BTreeMap<String, bool>>,
 }
 
 /// Caps used by the output filters. Override per key in `config.yaml` under
@@ -150,6 +170,7 @@ impl Default for PrismConfig {
             memory_tier: Some("3".to_string()),
             log_level: Some("info".to_string()),
             filters: FilterLimits::default(),
+            filter_toggles: None,
         }
     }
 }
@@ -188,6 +209,20 @@ impl PrismConfig {
     /// the proxy never keys a request at all, so neither env var can reach the store.
     pub fn cache_enabled(&self) -> bool {
         self.cache_enabled.unwrap_or(false)
+    }
+
+    /// Whether `prism cmd` should filter this tool's output.
+    ///
+    /// Defaults to **true**: with no hub policy, every filter behaves exactly as it
+    /// always has. Only an explicit `false` from a policy layer turns one off, so a
+    /// community install is unaffected and an unreachable hub cannot silently disable
+    /// filtering.
+    pub fn filter_enabled_for(&self, tool: &str) -> bool {
+        self.filter_toggles
+            .as_ref()
+            .and_then(|t| t.get(tool))
+            .copied()
+            .unwrap_or(true)
     }
 }
 
@@ -350,6 +385,13 @@ pub fn merge_config(global: &PrismConfig, project: &PrismConfig) -> PrismConfig 
         } else {
             global.filters.clone()
         },
+        // `.or()`, like every other flag here: the higher layer wins when it states a
+        // value, and silence falls through. Using `.unwrap_or_default()` would let a
+        // project file with no toggles erase a hub policy that has them.
+        filter_toggles: project
+            .filter_toggles
+            .clone()
+            .or_else(|| global.filter_toggles.clone()),
     }
 }
 
@@ -548,6 +590,69 @@ mod tests {
     /// keys, a camelCase policy key would be silently dropped rather than rejected. That
     /// is precisely the failure mode that hid the snake_case/camelCase telemetry bug for
     /// three months, so `known_field_names` exists to make it loud instead.
+    /// The hub must be able to push per-tool filter toggles.
+    ///
+    /// `known_field_names` derives the legal key set from the *serialized* default, so
+    /// a `skip_serializing_if` on this field would drop it from that set and prism
+    /// would reject the policy with "unknown key" — the feature failing closed for a
+    /// reason nobody could see from the hub.
+    #[test]
+    fn filter_toggles_is_a_known_wire_key() {
+        let known = known_field_names();
+        assert!(
+            known.contains("filter_toggles"),
+            "hub policy could not carry filter_toggles: {known:?}"
+        );
+        // snake_case on the wire, like every other policy key. The envelope around it
+        // is camelCase, which is exactly how `graphEnabled` would silently no-op.
+        assert!(!known.contains("filterToggles"));
+    }
+
+    /// Absent policy means every filter behaves as it always has.
+    #[test]
+    fn filters_are_enabled_unless_policy_says_otherwise() {
+        let cfg = PrismConfig::default();
+        for tool in ["git", "docker", "grep", "anything-at-all"] {
+            assert!(
+                cfg.filter_enabled_for(tool),
+                "{tool} must filter by default"
+            );
+        }
+    }
+
+    /// Only an explicit `false` disables, and only for the named tool.
+    #[test]
+    fn a_policy_toggle_disables_exactly_one_tool() {
+        let cfg = PrismConfig {
+            filter_toggles: Some(
+                [("docker".to_string(), false), ("git".to_string(), true)]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..PrismConfig::default()
+        };
+        assert!(!cfg.filter_enabled_for("docker"));
+        assert!(cfg.filter_enabled_for("git"));
+        assert!(cfg.filter_enabled_for("grep"), "untouched tools stay on");
+    }
+
+    /// A project layer without toggles must not erase a hub policy that has them.
+    ///
+    /// `.or()`, not `unwrap_or_default()` — the same mistake that once made feature
+    /// flags able to turn things on but never off.
+    #[test]
+    fn a_silent_layer_does_not_clear_hub_toggles() {
+        let hub = PrismConfig {
+            filter_toggles: Some([("docker".to_string(), false)].into_iter().collect()),
+            ..PrismConfig::default()
+        };
+        let merged = merge_config(&hub, &PrismConfig::default());
+        assert!(
+            !merged.filter_enabled_for("docker"),
+            "a project file with no toggles wiped the hub policy"
+        );
+    }
+
     #[test]
     fn camel_case_policy_keys_are_not_silently_accepted() {
         let cfg: PrismConfig =

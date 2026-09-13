@@ -147,6 +147,27 @@ pub fn record_proxy_event(event: &crate::hub::ProxyEvent) {
 /// Takes *bytes*, not tokens: this runs on every shimmed command, so it must not load a
 /// tokenizer. `CommandEntry::tokens` approximates at report time.
 pub fn record_command(cmd: &str, input_bytes: usize, output_bytes: usize) -> Result<()> {
+    record_command_timed(cmd, input_bytes, output_bytes, 0, 0)
+}
+
+/// As [`record_command`], plus the two clocks `prism cmd` already measures:
+/// `duration_ms` for the wrapped command and `filter_us` for PRISM's own pass.
+///
+/// A separate entry point rather than a wider `record_command` signature, so that
+/// a caller with nothing to report (and every entry written before this existed)
+/// stays valid. Both timings default to 0 and the report reads 0 as "not
+/// measured" — see [`CommandEntry::is_timed`].
+///
+/// Both numbers are already in hand at the only call site (`cli.rs`, where they
+/// are handed to `hub::spool_event`); the hub spool is not a substitute source,
+/// because it is written only on enrolled machines and is deleted as it drains.
+pub fn record_command_timed(
+    cmd: &str,
+    input_bytes: usize,
+    output_bytes: usize,
+    duration_ms: u64,
+    filter_us: u64,
+) -> Result<()> {
     let history = load_history()?;
 
     let entry = CommandEntry {
@@ -156,6 +177,8 @@ pub fn record_command(cmd: &str, input_bytes: usize, output_bytes: usize) -> Res
         output_tokens: 0,
         output_bytes,
         savings: 0,
+        duration_ms,
+        filter_us,
     };
 
     let mut entries = history.commands;
@@ -209,6 +232,115 @@ fn load_proxy_summary() -> ProxySummary {
     sum
 }
 
+// ========================= report formatting ==============================
+//
+// `prism gain` is read at a glance, not parsed — `--json` carries the exact
+// integers for anything that needs them. A raw `287079` makes the reader count
+// digits before they can compare it to `40562`; `287.1K` and `40.6K` compare on
+// sight. These helpers exist here rather than in `utils.rs` because nothing else
+// in the tree needs them and `utils.rs` is itself unreferenced.
+
+/// The per-command table is laid out to this width at a four-space indent, so it
+/// ends at column 74 — wide enough for eight columns, narrow enough to survive an
+/// 80-column terminal. A wrapped row turns the impact bars into confetti, so the
+/// layout never assumes more room than that.
+const TABLE_WIDTH: usize = 70;
+
+/// Render a count the way a human reads it: `169564` -> `169.6K`.
+///
+/// Powers of a thousand, not of 1024: these are token counts, and a reader
+/// comparing one against a model's context window is thinking in decimal.
+fn human_count(n: u64) -> String {
+    const SUFFIXES: [&str; 4] = ["K", "M", "B", "T"];
+    if n < 1_000 {
+        return n.to_string();
+    }
+    let mut value = n as f64 / 1_000.0;
+    let mut tier = 0;
+    // `999.95`, not `1000.0`: at one decimal place 999_999 formats as "1000.0K",
+    // which is wider than the column and reads worse than the identical "1.0M".
+    // Promote *before* rounding can produce a four-digit mantissa.
+    while value >= 999.95 && tier + 1 < SUFFIXES.len() {
+        value /= 1_000.0;
+        tier += 1;
+    }
+    format!("{value:.1}{}", SUFFIXES[tier])
+}
+
+/// Render a wall-clock duration recorded in milliseconds: `0ms`, `326ms`,
+/// `14.8s`, `600m10s`.
+fn human_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    let secs = ms as f64 / 1_000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let total = ms / 1_000;
+    format!("{}m{}s", total / 60, total % 60)
+}
+
+/// Render PRISM's own overhead, recorded in microseconds.
+///
+/// Kept in microseconds precisely because a filter pass over a small command is
+/// well under a millisecond: rounding it to `0ms`, as a milliseconds-only clock
+/// would, erases the one number that justifies putting a wrapper in front of
+/// every command.
+fn human_us(us: u64) -> String {
+    if us < 1_000 {
+        return format!("{us}\u{b5}s");
+    }
+    let ms = us as f64 / 1_000.0;
+    if ms < 1_000.0 {
+        return format!("{ms:.1}ms");
+    }
+    human_ms(us / 1_000)
+}
+
+/// A proportional meter, `width` cells wide.
+///
+/// Block characters rather than colour: `colored` strips escape codes the moment
+/// stdout is not a terminal, so a colour-only bar would vanish exactly when
+/// someone pipes the report into a file to keep it.
+fn meter(fraction: f64, width: usize) -> String {
+    let filled = ((fraction.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(width - filled)
+    )
+}
+
+/// A row's impact, relative to the biggest saver in the table.
+///
+/// Rounds *up*, so every command that saved anything shows at least one block.
+/// rtk's equivalent floors, which renders every row below the top one as an empty
+/// trough — discarding the ranking the column exists to show.
+fn impact_bar(saved: u64, max: u64, width: usize) -> String {
+    if max == 0 || saved == 0 {
+        return "\u{2591}".repeat(width);
+    }
+    let filled = (((saved as f64 / max as f64) * width as f64).ceil() as usize).clamp(1, width);
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(width - filled)
+    )
+}
+
+/// Fit a label into a fixed column, eliding the tail.
+///
+/// Counts `chars`, not bytes: a byte slice would split a multi-byte command name
+/// mid-codepoint and panic, and the format widths below count chars too.
+fn fit(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}\u{2026}")
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GainHistoryEntry {
     pub timestamp: String,
@@ -236,6 +368,14 @@ pub struct GainTopCommand {
     pub saved_tokens: usize,
     /// Saved as a share of what the command would have cost unfiltered.
     pub saved_pct: f64,
+    /// How many of `runs` carried timings — the denominator for the two averages
+    /// below, which is not `runs` whenever history predates timing.
+    pub timed_runs: usize,
+    /// Mean wall clock of the wrapped command. `None` when no run was timed;
+    /// deliberately not `0`, which would read as "instant".
+    pub avg_duration_ms: Option<u64>,
+    /// Mean microseconds PRISM itself spent filtering this command.
+    pub avg_filter_us: Option<u64>,
 }
 
 /// Everything `prism gain` can show, computed once and shared by the human printer and
@@ -249,6 +389,14 @@ pub struct GainReport {
     /// Approximate tokens the `prism cmd` filters kept out of context.
     pub total_saved_tokens: usize,
     pub saved_pct: f64,
+    /// Commands whose entry carries a timing. Both totals below are sums over
+    /// *these* entries, and both averages divide by this, not by `total_commands`.
+    pub timed_commands: usize,
+    /// Summed wall clock of the wrapped commands.
+    pub total_duration_ms: u64,
+    /// Summed microseconds PRISM itself spent filtering. The differentiator: a
+    /// wrapper that only shells out can report the line above but not this one.
+    pub total_filter_us: u64,
     pub proxy: Option<GainProxySummary>,
     pub top_commands: Vec<GainTopCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -296,6 +444,9 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
         input: usize,
         saved: usize,
         runs: usize,
+        timed_runs: usize,
+        duration_ms: u64,
+        filter_us: u64,
     }
     let mut by_cmd: HashMap<&str, CmdAgg> = HashMap::new();
     for e in &hist.commands {
@@ -304,6 +455,13 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
         agg.input += e.input_tokens();
         agg.saved += e.saved_tokens();
         agg.runs += 1;
+        // Only timed entries contribute to either clock *or* to the divisor, so an
+        // untimed run neither inflates nor deflates the average — it is absent.
+        if e.is_timed() {
+            agg.timed_runs += 1;
+            agg.duration_ms += e.duration_ms;
+            agg.filter_us += e.filter_us;
+        }
     }
     let mut top: Vec<_> = by_cmd.into_iter().collect();
     top.sort_by_key(|(_, a)| std::cmp::Reverse(a.saved));
@@ -320,6 +478,9 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
             } else {
                 0.0
             },
+            timed_runs: agg.timed_runs,
+            avg_duration_ms: (agg.timed_runs > 0).then(|| agg.duration_ms / agg.timed_runs as u64),
+            avg_filter_us: (agg.timed_runs > 0).then(|| agg.filter_us / agg.timed_runs as u64),
         })
         .collect();
 
@@ -336,12 +497,21 @@ pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
             .collect()
     });
 
+    let timed = hist.commands.iter().filter(|e| e.is_timed());
+    let (timed_commands, total_duration_ms, total_filter_us) = timed
+        .fold((0usize, 0u64, 0u64), |(n, d, f), e| {
+            (n + 1, d + e.duration_ms, f + e.filter_us)
+        });
+
     Ok(GainReport {
         total_commands: hist.commands.len(),
         total_output_tokens,
         total_input_tokens,
         total_saved_tokens,
         saved_pct,
+        timed_commands,
+        total_duration_ms,
+        total_filter_us,
         proxy,
         top_commands,
         history,
@@ -371,37 +541,75 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
             "PRISM TOKEN ANALYTICS".bold().cyan(),
             concat!("v", env!("CARGO_PKG_VERSION")).dimmed()
         );
-        println!("  {}\n", "─".repeat(65).dimmed());
-        println!(
-            "  {:<30} {}",
-            "Total commands tracked:",
-            report.total_commands.to_string().cyan().bold()
-        );
-        println!(
-            "  {:<30} {}",
-            "Total output tokens:",
-            report.total_output_tokens.to_string().cyan().bold()
-        );
+        println!("  {}\n", "─".repeat(TABLE_WIDTH + 2).dimmed());
 
-        // The headline number. `prism cmd` filtering is what runs on every shimmed
+        // The headline block. `prism cmd` filtering is what runs on every shimmed
         // command, so this is the figure that represents what PRISM actually did —
         // and it read a flat 0 until the report learned to derive it from the bytes
         // that were being recorded all along.
-        println!("\n  {}", "CLI FILTERING (prism cmd):".bold().yellow());
+        println!("  {}", "CLI FILTERING (prism cmd)".bold().yellow());
         println!(
-            "    {:<28} {}",
-            "Raw output tokens:",
-            report.total_input_tokens.to_string().cyan()
+            "    {:<20} {}",
+            "Total commands:",
+            human_count(report.total_commands as u64).cyan().bold()
         );
         println!(
-            "    {:<28} {}",
-            "After filtering:",
-            report.total_output_tokens.to_string().cyan()
+            "    {:<20} {}",
+            "Input tokens:",
+            human_count(report.total_input_tokens as u64).cyan()
         );
         println!(
-            "    {:<28} {} ({:.1}%)",
+            "    {:<20} {}",
+            "Output tokens:",
+            human_count(report.total_output_tokens as u64).cyan()
+        );
+        println!(
+            "    {:<20} {} ({:.1}%)",
             "Tokens saved:",
-            report.total_saved_tokens.to_string().green().bold(),
+            human_count(report.total_saved_tokens as u64).green().bold(),
+            report.saved_pct
+        );
+
+        // Two clocks, never one number. `duration_ms` is how long the user's own
+        // `docker build` took; charging that to the wrapper — as a single "Time"
+        // column does — makes PRISM look slow for work it did not do. `filter_us`
+        // is what wrapping actually cost, and it is the figure a wrapper that only
+        // shells out has no way to separate out.
+        if report.timed_commands > 0 {
+            let n = report.timed_commands as u64;
+            println!(
+                "    {:<20} {} (avg {})",
+                "Command time:",
+                human_ms(report.total_duration_ms).cyan(),
+                human_ms(report.total_duration_ms / n)
+            );
+            // Denominator in microseconds so the ratio is dimensionless; guarded
+            // because a run of instant commands can total 0ms of wall clock while
+            // still having cost PRISM real microseconds.
+            let share = if report.total_duration_ms > 0 {
+                report.total_filter_us as f64 / (report.total_duration_ms as f64 * 1_000.0) * 100.0
+            } else {
+                100.0
+            };
+            println!(
+                "    {:<20} {} (avg {}/run, {:.2}% of command time)",
+                "PRISM overhead:",
+                human_us(report.total_filter_us).green().bold(),
+                human_us(report.total_filter_us / n),
+                share
+            );
+        } else {
+            // Say "not recorded", not "0ms". The columns exist and the aggregation
+            // is live; what is missing is timed entries, and claiming zero overhead
+            // would be exactly the kind of flattering lie this report avoids.
+            println!("    {:<20} {}", "Command time:", "not recorded".dimmed());
+            println!("    {:<20} {}", "PRISM overhead:", "not recorded".dimmed());
+        }
+
+        println!(
+            "    {:<20} {} {:.1}%",
+            "Efficiency:",
+            meter(report.saved_pct / 100.0, 24).green(),
             report.saved_pct
         );
         println!(
@@ -409,34 +617,46 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
             "approximate: bytes/3.5, not a tokenizer pass — counting exactly on the".dimmed()
         );
         println!("    {}", "hot path costs ~0.5s per command.".dimmed());
+        if report.timed_commands == 0 {
+            println!(
+                "    {}",
+                "no timings in history yet — entries recorded before this build carry none."
+                    .dimmed()
+            );
+        }
 
         // Measured proxy savings — read from the event log, not estimated.
         if let Some(proxy) = &report.proxy {
-            println!("\n  {}", "PROXY INTERCEPTION:".bold().yellow());
+            println!("\n  {}", "PROXY INTERCEPTION".bold().yellow());
             println!(
-                "    {:<28} {}",
-                "Requests intercepted:",
-                proxy.requests.to_string().cyan()
+                "    {:<20} {}",
+                "Requests:",
+                human_count(proxy.requests as u64).cyan()
             );
             println!(
-                "    {:<28} {}",
-                "Original prompt tokens:",
-                proxy.orig_tokens.to_string().cyan()
+                "    {:<20} {}",
+                "Original prompt:",
+                human_count(proxy.orig_tokens).cyan()
             );
             println!(
-                "    {:<28} {}",
-                "Sent prompt tokens:",
-                proxy.sent_tokens.to_string().cyan()
+                "    {:<20} {}",
+                "Sent prompt:",
+                human_count(proxy.sent_tokens).cyan()
             );
             println!(
-                "    {:<28} {} ({:.1}%)",
-                "Measured token savings:",
-                proxy.saved_tokens.to_string().green().bold(),
+                "    {:<20} {} ({:.1}%)",
+                "Measured savings:",
+                human_count(proxy.saved_tokens).green().bold(),
                 proxy.saved_pct
             );
+            // Exact, not humanised: this is money, and $0.0062 rounded to "6.2m"
+            // would be both wrong and unreadable.
+            println!("    {:<20} ${:.4}", "Forwarded spend:", proxy.cost_usd);
             println!(
-                "    {:<28} ${:.4}",
-                "Spend on forwarded traffic:", proxy.cost_usd
+                "    {:<20} {} {:.1}%",
+                "Efficiency:",
+                meter(proxy.saved_pct / 100.0, 24).green(),
+                proxy.saved_pct
             );
         } else {
             println!(
@@ -445,23 +665,50 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
             );
         }
 
-        println!("\n  {}", "TOP COMMANDS BY TOKENS SAVED:".bold().yellow());
-        println!(
-            "    {:<14} {:>7} {:>12} {:>8}",
-            "command".dimmed(),
-            "runs".dimmed(),
-            "saved".dimmed(),
-            "saved %".dimmed()
+        println!("\n  {}", "TOP COMMANDS BY TOKENS SAVED".bold().yellow());
+        // Impact is relative to the best row, so the table reads as a ranking at a
+        // glance instead of ten numbers the eye has to sort itself.
+        let max_saved = report
+            .top_commands
+            .iter()
+            .map(|t| t.saved_tokens as u64)
+            .max()
+            .unwrap_or(0);
+        // Same leading indent and column widths as the rows below, so `#` sits over
+        // the rank and every heading over its own column.
+        let header = format!(
+            "    {:>2}  {:<14} {:>5} {:>8} {:>6} {:>8} {:>8}  {}",
+            "#", "command", "runs", "saved", "avg%", "cmd", "prism", "impact"
         );
-        for top in &report.top_commands {
+        println!("{}", header.dimmed());
+        println!("    {}", "─".repeat(TABLE_WIDTH).dimmed());
+        for (i, top) in report.top_commands.iter().enumerate() {
+            // Pad *before* colouring. `colored`'s Display writes escape codes and
+            // only forwards the format width when colour is disabled, so `{:>8}`
+            // applied to an already-coloured value silently stops aligning the
+            // moment stdout is a terminal — which is why the old table looked
+            // straight only when it was being read through a pipe.
+            let saved = format!("{:>8}", human_count(top.saved_tokens as u64));
+            // An em dash, not "0ms": no run of this command carried a timing.
+            let cmd_time = top.avg_duration_ms.map_or("\u{2014}".into(), human_ms);
+            let prism_time = top.avg_filter_us.map_or("\u{2014}".into(), human_us);
             println!(
-                "    {:<14} {:>7} {:>12} {:>7.1}%",
-                top.command,
-                top.runs,
-                top.saved_tokens.to_string().green(),
-                top.saved_pct
+                "    {:>2}. {:<14} {:>5} {} {:>5.1}% {:>8} {:>8}  {}",
+                i + 1,
+                fit(&top.command, 14),
+                human_count(top.runs as u64),
+                saved.green(),
+                top.saved_pct,
+                cmd_time,
+                prism_time,
+                impact_bar(top.saved_tokens as u64, max_saved, 10).cyan()
             );
         }
+        println!("    {}", "─".repeat(TABLE_WIDTH).dimmed());
+        println!(
+            "    {}",
+            "cmd = wrapped command's wall clock \u{b7} prism = PRISM's own overhead".dimmed()
+        );
         // rtk prints the same nudge when its hook is absent, and it is the right
         // call: with shims off, prism only sees commands typed as `prism cmd ...`,
         // so a near-empty report means "not wired up", not "no savings available".
@@ -478,7 +725,7 @@ pub async fn show_gains(history_flag: bool, json: bool) -> Result<()> {
                 "Run `prism shim install --path` for automatic filtering.".dimmed()
             );
         }
-        println!("  {}\n", "─".repeat(65).dimmed());
+        println!("  {}\n", "─".repeat(TABLE_WIDTH + 2).dimmed());
     }
 
     Ok(())
@@ -529,6 +776,23 @@ pub struct CommandEntry {
     #[serde(default)]
     output_bytes: usize,
     savings: usize,
+    /// Wall clock of the **wrapped command**, in milliseconds — `prism cmd sleep 3`
+    /// records ~3002 here. Mirrors `hub::CommandEvent::duration_ms`.
+    ///
+    /// Zero means "not measured", never "instant": entries written before this
+    /// field existed have no timing at all, and `is_timed` keeps them out of the
+    /// averages rather than dragging them towards zero.
+    #[serde(default)]
+    duration_ms: u64,
+    /// Microseconds **PRISM itself** spent: the filter pass, truncation detection,
+    /// teeing and the stdout write. Mirrors `hub::CommandEvent::filter_us`.
+    ///
+    /// Recorded separately from `duration_ms` because the two answer opposite
+    /// questions. `duration_ms` is the user's own `docker build` being slow;
+    /// `filter_us` is the only figure that says what wrapping it cost, and it is
+    /// the number a wrapper that merely shells out has no way to report.
+    #[serde(default)]
+    filter_us: u64,
 }
 
 impl CommandEntry {
@@ -564,6 +828,16 @@ impl CommandEntry {
     /// output it otherwise passed through, and a negative saving is not meaningful.
     fn saved_tokens(&self) -> usize {
         self.input_tokens().saturating_sub(self.tokens())
+    }
+
+    /// Whether this entry carries timings at all.
+    ///
+    /// History mixes entries from before and after timings were recorded. Averaging
+    /// over *every* entry would quietly drag the reported per-run cost towards zero
+    /// in proportion to how much old history the user has, which is the sort of
+    /// flattering-by-accident number this report exists not to print.
+    fn is_timed(&self) -> bool {
+        self.duration_ms > 0 || self.filter_us > 0
     }
 }
 
@@ -696,7 +970,33 @@ mod tests {
             output_tokens: 0,
             output_bytes,
             savings: 0,
+            duration_ms: 0,
+            filter_us: 0,
         }
+    }
+
+    fn timed_entry(
+        command: &str,
+        input_bytes: usize,
+        output_bytes: usize,
+        duration_ms: u64,
+        filter_us: u64,
+    ) -> CommandEntry {
+        CommandEntry {
+            duration_ms,
+            filter_us,
+            ..entry(command, input_bytes, output_bytes)
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "prism-{tag}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("analytics")).unwrap();
+        dir
     }
 
     /// Savings must be derived from the recorded bytes.
@@ -842,6 +1142,213 @@ mod tests {
 
         let corrupt_path = analytics_dir().join("history.json.corrupt");
         assert!(corrupt_path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The unit must change exactly at each power of a thousand, and rounding must
+    /// never produce a four-digit mantissa: `999_999` is "1.0M", not "1000.0K",
+    /// which would be wider than the column it has to sit in.
+    #[test]
+    fn human_count_switches_units_at_the_thousand_boundary() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(999), "999");
+        assert_eq!(human_count(1_000), "1.0K");
+        assert_eq!(human_count(999_999), "1.0M");
+        assert_eq!(human_count(1_000_000), "1.0M");
+        // The numbers from the report this replaced, and from the bar it has to clear.
+        assert_eq!(human_count(169_564), "169.6K");
+        assert_eq!(human_count(413_500_000), "413.5M");
+        assert_eq!(human_count(10_100_000), "10.1M");
+        // Saturates at the largest suffix rather than inventing one.
+        assert!(human_count(u64::MAX).ends_with('T'));
+    }
+
+    /// A wall clock in milliseconds, at each scale the report can hit.
+    #[test]
+    fn human_ms_scales_from_milliseconds_to_minutes() {
+        assert_eq!(human_ms(0), "0ms");
+        assert_eq!(human_ms(23), "23ms");
+        assert_eq!(human_ms(999), "999ms");
+        assert_eq!(human_ms(1_000), "1.0s");
+        assert_eq!(human_ms(14_800), "14.8s");
+        assert_eq!(human_ms(59_999), "60.0s");
+        assert_eq!(human_ms(60_000), "1m0s");
+        assert_eq!(human_ms(36_010_000), "600m10s");
+    }
+
+    /// PRISM's overhead must never round to zero.
+    ///
+    /// A filter pass over a small command is hundreds of microseconds; reporting
+    /// it on a milliseconds-only clock would print "0ms" for the single number
+    /// that justifies putting a wrapper in front of every command.
+    #[test]
+    fn human_us_never_rounds_prism_overhead_to_zero() {
+        assert_eq!(human_us(1), "1\u{b5}s");
+        assert_eq!(human_us(430), "430\u{b5}s");
+        assert_eq!(human_us(999), "999\u{b5}s");
+        assert_eq!(human_us(1_000), "1.0ms");
+        assert_eq!(human_us(2_100), "2.1ms");
+        assert_eq!(human_us(999_999), "1000.0ms");
+        assert_eq!(human_us(1_500_000), "1.5s");
+        assert!(!human_us(1).starts_with('0'));
+    }
+
+    /// The meter is a proportion of its width, clamped at both ends, and always
+    /// exactly `width` cells so the column below it stays straight.
+    #[test]
+    fn meter_is_proportional_and_clamped() {
+        assert_eq!(meter(0.0, 4), "░░░░");
+        assert_eq!(meter(0.5, 4), "██░░");
+        assert_eq!(meter(1.0, 4), "████");
+        // Out-of-range input must not panic or overflow the column.
+        assert_eq!(meter(-1.0, 4), "░░░░");
+        assert_eq!(meter(5.0, 4), "████");
+        assert_eq!(meter(0.969, 24).chars().count(), 24);
+    }
+
+    /// Any command that saved something gets at least one block.
+    ///
+    /// Flooring instead (what rtk does) renders every row below the top one as an
+    /// empty trough, throwing away the ranking the column exists to show: a row
+    /// saving 2.6% of the leader is not the same as one saving nothing.
+    #[test]
+    fn impact_bar_shows_at_least_one_block_for_any_nonzero_saving() {
+        assert_eq!(impact_bar(100, 100, 10), "██████████");
+        assert_eq!(impact_bar(0, 100, 10), "░░░░░░░░░░");
+        // 2.6% of the leader: floors to 0 cells, must still render one.
+        assert_eq!(impact_bar(10_100_000, 383_400_000, 10), "█░░░░░░░░░");
+        // No leader at all (an empty table) must not divide by zero.
+        assert_eq!(impact_bar(0, 0, 10), "░░░░░░░░░░");
+        assert_eq!(impact_bar(50, 100, 10).chars().count(), 10);
+    }
+
+    /// Long labels are elided, and the elision counts chars — a byte-sliced
+    /// multi-byte command name would panic.
+    #[test]
+    fn fit_elides_long_labels_without_splitting_a_codepoint() {
+        assert_eq!(fit("git", 14), "git");
+        assert_eq!(fit("cargo clippy --all-targets", 14), "cargo clippy …");
+        assert_eq!(fit("ünïcödé-command-name", 8).chars().count(), 8);
+    }
+
+    /// Averages divide by the runs that were *timed*, not by every run.
+    ///
+    /// History mixes entries written before and after timings existed. Dividing by
+    /// all of them would drag the reported per-run overhead towards zero in
+    /// proportion to how much old history the user happens to have — a number that
+    /// flatters PRISM by accident, which is the opposite of what this report is for.
+    #[test]
+    fn timings_are_averaged_over_timed_runs_only() {
+        let dir = temp_dir("gain-timed");
+        let _env = TestEnv::redirect(&dir);
+
+        save_history(History {
+            commands: vec![
+                timed_entry("git", 10_000, 1_000, 20, 2_000),
+                timed_entry("git", 10_000, 1_000, 40, 4_000),
+                // Same command, recorded before timings existed.
+                entry("git", 10_000, 1_000),
+            ],
+            total_savings_tokens: 0,
+            sessions: 0,
+        })
+        .unwrap();
+
+        let report = compute_gains(false).unwrap();
+        assert_eq!(report.total_commands, 3, "every run still counts as a run");
+        assert_eq!(report.timed_commands, 2);
+        assert_eq!(report.total_duration_ms, 60);
+        assert_eq!(report.total_filter_us, 6_000);
+
+        let git = &report.top_commands[0];
+        assert_eq!(git.runs, 3);
+        assert_eq!(git.timed_runs, 2);
+        // 60/2 and 6000/2 — not 60/3 and 6000/3.
+        assert_eq!(git.avg_duration_ms, Some(30));
+        assert_eq!(git.avg_filter_us, Some(3_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With nothing timed, the report says so rather than claiming zero.
+    ///
+    /// `Some(0)` would render as "0ms" of PRISM overhead, which is a claim the
+    /// data does not support; `None` renders as an em dash.
+    #[test]
+    fn untimed_history_reports_no_timing_rather_than_zero() {
+        let dir = temp_dir("gain-untimed");
+        let _env = TestEnv::redirect(&dir);
+
+        save_history(History {
+            commands: vec![entry("ps", 121_258, 6_611), entry("ps", 121_258, 6_611)],
+            total_savings_tokens: 0,
+            sessions: 0,
+        })
+        .unwrap();
+
+        let report = compute_gains(false).unwrap();
+        assert_eq!(report.timed_commands, 0);
+        assert_eq!(report.total_duration_ms, 0);
+        assert_eq!(report.total_filter_us, 0);
+        assert_eq!(report.top_commands[0].avg_duration_ms, None);
+        assert_eq!(report.top_commands[0].avg_filter_us, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A history file written by an older prism has no timing fields at all; it
+    /// must still load, with both clocks reading "not measured".
+    #[test]
+    fn history_without_timing_fields_still_loads() {
+        let dir = temp_dir("gain-legacy");
+        let _env = TestEnv::redirect(&dir);
+
+        let legacy = r#"{
+  "commands": [
+    {
+      "timestamp": "2026-09-11T12:00:00Z",
+      "command": "git",
+      "input_bytes": 4000,
+      "output_tokens": 0,
+      "output_bytes": 400,
+      "savings": 0
+    }
+  ],
+  "total_savings_tokens": 0,
+  "sessions": 0
+}"#;
+        std::fs::write(history_path(), legacy).unwrap();
+
+        let report = compute_gains(false).unwrap();
+        assert_eq!(report.total_commands, 1);
+        assert_eq!(report.timed_commands, 0);
+        assert!(
+            report.total_saved_tokens > 0,
+            "savings still derive from bytes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `record_command_timed` is the path that carries `filter_us` into history;
+    /// `record_command` stays a zero-timing shim so existing callers keep working.
+    #[test]
+    fn record_command_timed_persists_both_clocks() {
+        let dir = temp_dir("gain-record");
+        let _env = TestEnv::redirect(&dir);
+
+        record_command_timed("cargo", 50_000, 2_000, 1_234, 987).unwrap();
+        record_command("git", 4_000, 400).unwrap();
+
+        let loaded = load_history().unwrap();
+        assert_eq!(loaded.commands[0].duration_ms, 1_234);
+        assert_eq!(loaded.commands[0].filter_us, 987);
+        assert!(loaded.commands[0].is_timed());
+        assert!(
+            !loaded.commands[1].is_timed(),
+            "an untimed record must not be counted as measured"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
