@@ -463,6 +463,12 @@ impl PrismMcpServer {
         if let Some(refusal) = self.refuse_if_remote("prism_read_file") {
             return refusal;
         }
+        // Stricter than the CLI jail: an MCP path is chosen by whatever is driving the
+        // model, which routinely includes text prism never vetted. See
+        // `reader::check_path_jail_mcp`.
+        if let Err(e) = crate::reader::check_path_jail_mcp(std::path::Path::new(&req.path)) {
+            return text_err(e.to_string());
+        }
         let mode = if let Some(range) = &req.lines {
             crate::reader::parse_lines_range(range).unwrap_or(crate::reader::ReadMode::Skeleton)
         } else {

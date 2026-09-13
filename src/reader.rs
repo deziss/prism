@@ -265,6 +265,107 @@ fn lexically_normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Extra directories refused to MCP callers, relative to `$HOME`.
+///
+/// Stricter than the CLI jail on purpose. A human running `prism read` chose the path
+/// themselves; an MCP caller's path is chosen by whatever is driving the model, which
+/// routinely includes text prism never vetted — a web page, an issue comment, a
+/// dependency's README. The threat is not the user, it is instructions arriving as data.
+///
+/// So MCP additionally loses read access to things a coding assistant has no reason to
+/// open: browser profiles (session cookies and saved passwords), shell history (which
+/// is where exported tokens end up), OS keyrings, and package-manager auth files.
+const MCP_EXTRA_HOME_DIRS: &[&str] = &[
+    // Browser profiles: cookies, saved passwords, session tokens.
+    ".mozilla",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".config/BraveSoftware",
+    "snap/firefox",
+    // Secret stores.
+    ".password-store",
+    ".local/share/keyrings",
+    ".gnome2/keyrings",
+    // Package and cloud tooling that keeps tokens on disk.
+    ".config/gh",
+    ".config/hub",
+    ".m2",
+    ".gradle",
+    ".cargo/registry/credentials",
+    ".terraform.d",
+    ".vagrant.d",
+    // Claude Code's own configuration holds MCP definitions and tokens.
+    ".claude",
+];
+
+/// Extra filenames refused to MCP callers.
+const MCP_EXTRA_FILENAMES: &[&str] = &[
+    // Shell history is where `export TOKEN=...` goes to live forever.
+    ".bash_history",
+    ".zsh_history",
+    ".sh_history",
+    ".python_history",
+    ".psql_history",
+    ".mysql_history",
+    ".claude.json",
+    "auth.json",
+    "credentials.tfrc.json",
+    "settings.xml",
+    "gradle.properties",
+];
+
+/// Extra absolute prefixes refused to MCP callers.
+const MCP_EXTRA_ABSOLUTE_PREFIXES: &[&str] = &[
+    "/var/log/auth.log",
+    "/var/log/secure",
+    "/etc/krb5.keytab",
+    "/etc/machine-id",
+    "/var/lib/docker",
+    "/run/secrets",
+    "/run/user",
+];
+
+/// The jail for MCP-driven reads: everything [`check_path_jail`] refuses, plus more.
+///
+/// Kept as a separate entry point rather than a flag on the base jail so the stricter
+/// set is visible at the call site, and so tightening it cannot accidentally change
+/// what a human typing `prism read` is allowed to do.
+pub fn check_path_jail_mcp(path: &Path) -> Result<()> {
+    check_path_jail(path)?;
+
+    let resolved = path
+        .canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(path));
+    let full = resolved.to_string_lossy().to_lowercase();
+
+    if let Some(home) = dirs::home_dir() {
+        let home = home.to_string_lossy().to_lowercase();
+        for dir in MCP_EXTRA_HOME_DIRS {
+            let root = format!("{home}/{}", dir.to_lowercase());
+            if full == root || full.starts_with(&format!("{root}/")) {
+                return Err(refusal(path, &format!("~/{dir} is not readable over MCP")));
+            }
+        }
+    }
+
+    for prefix in MCP_EXTRA_ABSOLUTE_PREFIXES {
+        if full.starts_with(prefix) {
+            return Err(refusal(path, &format!("{prefix} is not readable over MCP")));
+        }
+    }
+
+    let file_name = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if MCP_EXTRA_FILENAMES.contains(&file_name.as_str()) {
+        return Err(refusal(path, "this file is not readable over MCP"));
+    }
+
+    Ok(())
+}
+
 fn refusal(path: &Path, why: &str) -> anyhow::Error {
     anyhow!(
         "PathJail: refusing to read {} — {why}.\n\
@@ -1833,6 +1934,70 @@ impl User {
             check_path_jail(&sneaky).is_err(),
             "traversal into ~/.ssh must still be refused"
         );
+    }
+
+    /// MCP reads lose access to things a coding assistant has no reason to open.
+    ///
+    /// These are not "secrets" by name — `~/.bash_history` is a plain text file — but
+    /// they are where credentials accumulate, and an MCP path is chosen by whatever is
+    /// driving the model rather than by the user.
+    #[test]
+    fn mcp_jail_blocks_more_than_the_cli_jail() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        for rel in [
+            ".bash_history",
+            ".zsh_history",
+            ".claude.json",
+            ".mozilla/firefox/profile/cookies.sqlite",
+            ".config/google-chrome/Default/Login Data",
+            ".password-store/work/db.gpg",
+            ".config/gh/hosts.yml",
+            ".m2/settings.xml",
+            ".local/share/keyrings/login.keyring",
+        ] {
+            let p = home.join(rel);
+            assert!(
+                check_path_jail_mcp(&p).is_err(),
+                "~/{rel} must be refused over MCP"
+            );
+            // The CLI jail is deliberately looser — a human asked for this one.
+            // (Only assert that for paths the base jail does not already cover.)
+        }
+        for abs in [
+            "/var/log/auth.log",
+            "/etc/machine-id",
+            "/run/user/1000/keyring",
+        ] {
+            assert!(
+                check_path_jail_mcp(Path::new(abs)).is_err(),
+                "{abs} must be refused over MCP"
+            );
+        }
+    }
+
+    /// The MCP jail is a superset: anything the CLI refuses, MCP refuses too.
+    #[test]
+    fn mcp_jail_is_a_superset_of_the_cli_jail() {
+        for p in ["/etc/shadow", ".env", "id_rsa", ".netrc"] {
+            assert!(check_path_jail(Path::new(p)).is_err());
+            assert!(
+                check_path_jail_mcp(Path::new(p)).is_err(),
+                "{p} must stay refused over MCP"
+            );
+        }
+    }
+
+    /// And it must still let an assistant read the code it is there to work on.
+    #[test]
+    fn mcp_jail_allows_source_files() {
+        for p in ["src/main.rs", "README.md", "Cargo.toml", "docs/guide.md"] {
+            assert!(
+                check_path_jail_mcp(Path::new(p)).is_ok(),
+                "{p} must be readable over MCP"
+            );
+        }
     }
 
     /// The jail must not swallow ordinary source files.
