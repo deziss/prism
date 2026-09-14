@@ -270,30 +270,22 @@ impl GraphRAG {
                 embeddings: Vec::new(),
             });
 
-            // Extract declarations and imports
+            // Extract declarations and imports.
+            //
+            // `ScanState` carries block-comment and docstring state across lines, so
+            // commented-out code no longer becomes graph nodes — a false symbol is
+            // indistinguishable from a real one at query time.
+            let mut scan = ScanState::default();
             for line in content.lines() {
                 let trimmed = line.trim();
+                if !scan.is_code(line) {
+                    continue;
+                }
 
-                // Functions
-                let is_func = trimmed.starts_with("pub fn ")
-                    || trimmed.starts_with("fn ")
-                    || trimmed.starts_with("def ")
-                    || trimmed.starts_with("func ")
-                    || (trimmed.starts_with("export function ")
-                        || trimmed.starts_with("function "));
+                let decl = parse_declaration(trimmed);
 
-                if is_func {
-                    let fn_name = trimmed
-                        .split('(')
-                        .next()
-                        .unwrap_or(trimmed)
-                        .split_whitespace()
-                        .last()
-                        .unwrap_or("");
-                    if !fn_name.is_empty()
-                        && fn_name != "fn"
-                        && fn_name != "def"
-                        && fn_name != "func"
+                if let Some((DeclKind::Function, ref fn_name)) = decl {
+                    let fn_name = fn_name.as_str();
                     {
                         let fn_idx = nodes.len();
                         nodes.push(GraphNode {
@@ -314,26 +306,9 @@ impl GraphRAG {
                     }
                 }
 
-                // Structs / Classes
-                let is_type = trimmed.starts_with("pub struct ")
-                    || trimmed.starts_with("struct ")
-                    || trimmed.starts_with("class ")
-                    || trimmed.starts_with("type ")
-                    || trimmed.starts_with("pub enum ")
-                    || trimmed.starts_with("enum ");
-
-                if is_type {
-                    let type_name = trimmed
-                        .split(&['{', ':', '<', '(', ';'][..])
-                        .next()
-                        .unwrap_or(trimmed)
-                        .split_whitespace()
-                        .last()
-                        .unwrap_or("");
-                    if !type_name.is_empty()
-                        && type_name != "struct"
-                        && type_name != "class"
-                        && type_name != "type"
+                // Structs / Classes / traits / interfaces
+                if let Some((DeclKind::Type, ref type_name)) = decl {
+                    let type_name = type_name.as_str();
                     {
                         let type_idx = nodes.len();
                         nodes.push(GraphNode {
@@ -716,6 +691,220 @@ impl GraphRAG {
     }
 }
 
+// ─── declaration extraction ──────────────────────────────────────────────────
+
+/// What a source line declares, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclKind {
+    Function,
+    Type,
+}
+
+/// Tracks whether the scanner is inside a block comment or a docstring.
+///
+/// Extraction used to run over raw lines, so `// fn foo()` in a comment and
+/// `"def parse("` in a string literal both became graph nodes. A symbol graph whose
+/// nodes include commented-out code is worse than a smaller accurate one: the false
+/// entries are indistinguishable from real ones at query time.
+#[derive(Default)]
+pub(crate) struct ScanState {
+    in_block_comment: bool,
+    in_docstring: bool,
+}
+
+impl ScanState {
+    /// Advance past `line` and report whether its code content should be inspected.
+    ///
+    /// Deliberately line-granular rather than a real lexer: the aim is to stop
+    /// obviously-inert text becoming nodes, not to tokenize four languages correctly.
+    pub(crate) fn is_code(&mut self, line: &str) -> bool {
+        let t = line.trim();
+
+        if self.in_block_comment {
+            if t.contains("*/") {
+                self.in_block_comment = false;
+            }
+            return false;
+        }
+        if self.in_docstring {
+            if t.contains("\"\"\"") || t.contains("'''") {
+                self.in_docstring = false;
+            }
+            return false;
+        }
+
+        // A docstring or block comment that opens and closes on one line is inert but
+        // does not change state.
+        let opens_block = t.contains("/*") && !t.contains("*/");
+        if opens_block {
+            self.in_block_comment = true;
+            return false;
+        }
+        let triple = t.matches("\"\"\"").count() + t.matches("'''").count();
+        if triple == 1 {
+            self.in_docstring = true;
+            return false;
+        }
+
+        if t.is_empty()
+            || t.starts_with("//")
+            || t.starts_with('#')
+            || t.starts_with("/*")
+            || t.starts_with('*')
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Strip Rust visibility and modifier keywords from the front of a declaration.
+///
+/// `pub(crate) fn`, `pub(super) async fn`, `pub const unsafe fn` and
+/// `extern "C" fn` were all invisible to the old `starts_with("pub fn ")` test —
+/// `pub(crate) fn` alone accounts for a large share of a real Rust codebase.
+fn strip_modifiers(mut t: &str) -> &str {
+    loop {
+        let before = t;
+        for kw in [
+            "export default ",
+            "export ",
+            "public ",
+            "private ",
+            "protected ",
+            "static ",
+            "async ",
+            "const ",
+            "unsafe ",
+            "default ",
+            "abstract ",
+            "final ",
+            "override ",
+        ] {
+            if let Some(rest) = t.strip_prefix(kw) {
+                t = rest.trim_start();
+            }
+        }
+        // `pub`, `pub(crate)`, `pub(super)`, `pub(in path::to)`
+        if let Some(rest) = t.strip_prefix("pub") {
+            let rest = rest.trim_start();
+            if let Some(open) = rest.strip_prefix('(') {
+                if let Some(close) = open.find(')') {
+                    t = open[close + 1..].trim_start();
+                }
+            } else if rest.starts_with("fn ")
+                || rest.starts_with("struct ")
+                || rest.starts_with("enum ")
+                || rest.starts_with("trait ")
+                || rest.starts_with("type ")
+                || rest.starts_with("union ")
+                || rest.starts_with("const ")
+                || rest.starts_with("async ")
+                || rest.starts_with("unsafe ")
+                || rest.starts_with("extern ")
+            {
+                t = rest;
+            }
+        }
+        if let Some(rest) = t.strip_prefix("extern ") {
+            // `extern "C" fn`
+            let rest = rest.trim_start();
+            t = match rest
+                .strip_prefix('"')
+                .and_then(|r| r.find('"').map(|i| &r[i + 1..]))
+            {
+                Some(after) => after.trim_start(),
+                None => rest,
+            };
+        }
+        if t == before {
+            return t;
+        }
+    }
+}
+
+/// A valid identifier, stopping at the first character that cannot be part of one.
+fn ident(s: &str) -> &str {
+    let end = s
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Parse one line of code into the declaration it introduces, if any.
+///
+/// Covers what the previous prefix matching missed and what a real codebase is mostly
+/// made of: Rust visibility forms and `async`/`const`/`unsafe`/`extern` modifiers,
+/// Python `async def`, Go methods with a receiver, TypeScript `export`/`export default`,
+/// and `const name = (…) =>` arrow functions.
+pub(crate) fn parse_declaration(line: &str) -> Option<(DeclKind, String)> {
+    let raw = line.trim();
+    let t = strip_modifiers(raw);
+
+    // Rust / Python / Go / JS function forms.
+    for kw in ["fn ", "def ", "func ", "function "] {
+        if let Some(rest) = t.strip_prefix(kw) {
+            let rest = rest.trim_start();
+            // Go method: `func (r *Repo) Name(` — the receiver precedes the name.
+            let rest = if rest.starts_with('(') {
+                match rest.find(')') {
+                    Some(i) => rest[i + 1..].trim_start(),
+                    None => rest,
+                }
+            } else {
+                rest
+            };
+            let name = ident(rest);
+            if !name.is_empty() {
+                return Some((DeclKind::Function, name.to_string()));
+            }
+        }
+    }
+
+    // Type forms.
+    for kw in [
+        "struct ",
+        "enum ",
+        "trait ",
+        "class ",
+        "interface ",
+        "union ",
+        "type ",
+    ] {
+        if let Some(rest) = t.strip_prefix(kw) {
+            let name = ident(rest.trim_start());
+            if !name.is_empty() {
+                return Some((DeclKind::Type, name.to_string()));
+            }
+        }
+    }
+
+    // `const name = (args) => …` / `let name = async (…) => …`.
+    //
+    // Checked against the *original* line rather than the modifier-stripped one:
+    // `strip_modifiers` removes a leading `const` so that Rust's `pub const fn` parses,
+    // which would otherwise make every arrow binding invisible here. Matched last so a
+    // Rust `const fn` is still a function rather than a binding.
+    let binding = raw
+        .strip_prefix("export default ")
+        .or_else(|| raw.strip_prefix("export "))
+        .unwrap_or(raw);
+    for kw in ["const ", "let ", "var "] {
+        if let Some(rest) = binding.strip_prefix(kw) {
+            let name = ident(rest.trim_start());
+            if name.is_empty() {
+                continue;
+            }
+            let after = &rest.trim_start()[name.len()..];
+            if after.trim_start().starts_with('=') && t.contains("=>") {
+                return Some((DeclKind::Function, name.to_string()));
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +977,133 @@ mod tests {
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].0.label, "module_a.rs");
         assert_eq!(path[1].2.label, "finalize()");
+    }
+}
+
+#[cfg(test)]
+mod decl_tests {
+    use super::*;
+
+    fn func(line: &str) -> Option<String> {
+        match parse_declaration(line) {
+            Some((DeclKind::Function, n)) => Some(n),
+            _ => None,
+        }
+    }
+    fn typ(line: &str) -> Option<String> {
+        match parse_declaration(line) {
+            Some((DeclKind::Type, n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Every one of these was missed by the old `starts_with("pub fn ")` matching.
+    #[test]
+    fn rust_visibility_and_modifier_forms_are_found() {
+        for (line, want) in [
+            ("pub fn simple()", "simple"),
+            ("fn bare()", "bare"),
+            ("pub(crate) fn scoped()", "scoped"),
+            ("pub(super) fn parent()", "parent"),
+            ("pub(in crate::a) fn deep()", "deep"),
+            ("pub async fn fetch()", "fetch"),
+            ("async fn inner()", "inner"),
+            ("pub const fn constant()", "constant"),
+            ("pub unsafe fn danger()", "danger"),
+            ("unsafe extern \"C\" fn ffi()", "ffi"),
+            ("    fn indented_method(&self)", "indented_method"),
+        ] {
+            assert_eq!(func(line).as_deref(), Some(want), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn python_go_and_typescript_forms_are_found() {
+        for (line, want) in [
+            ("def handler(request):", "handler"),
+            ("async def ahandler(request):", "ahandler"),
+            ("func Plain() error {", "Plain"),
+            ("func (r *Repo) Method() error {", "Method"),
+            ("function classic() {", "classic"),
+            ("export function exported() {", "exported"),
+            ("export default function def() {", "def"),
+            ("export async function fetchAll() {", "fetchAll"),
+            ("const arrow = (a, b) => a + b", "arrow"),
+            (
+                "export const exportedArrow = async () => {}",
+                "exportedArrow",
+            ),
+        ] {
+            assert_eq!(func(line).as_deref(), Some(want), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn type_declarations_are_found_across_languages() {
+        for (line, want) in [
+            ("pub struct Config {", "Config"),
+            ("struct Inner<T> {", "Inner"),
+            ("pub(crate) enum Kind {", "Kind"),
+            ("pub trait Filter {", "Filter"),
+            ("class Service {", "Service"),
+            ("export interface Props {", "Props"),
+            ("type Alias = u32;", "Alias"),
+        ] {
+            assert_eq!(typ(line).as_deref(), Some(want), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn a_rust_const_fn_is_a_function_not_a_binding() {
+        assert_eq!(
+            func("pub const fn width() -> usize { 16 }").as_deref(),
+            Some("width")
+        );
+    }
+
+    #[test]
+    fn a_plain_binding_is_not_a_declaration() {
+        assert_eq!(parse_declaration("const MAX = 10;"), None);
+        assert_eq!(parse_declaration("let total = compute();"), None);
+        assert_eq!(parse_declaration("x.function_call();"), None);
+    }
+
+    /// The other half of the old bug: commented-out and quoted code became nodes.
+    #[test]
+    fn comments_and_docstrings_are_not_code() {
+        let mut scan = ScanState::default();
+        let src = [
+            "// fn commented_out() {}",
+            "# def python_comment():",
+            "/* block start",
+            "fn inside_block_comment() {}",
+            "*/",
+            "fn real_one() {}",
+        ];
+        let found: Vec<String> = src
+            .iter()
+            .filter(|l| scan.is_code(l))
+            .filter_map(|l| func(l))
+            .collect();
+
+        assert_eq!(found, vec!["real_one".to_string()]);
+    }
+
+    #[test]
+    fn a_python_docstring_hides_its_contents() {
+        let mut scan = ScanState::default();
+        let src = [
+            "\"\"\"Module docs.",
+            "def not_a_real_function():",
+            "\"\"\"",
+            "def actual():",
+        ];
+        let found: Vec<String> = src
+            .iter()
+            .filter(|l| scan.is_code(l))
+            .filter_map(|l| func(l))
+            .collect();
+
+        assert_eq!(found, vec!["actual".to_string()]);
     }
 }
