@@ -89,6 +89,15 @@ pub struct FilterLimits {
     pub passthrough_max_lines: usize,
     /// diffs: unchanged context lines kept around each change
     pub diff_context: usize,
+    /// diffs: output lines above which the whole diff collapses to a synthesized
+    /// `path | +added -removed` stat instead of hunks.
+    ///
+    /// Hunk-level compaction trims context but never bounds the *number* of hunks, so a
+    /// large diff passed through almost unchanged — measured at 2.0% saved on a
+    /// 2,084-line diff where a stat-based competitor saved 67.6%. Above this many lines
+    /// the reader is served better by the shape of the change than by its text, and the
+    /// collapse is announced so nothing disappears silently.
+    pub diff_max_lines: usize,
     /// git status: files listed per section
     pub status_max_files: usize,
     /// test runners: failures shown in full
@@ -114,6 +123,7 @@ impl Default for FilterLimits {
             log_tail: 100,
             passthrough_max_lines: 400,
             diff_context: 2,
+            diff_max_lines: 300,
             status_max_files: 30,
             test_max_failures: 10,
             max_diagnostics: 40,
@@ -138,6 +148,7 @@ impl FilterLimits {
         set("find_max_per_dir", &mut self.find_max_per_dir);
         set("find_max_dirs", &mut self.find_max_dirs);
         set("ls_max_entries", &mut self.ls_max_entries);
+        set("diff_max_lines", &mut self.diff_max_lines);
         set("list_max_lines", &mut self.list_max_lines);
         set("json_max_lines", &mut self.json_max_lines);
         set("json_max_array", &mut self.json_max_array);

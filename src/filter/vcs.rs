@@ -453,10 +453,139 @@ fn render_hunk(
     }
 }
 
-/// Unified diff → per file: one name line, hunks with trimmed context, one
-/// `[+N more context lines]` marker per file. Non-diff lines pass through
-/// (stat blocks before the diff are compacted).
+/// Unified diff → hunks when the result is small enough to be worth reading, a
+/// synthesized stat when it is not.
+///
+/// Hunk compaction trims context but never bounds the *number* of hunks, so a large
+/// diff passed through nearly whole: measured at 2.0% saved on a 2,084-line diff where
+/// a stat-first competitor saved 67.6%. Past `diff_max_lines` the useful signal is the
+/// shape of the change — which files, how much — not its text, and the collapse carries
+/// a `[+N more …]` marker so it is never silent.
+///
+/// Set `PRISM_FILTER_DIFF_MAX_LINES=0` to disable the collapse entirely.
 fn compact_diff(lines: &[&str]) -> String {
+    compact_diff_capped(lines, limits().diff_max_lines)
+}
+
+/// The cap is a parameter so it can be exercised without touching the process-global
+/// `limits()` `OnceLock`, which a test cannot reset once any other test has read it.
+fn compact_diff_capped(lines: &[&str], max: usize) -> String {
+    let hunks = compact_diff_hunks(lines);
+    if max == 0 {
+        return hunks;
+    }
+    let produced = hunks.lines().count();
+    if produced <= max {
+        return hunks;
+    }
+    match summarize_diff_as_stat(lines, produced) {
+        Some(stat) => stat,
+        // Not a diff we can count (no +/- lines at all) — better the long form than
+        // an empty summary.
+        None => hunks,
+    }
+}
+
+/// Build a `path | +added -removed` table straight from the diff body.
+///
+/// Deliberately derived from the diff rather than from any `--stat` block git may have
+/// printed: `git diff` without `--stat` has none, which is precisely the case that
+/// needed fixing.
+fn summarize_diff_as_stat(lines: &[&str], produced: usize) -> Option<String> {
+    let l = limits();
+    // Insertion-ordered, so files appear in the order git emitted them.
+    let mut files: Vec<(String, usize, usize)> = Vec::new();
+    let mut current: Option<String> = None;
+
+    let touch = |files: &mut Vec<(String, usize, usize)>, name: &str| {
+        if !files.iter().any(|(p, _, _)| p == name) {
+            files.push((name.to_string(), 0, 0));
+        }
+    };
+
+    for raw in lines {
+        let line = raw.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let hdr = FileHdr::from_git(rest);
+            // The post-image name, falling back to the pre-image for a deletion.
+            // `FileHdr::line()` is not reusable here: it appends new/deleted/binary
+            // tags, and a stat row wants the bare path.
+            let b = strip_diff_path(&hdr.b);
+            let name = if b.is_empty() || b == "/dev/null" {
+                strip_diff_path(&hdr.a)
+            } else {
+                b
+            };
+            touch(&mut files, &name);
+            current = Some(name);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            // A plain `diff -u` has no `diff --git` header; the `+++ b/x` line names
+            // the file. `/dev/null` means a deletion, so keep the `---` name instead.
+            let cleaned = strip_diff_path(path);
+            if cleaned != "/dev/null" {
+                touch(&mut files, &cleaned);
+                current = Some(cleaned);
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            let cleaned = strip_diff_path(path);
+            if cleaned != "/dev/null" && current.is_none() {
+                touch(&mut files, &cleaned);
+                current = Some(cleaned);
+            }
+            continue;
+        }
+        let Some(name) = current.as_deref() else {
+            continue;
+        };
+        // `+++`/`---` are headers, not content, and were consumed above.
+        if let Some(entry) = files.iter_mut().find(|(p, _, _)| p == name) {
+            if line.starts_with('+') {
+                entry.1 += 1;
+            } else if line.starts_with('-') {
+                entry.2 += 1;
+            }
+        }
+    }
+
+    let total_add: usize = files.iter().map(|(_, a, _)| *a).sum();
+    let total_del: usize = files.iter().map(|(_, _, d)| *d).sum();
+    if files.is_empty() || (total_add == 0 && total_del == 0) {
+        return None;
+    }
+
+    let rows: Vec<String> = files
+        .iter()
+        .map(|(p, a, d)| format!("{p} | +{a} -{d}"))
+        .collect();
+    let shown = rows.len().min(l.list_max_lines);
+    let mut out = cap_vec(rows, l.list_max_lines, "files");
+    out.push(format!(
+        "{} file(s), +{total_add} -{total_del}",
+        files.len()
+    ));
+    // The contract: say what was removed. `produced` is what the hunk renderer would
+    // have emitted, `shown + 1` is what this summary costs.
+    out.push(more(
+        produced.saturating_sub(shown + 1),
+        "lines — diff collapsed to a stat (PRISM_FILTER_DIFF_MAX_LINES=0 for hunks)",
+    ));
+    Some(out.join("\n"))
+}
+
+/// `a/src/main.rs` → `src/main.rs`; a trailing tab-separated timestamp is dropped.
+fn strip_diff_path(p: &str) -> String {
+    let p = p.split('\t').next().unwrap_or(p).trim();
+    p.strip_prefix("a/")
+        .or_else(|| p.strip_prefix("b/"))
+        .unwrap_or(p)
+        .to_string()
+}
+
+fn compact_diff_hunks(lines: &[&str]) -> String {
     let ctx = limits().diff_context;
     let mut out: Vec<String> = Vec::new();
     let mut hdr: Option<FileHdr> = None;
@@ -2071,5 +2200,78 @@ mod tests {
                 let _ = filter_git(&[sub], raw);
             }
         }
+    }
+    // ─── large-diff stat collapse ────────────────────────────────────────────
+
+    /// Build a diff big enough to trip `diff_max_lines`.
+    fn big_diff(files: usize, changes_per_file: usize) -> String {
+        let mut out = String::new();
+        for f in 0..files {
+            out.push_str(&format!("diff --git a/src/f{f}.rs b/src/f{f}.rs\n"));
+            out.push_str("index 1111111..2222222 100644\n");
+            out.push_str(&format!("--- a/src/f{f}.rs\n+++ b/src/f{f}.rs\n"));
+            for c in 0..changes_per_file {
+                out.push_str(&format!("@@ -{},3 +{},3 @@\n", c * 10 + 1, c * 10 + 1));
+                out.push_str(" context before\n");
+                out.push_str(&format!("-old line {c}\n"));
+                out.push_str(&format!("+new line {c}\n"));
+                out.push_str(" context after\n");
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_large_diff_collapses_to_a_stat() {
+        let raw = big_diff(8, 20);
+        let out = filter_git(&["diff"], &raw);
+
+        // The whole point: hunks are gone, the shape of the change is not.
+        assert!(!out.contains("@@ "), "hunks should be gone:\n{out}");
+        assert!(out.contains("src/f0.rs | +20 -20"), "{out}");
+        assert!(out.contains("8 file(s), +160 -160"), "{out}");
+    }
+
+    #[test]
+    fn the_collapse_is_announced_so_nothing_vanishes_silently() {
+        let out = filter_git(&["diff"], &big_diff(8, 20));
+
+        assert!(
+            crate::filter::common::has_truncation(&out),
+            "collapse must carry a [+N more] marker: {out}"
+        );
+        assert!(out.contains("collapsed to a stat"), "{out}");
+    }
+
+    #[test]
+    fn a_small_diff_still_shows_its_hunks() {
+        let out = filter_git(&["diff"], &big_diff(1, 2));
+
+        assert!(out.contains("@@ "), "small diffs keep hunks:\n{out}");
+        assert!(!out.contains("collapsed to a stat"), "{out}");
+    }
+
+    #[test]
+    fn the_collapse_can_be_switched_off() {
+        let raw = big_diff(8, 20);
+        let lines: Vec<&str> = raw.lines().collect();
+
+        let out = compact_diff_capped(&lines, 0);
+
+        assert!(out.contains("@@ "), "0 must disable the collapse:\n{out}");
+        assert!(!out.contains("collapsed to a stat"), "{out}");
+    }
+
+    #[test]
+    fn a_deletion_is_attributed_to_the_file_it_removed() {
+        let mut raw = String::from(
+            "diff --git a/src/gone.rs b/src/gone.rs\ndeleted file mode 100644\n--- a/src/gone.rs\n+++ /dev/null\n",
+        );
+        for i in 0..200 {
+            raw.push_str(&format!("@@ -{i},1 +0,0 @@\n-line {i}\n"));
+        }
+        let out = filter_git(&["diff"], &raw);
+
+        assert!(out.contains("src/gone.rs | +0 -200"), "{out}");
     }
 }
