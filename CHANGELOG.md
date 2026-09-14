@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 → 33 file→file edges. Communities are label propagation over the file graph rather
   than one-component-per-file: 42 → 24, the largest holding all 16 `filter/*` modules.
 
+- **Declarations are extracted with tree-sitter** (Rust, Python, JavaScript, TypeScript,
+  TSX, Go), with the line matcher as the fallback for languages without a grammar.
+  1,330 → 1,388 symbols on prism's own `src/`, including 61 of 62 multi-line signatures
+  a line matcher cannot see.
+- **Optional static embedding model.** `model2vec-rs` built `local-only`, so prism never
+  fetches a model; install one in `<data>/models/static/` and `embed` uses it, otherwise
+  the sketch runs unchanged. Separation margin 0.493 → 0.576. Derived indexes key off
+  `vector::backend_id()`, so switching backends re-embeds instead of mixing projections.
+
 ### Fixed
 - Stale `history.json.tmp.*` files left by writers killed between write and rename are
   swept from `prism gain` (eighteen had accumulated here).

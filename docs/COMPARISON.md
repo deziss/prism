@@ -94,9 +94,9 @@ are not independently verified.
 | Command coverage | 100+ | 60+ shell patterns | **150** |
 | MCP tools | ❌ | **76** (README; older docs say 63–67) | 17 |
 | File read modes | ❌ | **10** | 7 |
-| Code graph | ❌ | property graph, 18 langs via AST | import/symbol graph, prefix-matched |
+| Code graph | ❌ | property graph, 18 langs via AST | import/symbol graph, **tree-sitter (6 langs)** + matcher fallback |
 | Memory | ❌ | session memory + graph | Memory Palace (3 layers) |
-| Vector index | ❌ | embeddings + RRF | turbovec ANN, 16-dim sketch |
+| Vector index | ❌ | embeddings + RRF | turbovec ANN, 256-dim sketch or **optional static model** |
 | MITM proxy | HTTP proxy mode | ❌ | **CONNECT + TLS + SSE relay** |
 | Fleet control plane | ❌ | ❌ | **prism-hub** |
 | Editor integrations | Claude Code, Cursor, Copilot | 6+ editors | VS Code |
@@ -123,12 +123,27 @@ retrieval was switched off entirely. Widening to 256 separated them
 The tail now falls below the paraphrase body, so `vector_only_min` defaults to 0.75 and
 the vector half may retrieve a block the lexical half found no evidence for.
 
-**The limitation that survives is the one that matters for a competitive claim.** Feature
-hashing has no semantics: `kubectl context switching` against `k8s namespace selection`
-measures **0.24** at any width. Widening cut collision noise; it cannot add meaning that
-was never encoded. A real embedding model is still the fix, and a test pins the current
-ceiling so the day it lifts is visible. Against projects using real embeddings this is
-not a moat — it is a cheap approximation that now behaves predictably.
+**A real embedding model is now optional but supported.** `model2vec-rs` is built
+`local-only` — the `hf-hub` and `ureq` features are off, so prism cannot fetch a model at
+runtime. Install one in `<data>/models/static/` and `embed` routes through it; install
+nothing and the sketch runs as before. Measured with potion-base-8M on the same corpus:
+
+| | unrelated p99 | paraphrase p10 | margin |
+|---|---:|---:|---:|
+| sketch | 0.411 | 0.904 | 0.493 |
+| static model | **0.382** | **0.958** | **0.576** |
+
+Per-pair the result is mixed and worth stating plainly: `postgres connection pool
+exhausted` vs `pg client limit reached` improves 0.068 → **0.352**, `container image pull
+failure` vs `docker registry fetch error` 0.066 → **0.293**, but `kubectl context
+switching` vs `k8s namespace selection` **regresses** 0.244 → 0.210, because `k8s` is a
+token the distillation barely saw. The test asserts the separation margin rather than any
+one pair.
+
+Both backends emit `TURBO_DIM`-wide vectors, so a width check cannot tell them apart.
+Derived indexes key off `vector::backend_id()` instead — folded into the memory
+fingerprint, stored on each cache entry — so installing or removing a model re-embeds
+rather than silently mixing projections.
 
 **Correction to the previous revision: it claimed "nothing computes communities". That
 was wrong** — `detect_communities` existed and ran. The accurate criticism was narrower,
@@ -155,10 +170,12 @@ bindings — and it indexed `// fn commented_out()` as a real symbol, which at q
 is indistinguishable from a real one. Measured on prism's own `src/`: 1,168 → 1,330
 function nodes, with comment and docstring state now tracked across lines.
 
-LeanCTX's AST parsing remains a genuine advantage: this is a declaration parser, not a
-lexer for four languages. tree-sitter is the upgrade and is currently blocked by disk
-(this machine is at 99% with 5.6 GB free; prism's `target/` alone is 11 GB), not by
-design.
+**Extraction is a real parse now.** tree-sitter grammars for Rust, Python, JavaScript,
+TypeScript, TSX and Go are compiled in; the hand-written matcher remains the fallback for
+languages without one (C, Ruby, Java, PHP, shell). On prism's own `src/`: 1,168 functions
+under the original prefix rules, 1,330 under the hand parser, **1,388** under
+tree-sitter — and 61 of 62 Rust signatures that open their parameter list on the next
+line, which a line matcher cannot see at all.
 
 ## 6. Where each tool wins
 
@@ -189,14 +206,16 @@ measurement that motivated it and the one that closed it:
 | Better symbol extraction | prefix matching, indexed comments | declaration parser, +14% symbols, comment-aware |
 | Decide TRON's fate | dead code sold as a moat | reachable as `prism toon tron`, opt-in |
 | Collapse `pseudo_embedding` | byte-identical copy of `vector::embed` | delegates to it; the method name is kept |
+| tree-sitter extraction | blocked on disk | 6 grammars compiled in; 1,330 → **1,388** symbols |
+| Real embeddings | sketch had no semantics | optional `local-only` static model; margin 0.493 → **0.576** |
 
 Still open:
 
 | Priority | Item | Why |
 |---|---|---|
-| **High** | Real embeddings (model2vec-class static) | Synonyms still score 0.24 — the sketch has no semantics at any width (§5) |
-| **Medium** | tree-sitter symbol extraction | Blocked on disk, not design (§5) |
+| **Medium** | Ship or document a default model | The model path works but the operator must supply the file; prism deliberately will not download one |
 | **Low** | Import resolution beyond suffix matching | No build system means `mod.rs` and re-exports are heuristic |
+| **Low** | Grammars beyond the six compiled in | C, Ruby, Java, PHP and shell still use the line matcher |
 
 ---
 
