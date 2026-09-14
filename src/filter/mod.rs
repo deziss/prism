@@ -17,6 +17,7 @@ mod python;
 mod rules;
 mod rust;
 mod security;
+mod toolchains;
 mod vcs;
 
 pub use common::{has_truncation, limits};
@@ -35,6 +36,7 @@ use misc::*;
 use python::*;
 use rust::*;
 use security::*;
+use toolchains::*;
 use vcs::*;
 
 use std::borrow::Cow;
@@ -149,6 +151,59 @@ pub const FILTERED_TOOLS: &[&str] = &[
     "printenv",
     "man",
     "lint",
+    // Aliases of tools already covered — same output shape, same filter.
+    "egrep",
+    "fgrep",
+    "ag",
+    "ack",
+    "fdfind",
+    "lsd",
+    "nerdctl",
+    "terragrunt",
+    "mvnd",
+    // Diagnostics (`path:line:col: message`)
+    "pylint",
+    "shellcheck",
+    "stylelint",
+    "yamllint",
+    "actionlint",
+    "markdownlint",
+    "cppcheck",
+    "clang-tidy",
+    "luacheck",
+    "vale",
+    "tflint",
+    // Package managers
+    "apt",
+    "apt-get",
+    "dnf",
+    "yum",
+    "pacman",
+    "apk",
+    "brew",
+    "nix",
+    "gem",
+    "bundle",
+    "bundler",
+    "conda",
+    // Native build drivers
+    "cmake",
+    "bazel",
+    "meson",
+    "buck2",
+    "xcodebuild",
+    "swift",
+    "zig",
+    // JS bundlers / monorepo runners
+    "vite",
+    "webpack",
+    "rollup",
+    "esbuild",
+    "tsup",
+    "parcel",
+    "turbo",
+    "nx",
+    "lerna",
 ];
 
 /// Dispatch names that intentionally have no shim.
@@ -231,13 +286,37 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
 
             // --- JVM ---
             "gradle" | "gradlew" | "./gradlew" => filter_gradle(&a, output),
-            "mvn" | "mvnw" | "./mvnw" => filter_mvn(output),
+            "mvn" | "mvnw" | "./mvnw" | "mvnd" => filter_mvn(output),
 
             // --- Build ---
             "make" => filter_make(output),
 
+            // --- Diagnostics ---
+            // One `path:line:col: message` per problem is the shape all of these emit,
+            // so they share one filter whose saving is grouping by file.
+            "pylint" | "shellcheck" | "stylelint" | "yamllint" | "actionlint" | "markdownlint"
+            | "cppcheck" | "clang-tidy" | "luacheck" | "vale" | "tflint" => {
+                filter_diagnostics(output)
+            }
+
+            // --- Package managers ---
+            "apt" | "apt-get" | "dnf" | "yum" | "pacman" | "apk" | "brew" | "nix" | "gem"
+            | "bundle" | "bundler" | "conda" => filter_pkg(output),
+
+            // --- Native build drivers ---
+            // `ninja`, `clang` and `gcc` are deliberately absent: prism filters when
+            // stdout is a pipe, which is exactly when a build system is reading it, and
+            // those emit data as well as diagnostics.
+            "cmake" | "bazel" | "meson" | "buck2" | "xcodebuild" | "swift" | "zig" => {
+                filter_native_build(output)
+            }
+
+            // --- JS bundlers / monorepo runners ---
+            "vite" | "webpack" | "rollup" | "esbuild" | "tsup" | "parcel" | "turbo" | "nx"
+            | "lerna" => filter_js_bundler(output),
+
             // --- Containers ---
-            "docker" | "podman" => filter_docker(&a, output),
+            "docker" | "podman" | "nerdctl" => filter_docker(&a, output),
 
             // --- Kubernetes ---
             "kubectl" => filter_kubectl(&a, output),
@@ -246,7 +325,7 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
             "k9s" => filter_k9s(output),
 
             // --- IaC ---
-            "terraform" | "tofu" | "tf" => filter_terraform(&a, output),
+            "terraform" | "tofu" | "tf" | "terragrunt" => filter_terraform(&a, output),
             "pulumi" => filter_pulumi(&a, output),
 
             // --- Cloud CLIs ---
@@ -268,9 +347,9 @@ pub fn filter_output<'a>(output: &'a str, cmd: &str, args: &[String]) -> Cow<'a,
             "hadolint" => filter_hadolint(output),
 
             // --- Search / Files ---
-            "grep" | "rg" | "ripgrep" => filter_grep(&a, output),
-            "find" | "fd" => filter_find(&a, output),
-            "ls" | "eza" | "exa" => filter_ls(&a, output),
+            "grep" | "rg" | "ripgrep" | "egrep" | "fgrep" | "ag" | "ack" => filter_grep(&a, output),
+            "find" | "fd" | "fdfind" => filter_find(&a, output),
+            "ls" | "eza" | "exa" | "lsd" => filter_ls(&a, output),
             "jq" => filter_jq(output),
 
             // --- CI / local ---
@@ -355,16 +434,30 @@ mod dispatch_tests {
             .next()
             .unwrap();
         let mut dispatched: Vec<String> = Vec::new();
+        // Arms wrap across lines once a family has enough names for rustfmt to break
+        // them, so accumulate until `=>` rather than reading line by line. The parser
+        // used to take only the final line of a wrapped arm, which silently dropped
+        // every name above it — a guard that reports fewer tools than it checks.
+        let mut pending = String::new();
         for line in body.lines() {
-            let Some((lhs, _)) = line.split_once("=>") else {
+            let trimmed = line.trim();
+            // Comments inside the table carry tool names in prose; they are not arms.
+            if trimmed.starts_with("//") {
                 continue;
-            };
-            let mut rest = lhs;
-            while let Some(open) = rest.find('"') {
-                let after = &rest[open + 1..];
-                let Some(close) = after.find('"') else { break };
-                dispatched.push(after[..close].to_string());
-                rest = &after[close + 1..];
+            }
+            match line.split_once("=>") {
+                Some((lhs, _)) => {
+                    pending.push_str(lhs);
+                    let mut rest = pending.as_str();
+                    while let Some(open) = rest.find('"') {
+                        let after = &rest[open + 1..];
+                        let Some(close) = after.find('"') else { break };
+                        dispatched.push(after[..close].to_string());
+                        rest = &after[close + 1..];
+                    }
+                    pending = String::new();
+                }
+                None => pending.push_str(line),
             }
         }
         assert!(

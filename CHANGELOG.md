@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`prism gain` rewritten** — human-readable counts, efficiency meter, impact bars, and
   a column rtk structurally cannot have: prism's own overhead (`filter_us`) beside the
   wrapped command's wall clock.
+- **48 more filtered tools** (102 → 150), as defaults rather than config examples.
+  Four new families: diagnostic linters that share the `path:line:col: message` shape
+  (pylint, shellcheck, stylelint, yamllint, actionlint, markdownlint, cppcheck,
+  clang-tidy, luacheck, vale, tflint), package managers (apt, dnf, brew, nix, gem,
+  bundle, conda and kin), native build drivers (cmake, bazel, meson, buck2, xcodebuild,
+  swift, zig) and JS bundlers (vite, webpack, rollup, esbuild, tsup, parcel, turbo, nx,
+  lerna) — plus aliases of tools already covered (egrep, fgrep, ag, ack, fdfind, lsd,
+  nerdctl, terragrunt, mvnd).
+
+  `ninja`, `clang` and `gcc` are deliberately **not** included: prism filters when
+  stdout is a pipe, which is exactly when a build system is consuming it, and those
+  emit data as well as diagnostics. Shimming them would corrupt builds.
+
+  These reuse the existing `max_diagnostics` / `list_max_lines` caps rather than adding
+  config keys, because a new key has to reach every agent before any hub can push it.
 - **The config poll reports the running version** (`?prismVersion=`). `prismVersion` was
   sent at enrolment and never again, so an agent upgraded in place reported its
   enrolment-time version for the life of the hub row — which also meant the fleet's
