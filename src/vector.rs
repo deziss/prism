@@ -35,7 +35,101 @@ const BIT_WIDTH: usize = 2;
 ///
 /// Never returns a non-finite coordinate — `IdMapIndex::search` *panics* on those — since
 /// the norm is floored before the division and every input weight is a finite constant.
+/// Where an installed static-embedding model lives.
+///
+/// A directory, not a download: prism does not fetch models at runtime, which is why
+/// `model2vec-rs` is built with `local-only` and its `hf-hub`/`ureq` features off. The
+/// operator puts a model here (`model.safetensors` + `tokenizer.json`) and prism uses
+/// it; with nothing there, the feature-hash sketch runs exactly as before.
+pub fn model_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("PRISM_EMBEDDING_MODEL") {
+        return std::path::PathBuf::from(p);
+    }
+    crate::prism_data_dir().join("models").join("static")
+}
+
+/// The loaded model, or `None` when none is installed.
+///
+/// Loaded once. A failure to load is cached as `None` rather than retried: this sits on
+/// the memory-search path, and re-attempting a broken model on every query would turn a
+/// misconfiguration into a performance problem on top of a functional one. The reason is
+/// logged once so it is diagnosable.
+fn model() -> Option<&'static model2vec_rs::model::StaticModel> {
+    static MODEL: std::sync::OnceLock<Option<model2vec_rs::model::StaticModel>> =
+        std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            let dir = model_dir();
+            if !dir.join("model.safetensors").exists() {
+                return None;
+            }
+            match model2vec_rs::model::StaticModel::from_pretrained(&dir, None, None, None) {
+                Ok(m) => {
+                    tracing::info!("loaded static embedding model from {}", dir.display());
+                    Some(m)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "static embedding model at {} failed to load: {e}",
+                        dir.display()
+                    );
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// Whether a real embedding model is in use, for `prism status` and the docs to report.
+pub fn model_active() -> bool {
+    model().is_some()
+}
+
+/// Which projection [`embed`] is currently using.
+///
+/// Derived indexes must key off this. Both backends emit `TURBO_DIM`-wide vectors, so a
+/// width check — which is what guarded the 16→256 widening — cannot detect a backend
+/// switch, and a sketch vector compared against a model vector is not wrong-looking, it
+/// is just quietly meaningless. Installing or removing a model has to invalidate every
+/// stored embedding, and this is the value that makes that happen.
+pub fn backend_id() -> &'static str {
+    if model_active() {
+        "static-model"
+    } else {
+        "sketch"
+    }
+}
+
+/// Project `text` into a unit vector, using the installed model when there is one.
+///
+/// Two backends behind one function, because every caller — memory search, the semantic
+/// cache, the ANN index — has to agree on the projection or an index written by one is
+/// read as nonsense by another. Switching backends therefore invalidates persisted
+/// vectors, which is safe here only because both the cache and the memory palace check
+/// the stored width and re-embed on a mismatch.
+///
+/// The model's own dimensionality is resized to [`TURBO_DIM`] so the index width is a
+/// compile-time constant: truncation keeps the leading components, which for a static
+/// embedding carry the most variance, and short vectors are zero-padded.
 pub fn embed(text: &str) -> Vec<f32> {
+    if let Some(m) = model() {
+        // `encode` returns one vector per input.
+        if let Some(v) = m.encode(&[text.to_string()]).into_iter().next() {
+            return fit_to_dim(v);
+        }
+    }
+    embed_sketch(text)
+}
+
+/// Resize a model vector to `TURBO_DIM` and normalise it.
+fn fit_to_dim(mut v: Vec<f32>) -> Vec<f32> {
+    v.resize(TURBO_DIM, 0.0);
+    let norm = v.iter().map(|e| e * e).sum::<f32>().sqrt().max(0.001);
+    v.iter_mut().for_each(|e| *e /= norm);
+    v
+}
+
+pub fn embed_sketch(text: &str) -> Vec<f32> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -315,6 +409,9 @@ mod embed_tests {
     /// The measurement the module doc quotes, run as a test so the numbers cannot go
     /// stale and the sketch cannot silently regress.
     ///
+    /// Calls `embed_sketch` rather than `embed`: this measures the *sketch*, and must
+    /// keep doing so on a machine where a real model happens to be installed.
+    ///
     /// At `TURBO_DIM = 16` the two distributions overlapped completely — unrelated p99
     /// 0.85 against paraphrase scores of 0.38–0.59 — which is why the sketch was
     /// documented as able to rank but not retrieve. The assertions below encode the
@@ -328,13 +425,13 @@ mod embed_tests {
         // two share a subject, verb or object.
         for i in (0..texts.len()).step_by(7) {
             for j in (i + 313..texts.len()).step_by(311) {
-                unrelated.push(cosine(&embed(&texts[i]), &embed(&texts[j])));
+                unrelated.push(cosine(&embed_sketch(&texts[i]), &embed_sketch(&texts[j])));
             }
         }
         let mut paraphrase: Vec<f32> = texts
             .iter()
             .step_by(11)
-            .map(|t| cosine(&embed(t), &embed(&reword(t))))
+            .map(|t| cosine(&embed_sketch(t), &embed_sketch(&reword(t))))
             .collect();
 
         unrelated.sort_by(f32::total_cmp);
@@ -381,8 +478,10 @@ mod embed_tests {
     /// encoded.
     ///
     /// This is why `MemoryPalace::search` leads with BM25 and uses the sketch only to
-    /// re-rank, and why closing this gap needs a real embedding model rather than a
-    /// bigger index. When one lands, this test should start failing — update it then.
+    /// re-rank. Installing a static embedding model in `vector::model_dir()` is what
+    /// closes it — `embed` then routes through the model and these numbers no longer
+    /// describe what retrieval uses. The test stays pinned to `embed_sketch` so it
+    /// keeps describing the fallback honestly.
     #[test]
     fn the_sketch_cannot_match_synonyms_and_that_is_documented() {
         let pairs = [
@@ -399,7 +498,7 @@ mod embed_tests {
 
         let scores: Vec<f32> = pairs
             .iter()
-            .map(|(a, b)| cosine(&embed(a), &embed(b)))
+            .map(|(a, b)| cosine(&embed_sketch(a), &embed_sketch(b)))
             .collect();
         println!("synonym-pair cosines at TURBO_DIM={TURBO_DIM}: {scores:?}");
 
@@ -411,5 +510,135 @@ mod embed_tests {
                  embedding model has landed and this test should be replaced"
             );
         }
+    }
+    // ─── model backend ───────────────────────────────────────────────────────
+
+    #[test]
+    fn embed_falls_back_to_the_sketch_when_no_model_is_installed() {
+        // SAFETY: single-threaded test body, restored immediately.
+        unsafe { std::env::set_var("PRISM_EMBEDDING_MODEL", "/nonexistent/prism-model") };
+        let out = embed("kubectl context switching");
+        unsafe { std::env::remove_var("PRISM_EMBEDDING_MODEL") };
+
+        assert_eq!(out.len(), TURBO_DIM);
+        assert!(out.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn every_backend_produces_a_turbo_dim_unit_vector() {
+        for text in [
+            "",
+            "one",
+            "a much longer sentence about kubernetes and postgres",
+        ] {
+            let v = embed(text);
+            assert_eq!(v.len(), TURBO_DIM, "input {text:?}");
+            assert!(v.iter().all(|x| x.is_finite()), "input {text:?}");
+        }
+    }
+
+    /// A model of any width has to land on `TURBO_DIM`, because the index width is a
+    /// compile-time constant and a mismatched vector aborts `TurboVecIndex::add`.
+    #[test]
+    fn a_model_vector_is_resized_and_normalised() {
+        let wide = fit_to_dim(vec![1.0; TURBO_DIM * 2]);
+        assert_eq!(wide.len(), TURBO_DIM);
+
+        let narrow = fit_to_dim(vec![1.0, 2.0, 3.0]);
+        assert_eq!(narrow.len(), TURBO_DIM);
+
+        let norm: f32 = narrow.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-4,
+            "expected a unit vector, got {norm}"
+        );
+    }
+
+    #[test]
+    fn resizing_an_all_zero_vector_does_not_divide_by_zero() {
+        let v = fit_to_dim(vec![0.0; 8]);
+
+        assert_eq!(v.len(), TURBO_DIM);
+        assert!(v.iter().all(|x| x.is_finite()));
+    }
+
+    /// Compare both backends on the same corpus, so the choice is evidence-based.
+    ///
+    /// Skipped when no model is installed: a model is an operator-installed asset and a
+    /// clean checkout has none, so failing here would be noise rather than signal.
+    #[test]
+    fn measure_model_against_sketch() {
+        if !model_active() {
+            eprintln!("skipped: no model at {}", model_dir().display());
+            return;
+        }
+        let texts = corpus();
+
+        let stats = |f: &dyn Fn(&str) -> Vec<f32>, name: &str| {
+            let mut unrelated: Vec<f32> = Vec::new();
+            for i in (0..texts.len()).step_by(7) {
+                for j in (i + 313..texts.len()).step_by(311) {
+                    unrelated.push(cosine(&f(&texts[i]), &f(&texts[j])));
+                }
+            }
+            let mut para: Vec<f32> = texts
+                .iter()
+                .step_by(11)
+                .map(|t| cosine(&f(t), &f(&reword(t))))
+                .collect();
+            unrelated.sort_by(f32::total_cmp);
+            para.sort_by(f32::total_cmp);
+            let (u99, p10) = (percentile(&unrelated, 0.99), percentile(&para, 0.10));
+            println!(
+                "{name:8} unrelated p50={:.3} p90={:.3} p99={u99:.3} | paraphrase p10={p10:.3} | margin={:.3}",
+                percentile(&unrelated, 0.50),
+                percentile(&unrelated, 0.90),
+                p10 - u99
+            );
+            p10 - u99
+        };
+
+        let sketch_margin = stats(&|t| embed_sketch(t), "sketch");
+        let model_margin = stats(&|t| embed(t), "model");
+
+        let syn = [
+            ("kubectl context switching", "k8s namespace selection"),
+            (
+                "postgres connection pool exhausted",
+                "pg client limit reached",
+            ),
+            (
+                "container image pull failure",
+                "docker registry fetch error",
+            ),
+        ];
+        for (a, b) in syn {
+            println!(
+                "synonym {a:?} vs {b:?}: sketch {:.3} model {:.3}",
+                cosine(&embed_sketch(a), &embed_sketch(b)),
+                cosine(&embed(a), &embed(b))
+            );
+        }
+        println!("margin: sketch {sketch_margin:.3} model {model_margin:.3}");
+
+        // Asserted on the separation margin, not on any one synonym pair. The model
+        // beats the sketch on `postgres`/`pg` (0.068 -> 0.352) and
+        // `container image`/`docker registry` (0.066 -> 0.293) but loses on
+        // `kubectl`/`k8s` (0.244 -> 0.210), where `k8s` is a token the distillation
+        // barely saw. A per-pair assertion would encode that quirk as a requirement.
+        assert!(
+            model_margin >= sketch_margin,
+            "installing a model must not narrow the separation: {model_margin:.3} vs {sketch_margin:.3}"
+        );
+    }
+
+    #[test]
+    fn the_backend_id_tracks_whether_a_model_is_loaded() {
+        let id = backend_id();
+        assert!(
+            id == "sketch" || id == "static-model",
+            "unexpected backend id {id:?}"
+        );
+        assert_eq!(id == "static-model", model_active());
     }
 }

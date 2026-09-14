@@ -34,6 +34,14 @@ pub struct CacheEntry {
     /// only ever be replayed to a request that asked for the same framing.
     #[serde(default)]
     pub is_stream: bool,
+    /// Which projection produced `embedding`.
+    ///
+    /// Both backends emit `TURBO_DIM`-wide vectors, so the width check below cannot
+    /// tell a sketch vector from a model one. Empty on entries written before this
+    /// field existed, which is treated as a mismatch — those predate the model path
+    /// entirely and are re-embedded when next stored.
+    #[serde(default)]
+    pub embedding_backend: String,
 }
 
 /// A cache entry with how close its prompt is to the query, in `0.0..=1.0`.
@@ -362,6 +370,7 @@ impl SemanticCache {
             access_count: 1,
             content_type: content_type.to_string(),
             is_stream,
+            embedding_backend: crate::vector::backend_id().to_string(),
         };
         self.turbo.add(&hash, &emb);
         self.entries.insert(hash.clone(), entry.clone());
@@ -501,7 +510,9 @@ impl SemanticCache {
                     // Skipping them keeps `TurboVecIndex::add`'s length assertion from
                     // aborting the process on a cache that predates the change; they
                     // are re-embedded the next time their prompt is stored.
-                    if emb.len() == crate::vector::TURBO_DIM {
+                    if emb.len() == crate::vector::TURBO_DIM
+                        && entry.embedding_backend == crate::vector::backend_id()
+                    {
                         self.turbo.add(&entry.key_hash, emb);
                     }
                 }

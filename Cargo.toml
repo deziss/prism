@@ -81,6 +81,10 @@ tree-sitter-python = "=0.25.0"
 tree-sitter-javascript = "=0.25.0"
 tree-sitter-typescript = "=0.23.2"
 tree-sitter-go = "=0.25.0"
+# Static embeddings for memory search. `local-only` deliberately drops the `hf-hub`
+# and `ureq` features: prism must never fetch a model at runtime, so a model is
+# something the operator installs, not something the binary downloads.
+model2vec-rs = { version = "=0.2.1", default-features = false, features = ["local-only", "fancy-regex"] }
 
 [profile.release]
 opt-level = 3

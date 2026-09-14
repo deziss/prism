@@ -2898,6 +2898,8 @@ mod tests {
             access_count: 1,
             content_type: "application/json".into(),
             is_stream,
+            // No embedding on this fixture, so no backend produced one.
+            embedding_backend: String::new(),
         }
     }
 

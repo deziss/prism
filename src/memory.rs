@@ -271,6 +271,11 @@ fn fingerprint(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
+    // The projection is part of what produced the vector, so it is part of what
+    // invalidates it. Installing or removing an embedding model does not change the
+    // text and does not change the vector *width*, so without this a whole palace of
+    // sketch vectors would keep being compared against freshly-modelled queries.
+    crate::vector::backend_id().hash(&mut h);
     h.finish()
 }
 
