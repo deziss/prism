@@ -168,8 +168,6 @@ pub fn record_command_timed(
     duration_ms: u64,
     filter_us: u64,
 ) -> Result<()> {
-    let history = load_history()?;
-
     let entry = CommandEntry {
         timestamp: chrono::Utc::now(),
         command: cmd.to_string(),
@@ -180,18 +178,86 @@ pub fn record_command_timed(
         duration_ms,
         filter_us,
     };
+    append_to_journal(&entry)
+}
 
-    let mut entries = history.commands;
-    entries.push(entry);
-    if entries.len() > 10_000 {
-        entries = entries.split_off(entries.len() - 10_000);
+/// Append-only sidecar for [`record_command_timed`].
+///
+/// This used to read `history.json`, push one entry, and rewrite the whole file. That
+/// is O(n) per command on a file that grows to the 10,000-entry cap: measured at
+/// **7.7 ms of the ~12 ms** PRISM adds to `git status` on a 1.2 MB history — more than
+/// twenty times the cost of the filter pass it exists to measure. An analytics feature
+/// that is the dominant cost of the tool it instruments is self-defeating.
+///
+/// One line of JSON appended with `O_APPEND` instead. Writes under `PIPE_BUF` (4096 on
+/// Linux) to a file opened for append are not interleaved by the kernel, so concurrent
+/// `prism cmd` processes cannot corrupt each other's lines — which also closes the
+/// lost-update race the old read-modify-write had, where two writers read the same
+/// state and the last rename won.
+fn append_to_journal(entry: &CommandEntry) -> Result<()> {
+    use std::io::Write;
+
+    let dir = analytics_dir();
+    std::fs::create_dir_all(&dir)?;
+    let mut line = serde_json::to_string(entry)?;
+    line.push('\n');
+
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(journal_path())?;
+    f.write_all(line.as_bytes())?;
+
+    // Fold into history.json only when the journal has grown enough to be worth it, so
+    // the cost is amortised across many commands rather than paid by each one.
+    if f.metadata().map(|m| m.len()).unwrap_or(0) > JOURNAL_COMPACT_BYTES {
+        let _ = compact_journal();
     }
+    Ok(())
+}
 
-    save_history(History {
-        commands: entries,
-        total_savings_tokens: history.total_savings_tokens,
-        sessions: history.sessions,
-    })
+/// Journal size past which the next writer folds it into `history.json`.
+///
+/// 512 KiB is roughly 2,500 entries — frequent enough that a reader never replays an
+/// unbounded file, rare enough that the O(n) rewrite is amortised to well under a
+/// microsecond per command.
+const JOURNAL_COMPACT_BYTES: u64 = 512 * 1024;
+
+pub(crate) fn journal_path() -> PathBuf {
+    analytics_dir().join("commands.jsonl")
+}
+
+/// Read the journal, ignoring lines that do not parse.
+///
+/// A torn final line is expected rather than exceptional: the process can be killed
+/// mid-append. Skipping it loses one command's telemetry, where failing the read would
+/// lose the whole report.
+fn read_journal() -> Vec<CommandEntry> {
+    let Ok(raw) = std::fs::read_to_string(journal_path()) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<CommandEntry>(l).ok())
+        .collect()
+}
+
+/// Merge the journal into `history.json` and truncate it.
+///
+/// Ordering matters: `history.json` is written *before* the journal is cleared, so a
+/// crash between the two replays entries that are already folded in — duplicated
+/// telemetry, which is recoverable — rather than clearing a journal whose contents
+/// were never persisted, which is data loss.
+fn compact_journal() -> Result<()> {
+    let merged = load_history()?;
+    save_history(merged)?;
+    // Truncate rather than remove: an appender may already hold this file open, and
+    // unlinking it would send those writes to an orphaned inode.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(journal_path())?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -406,6 +472,12 @@ pub struct GainReport {
 /// Compute the gains report. Shared by the CLI's human printer and its `--json` mode —
 /// there is exactly one place that reads `history.json` and the proxy event log.
 pub fn compute_gains(history_flag: bool) -> Result<GainReport> {
+    // `prism gain` is the natural place for housekeeping: it is a report, not a hot
+    // path, so one `readdir` here costs nothing, whereas doing it per command would
+    // reintroduce exactly the kind of overhead the journal removed. Temp files left by
+    // a writer that died mid-rename are otherwise only swept at the next compaction.
+    sweep_stale_temp_files(&analytics_dir());
+
     let hist = load_history()?;
     let total_output_tokens: usize = hist.commands.iter().map(|e| e.tokens()).sum();
 
@@ -868,7 +940,25 @@ fn try_repair_history(content: &str) -> Option<History> {
     None
 }
 
+/// `history.json` plus everything appended to the journal since it was last folded in.
+///
+/// Every reader goes through here, so the split storage is invisible above this line:
+/// the write path is append-only for speed, the read path presents one history.
 fn load_history() -> Result<History> {
+    let mut base = load_history_file()?;
+    let pending = read_journal();
+    if !pending.is_empty() {
+        base.commands.extend(pending);
+        // The same 10,000-entry cap the old read-modify-write applied, enforced here
+        // now that the write path no longer sees the whole list.
+        if base.commands.len() > 10_000 {
+            base.commands = base.commands.split_off(base.commands.len() - 10_000);
+        }
+    }
+    Ok(base)
+}
+
+fn load_history_file() -> Result<History> {
     let path = history_path();
     if !path.exists() {
         return Ok(History {
@@ -946,6 +1036,8 @@ fn save_history(history: History) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let body = serde_json::to_string_pretty(&history)?;
 
+    sweep_stale_temp_files(&dir);
+
     // Same directory as the target: rename is only atomic within a filesystem.
     let tmp = dir.join(format!("history.json.tmp.{}", std::process::id()));
     std::fs::write(&tmp, body)?;
@@ -954,6 +1046,39 @@ fn save_history(history: History) -> Result<()> {
         return Err(e.into());
     }
     Ok(())
+}
+
+/// Remove `history.json.tmp.*` left behind by a writer that died between the write and
+/// the rename.
+///
+/// The rename is atomic and the error path unlinks its own temp file, but neither
+/// helps if the process is killed in between — this machine had accumulated fifteen
+/// zero-byte temp files that way.
+///
+/// Only files older than an hour, and never the current process's own: a concurrent
+/// `prism cmd` may be mid-write, and deleting its temp file would turn a successful
+/// write into a spurious failure.
+fn sweep_stale_temp_files(dir: &std::path::Path) {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+    let mine = format!("history.json.tmp.{}", std::process::id());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("history.json.tmp.") || name == mine {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().unwrap_or_default() > STALE_AFTER)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1351,5 +1476,186 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    // ─── append-only journal ─────────────────────────────────────────────────
+
+    #[test]
+    fn recording_a_command_does_not_rewrite_history_json() {
+        let dir = temp_dir("journal-append");
+        let _env = TestEnv::redirect(&dir);
+
+        // A big pre-existing history is exactly the case the old read-modify-write
+        // made expensive: it rewrote all of this on every single command.
+        let big: Vec<CommandEntry> = (0..500)
+            .map(|i| entry(&format!("cmd{i}"), 100, 10))
+            .collect();
+        save_history(History {
+            commands: big,
+            total_savings_tokens: 7,
+            sessions: 1,
+        })
+        .unwrap();
+        let before = std::fs::metadata(history_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        record_command_timed("git", 1000, 100, 5, 250).unwrap();
+
+        let after = std::fs::metadata(history_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "history.json must not be touched on the hot path"
+        );
+        assert!(
+            journal_path().exists(),
+            "the entry should be in the journal"
+        );
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_journalled_entry_is_visible_to_readers_immediately() {
+        let dir = temp_dir("journal-read");
+        let _env = TestEnv::redirect(&dir);
+
+        save_history(History {
+            commands: vec![entry("old", 10, 1)],
+            total_savings_tokens: 3,
+            sessions: 2,
+        })
+        .unwrap();
+        record_command_timed("fresh", 900, 90, 12, 300).unwrap();
+
+        let loaded = load_history().unwrap();
+
+        assert_eq!(loaded.commands.len(), 2);
+        assert_eq!(loaded.commands.last().unwrap().command, "fresh");
+        // Fields outside the journal survive the merge.
+        assert_eq!(loaded.total_savings_tokens, 3);
+        assert_eq!(loaded.sessions, 2);
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_final_journal_line_costs_one_entry_not_the_report() {
+        use std::io::Write;
+        let dir = temp_dir("journal-torn");
+        let _env = TestEnv::redirect(&dir);
+
+        record_command_timed("good", 100, 10, 1, 1).unwrap();
+        // Simulate being killed mid-append.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal_path())
+            .unwrap();
+        f.write_all(b"{\"command\":\"tru").unwrap();
+        drop(f);
+
+        let loaded = load_history().unwrap();
+
+        assert_eq!(loaded.commands.len(), 1);
+        assert_eq!(loaded.commands[0].command, "good");
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_folds_the_journal_in_without_losing_entries() {
+        let dir = temp_dir("journal-compact");
+        let _env = TestEnv::redirect(&dir);
+
+        for i in 0..5 {
+            record_command_timed(&format!("c{i}"), 100, 10, 1, 1).unwrap();
+        }
+        compact_journal().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(journal_path()).unwrap().len(),
+            0,
+            "journal is truncated after folding in"
+        );
+        let loaded = load_history().unwrap();
+        assert_eq!(loaded.commands.len(), 5);
+        assert_eq!(loaded.commands[4].command, "c4");
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ten_thousand_entry_cap_still_applies_across_the_split() {
+        let dir = temp_dir("journal-cap");
+        let _env = TestEnv::redirect(&dir);
+
+        let big: Vec<CommandEntry> = (0..10_000).map(|i| entry(&format!("c{i}"), 1, 1)).collect();
+        save_history(History {
+            commands: big,
+            total_savings_tokens: 0,
+            sessions: 0,
+        })
+        .unwrap();
+        record_command_timed("newest", 1, 1, 1, 1).unwrap();
+
+        let loaded = load_history().unwrap();
+
+        assert_eq!(loaded.commands.len(), 10_000);
+        assert_eq!(loaded.commands.last().unwrap().command, "newest");
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_temp_file_is_swept_but_a_fresh_one_is_left_alone() {
+        let dir = temp_dir("journal-sweep");
+        let _env = TestEnv::redirect(&dir);
+        let adir = dir.join("analytics");
+
+        let stale = adir.join("history.json.tmp.999999");
+        let fresh = adir.join("history.json.tmp.999998");
+        std::fs::write(&stale, b"").unwrap();
+        std::fs::write(&fresh, b"").unwrap();
+        // Backdate the stale one past the one-hour threshold.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        filetime_set(&stale, old);
+
+        save_history(History {
+            commands: vec![],
+            total_savings_tokens: 0,
+            sessions: 0,
+        })
+        .unwrap();
+
+        assert!(!stale.exists(), "an hour-old temp file should be swept");
+        assert!(
+            fresh.exists(),
+            "a concurrent writer's temp file must survive"
+        );
+
+        drop(_env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Set mtime without pulling in the `filetime` crate for one test.
+    fn filetime_set(path: &std::path::Path, when: std::time::SystemTime) {
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let out = std::process::Command::new("touch")
+            .arg("-d")
+            .arg(format!("@{secs}"))
+            .arg(path)
+            .status();
+        assert!(out.map(|s| s.success()).unwrap_or(false), "touch failed");
     }
 }
