@@ -17,8 +17,10 @@ use super::common::*;
 /// the file it is in. The saving is grouping — an agent reading 400 lines of
 /// `src/a.ts:1:1: …` needs the file once, not four hundred times.
 ///
-/// Lines that do not match the shape are kept only when they look like an alert, so a
-/// trailing "Your code has been rated at 8.3/10" survives and banner noise does not.
+/// Lines that do not match the shape are kept when they look like an alert, plus the
+/// final one, which is where these tools put their own verdict — pylint's "Your code
+/// has been rated at 8.30/10", shellcheck's closing note. Keeping only alerts dropped
+/// that score silently, which is a fidelity loss the caller cannot see.
 pub(crate) fn filter_diagnostics(output: &str) -> String {
     let cap = limits().max_diagnostics;
 
@@ -26,6 +28,8 @@ pub(crate) fn filter_diagnostics(output: &str) -> String {
     // alphabetical one the user did not ask for.
     let mut files: Vec<(String, Vec<String>)> = Vec::new();
     let mut trailing: Vec<String> = Vec::new();
+    // The tool's own closing verdict, which is rarely phrased as an alert.
+    let mut last_other: Option<String> = None;
     let mut total = 0usize;
 
     for line in output.lines() {
@@ -41,9 +45,15 @@ pub(crate) fn filter_diagnostics(output: &str) -> String {
                     None => files.push((path.to_string(), vec![rest.to_string()])),
                 }
             }
-            None if is_alert_line(trimmed) => trailing.push(trimmed.to_string()),
-            None => {}
+            None if is_alert_line(trimmed) => {
+                last_other = None;
+                trailing.push(trimmed.to_string());
+            }
+            None => last_other = Some(trimmed.to_string()),
         }
+    }
+    if let Some(last) = last_other {
+        trailing.push(last);
     }
 
     if files.is_empty() {
@@ -250,6 +260,28 @@ mod tests {
         let out = filter_diagnostics("src/a.py:1:0: C0114 missing docstring\nerror: 1 issue\n");
 
         assert!(out.contains("error: 1 issue"), "{out}");
+    }
+
+    /// pylint ends with a score that is not phrased as an error, so the alert test
+    /// alone dropped it. Losing a tool's own verdict is a fidelity loss the caller
+    /// cannot see, which is exactly what the truncation contract exists to prevent.
+    #[test]
+    fn diagnostics_keep_the_tools_closing_verdict() {
+        let out = filter_diagnostics(
+            "src/a.py:1:0: C0301 line too long\nYour code has been rated at 8.30/10\n",
+        );
+
+        assert!(out.contains("rated at 8.30/10"), "{out}");
+    }
+
+    #[test]
+    fn diagnostics_keep_only_the_last_banner_line_not_every_one() {
+        let out = filter_diagnostics(
+            "pylint 3.0.0\nastroid 3.0.0\nsrc/a.py:1:0: C0301 long\nrated 9/10\n",
+        );
+
+        assert!(out.contains("rated 9/10"), "{out}");
+        assert!(!out.contains("astroid"), "{out}");
     }
 
     #[test]

@@ -14,3 +14,4 @@ bench/
 # local cargo config (unused since build.rs was removed — turbovec 1.0 has no BLAS
 # dependency — but harmless to leave ignored if it reappears locally)
 .cargo/
+docs/

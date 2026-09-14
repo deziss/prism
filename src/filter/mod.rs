@@ -1,4 +1,4 @@
-//! RTK-compatible output filters for 65+ CLI commands used by AI coding agents.
+//! RTK-compatible output filters for 150 CLI commands used by AI coding agents.
 //!
 //! One submodule per tool family; `common` holds the shared helpers and the
 //! fidelity contract (announced truncation via `[+N more …]`, config-driven caps).
