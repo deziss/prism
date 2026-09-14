@@ -109,8 +109,16 @@ pub struct ConfigCmd {
 
 #[derive(Parser, Debug)]
 pub enum ToonCmd {
-    Encode { input: String },
-    Decode { input: String },
+    Encode {
+        input: String,
+    },
+    Decode {
+        input: String,
+    },
+    /// Render JSON as a TRON box-drawing table (display format, not round-trippable)
+    Tron {
+        input: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -893,6 +901,15 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
             "toon_enabled" => {
                 cfg.toon_enabled = Some(val.parse::<bool>().unwrap_or(true));
             }
+            // Settable because `prism toon tron` reads it. It was accepted by the
+            // config file and by PRISM_FILTER-style env, but not here, so the only
+            // documented way to turn TRON on did not work.
+            "tron_enabled" => {
+                cfg.tron_enabled = Some(val.parse::<bool>().unwrap_or(true));
+            }
+            "graph_enabled" => {
+                cfg.graph_enabled = Some(val.parse::<bool>().unwrap_or(true));
+            }
             "proxy_port" => {
                 cfg.proxy_port = val.parse::<u16>().ok();
             }
@@ -904,7 +921,7 @@ pub async fn config(cmd: ConfigCmd) -> Result<()> {
             }
             _ => {
                 println!(
-                    "Unknown config key: {}. (Supported: compression_ratio, cache_enabled, toon_enabled, proxy_port, mcp_port, tiktoken_model)",
+                    "Unknown config key: {}. (Supported: compression_ratio, cache_enabled, toon_enabled, tron_enabled, graph_enabled, proxy_port, mcp_port, tiktoken_model)",
                     key
                 );
                 return Ok(());
@@ -927,6 +944,22 @@ pub async fn toon(cmd: ToonCmd) -> Result<()> {
         ToonCmd::Decode { input } => {
             let json = crate::encode::decode_toon_to_json(&input)?;
             println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        // TRON had no caller anywhere: the encoder, its own test, and nothing else. It
+        // was listed as a differentiator in the comparison docs while being unreachable
+        // from any command. Gated on `tron_enabled` (default off) because, unlike TOON,
+        // it is a *rendering* — box-drawing output for a human reading a table, with no
+        // decoder — so it must never be something a caller reaches by accident.
+        ToonCmd::Tron { input } => {
+            let cfg = crate::config::resolve();
+            if !cfg.tron_enabled() {
+                anyhow::bail!(
+                    "TRON rendering is off. Enable it with `prism config --set-key tron_enabled --set-val true`.\n\
+                     It is a display format with no decoder: TOON is the one to use for data you need to read back."
+                );
+            }
+            let json: serde_json::Value = serde_json::from_str(&input)?;
+            println!("{}", crate::encode::tron_encode(&json));
         }
     }
     Ok(())
