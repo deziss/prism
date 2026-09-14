@@ -362,7 +362,77 @@ impl GraphRAG {
             }
         }
 
+        Self::link_imports_to_files(&nodes, &mut edges, &file_indices);
+
         Self::build(root_path, nodes, edges)
+    }
+
+    /// Turn import nodes into file→file edges wherever the imported module resolves to
+    /// a file that is also in the index.
+    ///
+    /// Without this the graph has **no cross-file structure at all**: an import became a
+    /// leaf node hanging off the file that declared it, so every file was its own
+    /// connected component. Indexing prism's own `src/` gave 42 components for 42 files,
+    /// which is why community detection could only ever recover the `path` field. A
+    /// "cross-file dependency graph" whose files do not reference each other is a set of
+    /// per-file symbol lists.
+    ///
+    /// Resolution is by suffix match on the module path, which is what can be done
+    /// without a build system: `crate::filter::common` matches `src/filter/common.rs`,
+    /// `./util` matches `src/util.ts`, and `std::collections` matches nothing, correctly
+    /// — an import of something outside the tree has no file node to point at.
+    fn link_imports_to_files(
+        nodes: &[GraphNode],
+        edges: &mut Vec<GraphEdge>,
+        file_indices: &std::collections::HashMap<String, usize>,
+    ) {
+        // Index files by their path stem segments so a suffix match is a lookup rather
+        // than a scan over every file for every import.
+        let mut by_suffix: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (path, idx) in file_indices {
+            let stem = path
+                .rsplit_once('.')
+                .map(|(head, _)| head)
+                .unwrap_or(path)
+                .replace('\\', "/");
+            let segments: Vec<&str> = stem.split('/').filter(|s| !s.is_empty()).collect();
+            // Register every suffix: "filter/common", "common" — longest wins on insert
+            // order, and a collision simply keeps the first, which is the shallower file.
+            for start in 0..segments.len() {
+                by_suffix.entry(segments[start..].join("/")).or_insert(*idx);
+            }
+            // `mod.rs` is addressed by its directory name, not its file name.
+            if segments.last() == Some(&"mod") && segments.len() >= 2 {
+                by_suffix
+                    .entry(segments[..segments.len() - 1].join("/"))
+                    .or_insert(*idx);
+            }
+        }
+
+        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        // Only import nodes, and only those whose declaring file we can identify.
+        for (i, node) in nodes.iter().enumerate() {
+            if node.kind != GraphNodeKind::Import {
+                continue;
+            }
+            let Some(&from) = file_indices.get(&node.path) else {
+                continue;
+            };
+            let Some(to) = resolve_module(&node.label, &by_suffix) else {
+                continue;
+            };
+            if to == from || !seen.insert((from, to)) {
+                continue;
+            }
+            edges.push(GraphEdge {
+                source: from,
+                target: to,
+                kind: EdgeKind::Imports,
+                weight: 1.0,
+            });
+            let _ = i;
+        }
     }
 
     /// Run a GraphRAG query across the codebase
@@ -430,35 +500,137 @@ impl GraphRAG {
         sorted_result
     }
 
-    /// Detect communities using simple connected-component analysis
+    /// Group nodes into communities by label propagation over the undirected graph.
+    ///
+    /// This used to be connected components that followed **outgoing** edges only
+    /// (`neighbors`, not `neighbors_undirected`). On a graph whose edges run
+    /// file → symbol, reachability from a file is exactly that file's own symbols, so
+    /// every "community" was a single file and the result carried no information the
+    /// `path` field did not already have. Indexing prism's own `src/` produced 42
+    /// communities for 42 files.
+    ///
+    /// Label propagation instead: each node repeatedly adopts the label most common
+    /// among its neighbours, which lets a group form across files when imports connect
+    /// them — the thing a community is supposed to tell you.
+    ///
+    /// Deterministic, which matters because the graph is persisted and diffed: nodes
+    /// are visited in index order rather than the shuffled order the classic algorithm
+    /// uses, and ties break towards the lowest label. Bounded iterations because label
+    /// propagation is not guaranteed to converge — oscillating pairs are a known
+    /// failure mode, and a fixed ceiling is cheaper than detecting it.
     fn detect_communities(&mut self) {
-        let nodes = self.graph.node_indices().collect::<Vec<_>>();
-        let mut community_id = 0usize;
-        let mut community_assignment: Vec<Option<usize>> = vec![None; self.nodes.len()];
+        const MAX_ROUNDS: usize = 20;
 
-        for idx in &nodes {
-            let i = idx.index();
-            if community_assignment.get(i).copied().flatten().is_some() {
-                continue;
-            }
-            let mut queue = vec![*idx];
-            while let Some(node_idx) = queue.pop() {
-                let ni = node_idx.index();
-                if community_assignment.get(ni).copied().flatten().is_some() {
+        let n = self.nodes.len();
+        if n == 0 {
+            return;
+        }
+
+        // Seed every node with its own label.
+        let mut labels: Vec<usize> = (0..n).collect();
+
+        // Propagate over **files only**, across import edges.
+        //
+        // Running it over every node does not work on this shape of graph: a file has
+        // dozens of symbol children and one or two imports, so the children outvote the
+        // imports every round and each file keeps its own label. Measured on prism's
+        // own `src/` — 228 file→file import edges and still only one community spanning
+        // more than one file.
+        //
+        // A community here means a group of modules that depend on each other, so files
+        // are the right unit; symbols inherit their file's label below. Adjacency comes
+        // from petgraph rather than a second walk over `self.edges`, so centrality,
+        // traversal and communities all read the same topology.
+        let is_file: Vec<bool> = self
+            .nodes
+            .iter()
+            .map(|x| x.kind == GraphNodeKind::File)
+            .collect();
+        let adjacency: Vec<Vec<usize>> = self
+            .graph
+            .node_indices()
+            .map(|idx| {
+                let i = idx.index();
+                if !is_file.get(i).copied().unwrap_or(false) {
+                    return Vec::new();
+                }
+                let mut ns: Vec<usize> = self
+                    .graph
+                    .neighbors_undirected(idx)
+                    .map(|x| x.index())
+                    .filter(|x| *x < n && is_file.get(*x).copied().unwrap_or(false))
+                    .collect();
+                ns.sort_unstable();
+                ns.dedup();
+                ns
+            })
+            .collect();
+
+        for _ in 0..MAX_ROUNDS {
+            let mut changed = false;
+            for i in 0..n.min(adjacency.len()) {
+                let neighbours = &adjacency[i];
+                if neighbours.is_empty() {
                     continue;
                 }
-                community_assignment[ni] = Some(community_id);
-                if let Some(n) = self.nodes.get_mut(ni) {
-                    n.community = Some(community_id);
+                let mut counts: std::collections::BTreeMap<usize, usize> =
+                    std::collections::BTreeMap::new();
+                for &j in neighbours {
+                    *counts.entry(labels[j]).or_insert(0) += 1;
                 }
-                for neighbor in self.graph.neighbors(node_idx) {
-                    let ni2 = neighbor.index();
-                    if community_assignment.get(ni2).copied().flatten().is_none() {
-                        queue.push(neighbor);
+                // BTreeMap iterates in ascending key order, so `max_by_key` on the count
+                // alone would take the *last* maximum; compare on (count, Reverse(label))
+                // to land on the lowest label instead. Determinism is the point.
+                let best = counts
+                    .iter()
+                    .max_by_key(|(label, count)| (**count, std::cmp::Reverse(**label)))
+                    .map(|(label, _)| *label);
+                if let Some(best) = best {
+                    if best != labels[i] {
+                        labels[i] = best;
+                        changed = true;
                     }
                 }
             }
-            community_id += 1;
+            if !changed {
+                break;
+            }
+        }
+
+        // Symbols take their file's label: a function belongs to whatever module group
+        // its file belongs to, and giving it a label of its own would report as many
+        // communities as there are symbols.
+        let file_label_by_path: std::collections::HashMap<&str, usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, node)| node.kind == GraphNodeKind::File && *i < labels.len())
+            .map(|(i, node)| (node.path.as_str(), labels[i]))
+            .collect();
+        let inherited: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| {
+                if node.kind == GraphNodeKind::File {
+                    labels.get(i).copied().unwrap_or(i)
+                } else {
+                    file_label_by_path
+                        .get(node.path.as_str())
+                        .copied()
+                        .unwrap_or_else(|| labels.get(i).copied().unwrap_or(i))
+                }
+            })
+            .collect();
+
+        // Renumber to a dense 0..k so the ids mean "community 0, 1, 2", not "whichever
+        // node index happened to win".
+        let mut dense: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        for (i, node) in self.nodes.iter_mut().enumerate() {
+            let raw = inherited.get(i).copied().unwrap_or(i);
+            let next = dense.len();
+            let id = *dense.entry(raw).or_insert(next);
+            node.community = Some(id);
         }
     }
 
@@ -659,13 +831,16 @@ impl GraphRAG {
 
     /// List most connected architectural hub nodes in the graph (degree centrality)
     pub fn god_nodes(&self, top_k: usize) -> Vec<(&GraphNode, usize)> {
+        // Degree comes from the petgraph graph rather than a second pass over
+        // `self.edges`. The two were parallel representations of the same topology
+        // kept in step by hand, and `rebuild_graph` is what makes the graph the
+        // authoritative one — counting from the edge vector meant centrality could
+        // silently disagree with traversal.
         let mut degrees = vec![0usize; self.nodes.len()];
-        for edge in &self.edges {
-            if edge.source < self.nodes.len() {
-                degrees[edge.source] += 1;
-            }
-            if edge.target < self.nodes.len() {
-                degrees[edge.target] += 1;
+        for idx in self.graph.node_indices() {
+            let i = idx.index();
+            if i < degrees.len() {
+                degrees[i] = self.graph.neighbors_undirected(idx).count();
             }
         }
 
@@ -689,6 +864,64 @@ impl GraphRAG {
             .map(String::from)
             .collect()
     }
+}
+
+/// Map an import's module string to a file node, by suffix.
+///
+/// Handles the forms that actually appear: Rust `crate::a::b` / `super::b` / `self::b`,
+/// JS/TS `./a/b` and `../a/b`, Python `a.b.c`, Go `"pkg/a/b"`. Anything that resolves
+/// outside the indexed tree — `std::collections`, `react` — yields `None`, which is the
+/// right answer rather than a missing edge to paper over.
+fn resolve_module(
+    module: &str,
+    by_suffix: &std::collections::HashMap<String, usize>,
+) -> Option<usize> {
+    let cleaned = module
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == ';' || c == ',');
+    // Rust brings in several names at once: `use crate::a::{b, c}` — the module is the
+    // part before the brace.
+    let cleaned = cleaned
+        .split('{')
+        .next()
+        .unwrap_or(cleaned)
+        .trim_end_matches(':');
+
+    let normalised = cleaned.replace("::", "/").replace('.', "/");
+    let segments: Vec<&str> = normalised
+        .split('/')
+        .map(str::trim)
+        // `*` is a glob import (`use crate::filter::common::*`), not a path segment —
+        // leaving it in made every glob import unresolvable, which was 227 of the 228
+        // imports in this repo.
+        .filter(|s| {
+            !s.is_empty()
+                && *s != "crate"
+                && *s != "self"
+                && *s != "super"
+                && *s != "@"
+                && *s != "*"
+        })
+        .collect();
+    if segments.is_empty() {
+        return None;
+    }
+
+    // Try every contiguous run, longest first.
+    //
+    // Both ends have to move. Trailing segments are usually *items* rather than
+    // modules — `use crate::vector::TurboVecIndex` names a type, and only
+    // `crate::vector` is a file — while leading segments are crate or package
+    // qualifiers that do not appear in the path. Matching only whole suffixes resolved
+    // one import in this repo; allowing the tail to be dropped resolves the rest.
+    for start in 0..segments.len() {
+        for end in (start + 1..=segments.len()).rev() {
+            if let Some(&idx) = by_suffix.get(&segments[start..end].join("/")) {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 // ─── declaration extraction ──────────────────────────────────────────────────
@@ -1105,5 +1338,141 @@ mod decl_tests {
             .collect();
 
         assert_eq!(found, vec!["actual".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod community_tests {
+    use super::*;
+
+    /// Communities are propagated over **files** joined by imports, so the fixtures
+    /// model files: one path each, so no two share a label by inheritance.
+    fn node(id: &str) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            label: id.to_string(),
+            path: format!("{id}.rs"),
+            kind: GraphNodeKind::File,
+            token_count: 1,
+            community: None,
+            embeddings: Vec::new(),
+        }
+    }
+
+    fn symbol(id: &str, path: &str) -> GraphNode {
+        GraphNode {
+            path: path.to_string(),
+            kind: GraphNodeKind::Function,
+            ..node(id)
+        }
+    }
+
+    fn edge(a: usize, b: usize) -> GraphEdge {
+        GraphEdge {
+            source: a,
+            target: b,
+            kind: EdgeKind::References,
+            weight: 1.0,
+        }
+    }
+
+    /// `rebuild_graph` calls `detect_communities` itself, so building is enough.
+    fn graph_of(n: usize, edges: Vec<GraphEdge>) -> GraphRAG {
+        GraphRAG::build(".", (0..n).map(|i| node(&format!("n{i}"))).collect(), edges)
+    }
+
+    /// Two clusters joined by nothing must not share a community.
+    #[test]
+    fn disconnected_clusters_get_different_communities() {
+        // 0-1-2   and   3-4-5
+        let g = graph_of(6, vec![edge(0, 1), edge(1, 2), edge(3, 4), edge(4, 5)]);
+
+        let a = g.nodes[0].community.unwrap();
+        assert_eq!(g.nodes[1].community.unwrap(), a);
+        assert_eq!(g.nodes[2].community.unwrap(), a);
+
+        let b = g.nodes[3].community.unwrap();
+        assert_eq!(g.nodes[4].community.unwrap(), b);
+        assert_ne!(a, b, "unconnected clusters must not merge");
+    }
+
+    /// The bug this replaced: edges ran one way, so following only outgoing edges made
+    /// every file its own community. An undirected walk groups them.
+    #[test]
+    fn a_community_can_span_nodes_reachable_only_backwards() {
+        // 1 -> 0 <- 2 : nothing is reachable *from* 0, but all three are one group.
+        let g = graph_of(3, vec![edge(1, 0), edge(2, 0)]);
+
+        let c = g.nodes[0].community.unwrap();
+        assert_eq!(g.nodes[1].community.unwrap(), c);
+        assert_eq!(g.nodes[2].community.unwrap(), c);
+    }
+
+    #[test]
+    fn community_ids_are_dense_from_zero() {
+        let g = graph_of(4, vec![edge(0, 1), edge(2, 3)]);
+
+        let mut ids: Vec<usize> = g.nodes.iter().filter_map(|n| n.community).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1], "ids should be 0..k, got {ids:?}");
+    }
+
+    /// The graph is persisted and diffed, so the same input must give the same ids.
+    #[test]
+    fn assignment_is_deterministic() {
+        let edges = || vec![edge(0, 1), edge(1, 2), edge(3, 4)];
+        let first: Vec<_> = graph_of(5, edges())
+            .nodes
+            .iter()
+            .map(|n| n.community)
+            .collect();
+        let second: Vec<_> = graph_of(5, edges())
+            .nodes
+            .iter()
+            .map(|n| n.community)
+            .collect();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn an_isolated_node_still_gets_a_community() {
+        let g = graph_of(3, vec![edge(0, 1)]);
+
+        assert!(
+            g.nodes[2].community.is_some(),
+            "no node may be left unlabelled"
+        );
+    }
+
+    #[test]
+    fn an_empty_graph_does_not_panic() {
+        let _ = graph_of(0, vec![]);
+    }
+
+    /// A symbol belongs to whatever group its file belongs to. Labelling symbols
+    /// individually would report as many communities as there are functions.
+    #[test]
+    fn symbols_inherit_their_files_community() {
+        let nodes = vec![
+            node("a"),           // 0: file a.rs
+            node("b"),           // 1: file b.rs
+            symbol("f", "a.rs"), // 2: function in a.rs
+            symbol("g", "b.rs"), // 3: function in b.rs
+        ];
+        // a.rs imports b.rs; each file also contains its own symbol.
+        let g = GraphRAG::build(".", nodes, vec![edge(0, 1), edge(0, 2), edge(1, 3)]);
+
+        assert_eq!(
+            g.nodes[2].community, g.nodes[0].community,
+            "symbol should follow a.rs"
+        );
+        assert_eq!(
+            g.nodes[3].community, g.nodes[1].community,
+            "symbol should follow b.rs"
+        );
+        // And the two files, joined by an import, ended up together.
+        assert_eq!(g.nodes[0].community, g.nodes[1].community);
     }
 }
