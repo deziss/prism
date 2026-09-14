@@ -4,6 +4,15 @@ PRISM is an enterprise-grade AI token optimizer, transparent HTTP/HTTPS MITM pro
 
 It intercepts LLM API traffic across your system — from IDEs (Claude Code, Cursor, Windsurf), terminal CLI agents (Aider), Python/Node SDKs, or background scripts — reducing prompt and output token consumption by **50% to 90%** while maintaining zero data loss and 100% prompt cache stability.
 
+<p align="center">
+  <img src="assets/terminal.png" alt="prism gain — token analytics showing 1.8M tokens saved across 8,000 commands, with PRISM's own overhead at 426µs per run" width="700">
+</p>
+
+`prism gain` reports both clocks, which is the column a wrapper cannot fake: **cmd** is
+the wrapped command's wall time, **prism** is what PRISM itself cost. Across 8,000 real
+commands on one machine that overhead averaged **426µs — 0.01% of command time** — while
+saving 47.9% of the tokens those commands would have put into a model's context.
+
 ```
 Without PRISM: App / Agent ────────────────────────────────► api.openai.com  (2,000 tokens, $0.010)
 With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.openai.com    (600 tokens, $0.003)

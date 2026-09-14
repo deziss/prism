@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-14
+
+### Added
+- **`prism gain` screenshot in the README** (`assets/terminal.png`), showing the column
+  a wrapper cannot fake: the wrapped command's wall clock beside PRISM's own overhead.
+  Across 8,000 real commands that overhead averaged 426µs — 0.01% of command time —
+  while saving 47.9% of the tokens.
+
+### Fixed
+- The benchmark harnesses no longer hard-code an absolute path into one developer's home
+  directory; the repo resolves from the script's own location (`PRISM_BENCH_REPO`) and
+  the binary comes from `PATH` (`PRISM_BIN`).
+
 ## [0.5.0] - 2026-09-14
 
 ### Added
