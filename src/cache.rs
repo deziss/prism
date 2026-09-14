@@ -59,7 +59,7 @@ pub fn min_similarity() -> f32 {
 ///
 /// This is deliberately lexical. It detects the thing a prompt cache can actually reuse
 /// — the same question asked again, near-verbatim — and it never claims that two
-/// unrelated prompts are close, which a random-projection hash of 16 dimensions does.
+/// unrelated prompts are close, which a narrow random-projection hash does.
 pub fn prompt_similarity(a: &str, b: &str) -> f32 {
     fn norm(s: &str) -> Vec<String> {
         s.split(|c: char| !c.is_alphanumeric())
@@ -397,7 +397,7 @@ impl SemanticCache {
     /// Find top-n similar entries using TurboVec ANN search.
     /// Nearest prompts, **scored and thresholded**.
     ///
-    /// The ANN index is a recall device only: its 16-dimension sign hash is not
+    /// The ANN index is a recall device only: its feature-hash sketch is not
     /// locality sensitive, so its neighbours are candidates, not answers. Everything it
     /// returns (plus the rest of the table, which is small) is re-ranked by
     /// [`prompt_similarity`] and anything below `min_similarity` is dropped — without
@@ -477,41 +477,19 @@ impl SemanticCache {
         format!("{:x}", hasher.finish())
     }
 
-    /// 16-dim normalized SimHash/MinHash feature projection for fast ANN search
+    /// Normalized feature-hash projection for fast ANN search.
+    ///
+    /// Delegates to [`crate::vector::embed`], which is the single definition of the
+    /// projection. This used to be a byte-for-byte copy of it, with the width written
+    /// as a bare `16` in four places — two implementations that had to stay in step by
+    /// convention, where an index written by one and read by the other would silently
+    /// compare incomparable vectors. Widening `TURBO_DIM` is precisely the edit that
+    /// would have broken them apart.
+    ///
+    /// Kept as a method rather than folded into its call sites so the cache's own name
+    /// for the concept survives.
     fn pseudo_embedding(input: &str) -> Vec<f32> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut emb = vec![0.0f32; 16];
-        let words: Vec<&str> = input.split_whitespace().collect();
-        if words.is_empty() {
-            return emb;
-        }
-
-        // Word tokens
-        for word in &words {
-            let mut h = DefaultHasher::new();
-            word.to_lowercase().hash(&mut h);
-            let val = h.finish();
-            let dim = (val % 16) as usize;
-            let sign = if (val >> 4) & 1 == 1 { 1.0f32 } else { -1.0f32 };
-            emb[dim] += sign;
-        }
-
-        // Character 3-grams
-        let bytes = input.as_bytes();
-        for window in bytes.windows(3) {
-            let mut h = DefaultHasher::new();
-            window.hash(&mut h);
-            let val = h.finish();
-            let dim = (val % 16) as usize;
-            let sign = if (val >> 5) & 1 == 1 { 0.5f32 } else { -0.5f32 };
-            emb[dim] += sign;
-        }
-
-        let norm = emb.iter().map(|e| e * e).sum::<f32>().sqrt().max(0.001);
-        emb.iter_mut().for_each(|e| *e /= norm);
-        emb
+        crate::vector::embed(input)
     }
 
     fn load_entries(&mut self) -> std::io::Result<()> {
@@ -519,7 +497,11 @@ impl SemanticCache {
             let (k, v) = item.map_err(std::io::Error::other)?;
             if let Ok(entry) = serde_json::from_slice::<CacheEntry>(v.as_ref()) {
                 if let Some(ref emb) = entry.embedding {
-                    if emb.len() == 16 {
+                    // Entries written before the sketch widened carry the old width.
+                    // Skipping them keeps `TurboVecIndex::add`'s length assertion from
+                    // aborting the process on a cache that predates the change; they
+                    // are re-embedded the next time their prompt is stored.
+                    if emb.len() == crate::vector::TURBO_DIM {
                         self.turbo.add(&entry.key_hash, emb);
                     }
                 }
@@ -623,7 +605,7 @@ mod tests {
     #[test]
     fn test_pseudo_embedding_dimension_and_norm() {
         let emb = SemanticCache::pseudo_embedding("hello world test prompt");
-        assert_eq!(emb.len(), 16);
+        assert_eq!(emb.len(), crate::vector::TURBO_DIM);
         let norm: f32 = emb.iter().map(|e| e * e).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 0.01);
     }

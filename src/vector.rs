@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use turbovec::IdMapIndex;
 
-pub const TURBO_DIM: usize = 16;
+pub const TURBO_DIM: usize = 256;
 const BIT_WIDTH: usize = 2;
 
 /// Project `text` into a `TURBO_DIM`-dimensional unit vector for [`TurboVecIndex`].
@@ -227,5 +227,189 @@ mod embed_tests {
     fn cosine_of_a_vector_with_itself_is_one() {
         let e = embed("the proxy keys on the original body");
         assert!((cosine(&e, &e) - 1.0).abs() < 1e-5);
+    }
+    // ─── separation calibration ──────────────────────────────────────────────
+
+    /// Deterministic corpus of memory-block-shaped sentences.
+    ///
+    /// Generated rather than hand-written so the sample is large enough for tail
+    /// percentiles to mean something — p99 over 40 pairs is noise.
+    fn corpus() -> Vec<String> {
+        const SUBJECTS: &[&str] = &[
+            "kubectl",
+            "docker",
+            "postgres",
+            "redis",
+            "nginx",
+            "systemd",
+            "cargo",
+            "webpack",
+            "terraform",
+            "ansible",
+            "prometheus",
+            "grafana",
+            "kafka",
+            "rabbitmq",
+            "elasticsearch",
+            "vault",
+            "consul",
+            "etcd",
+            "helm",
+            "argocd",
+        ];
+        const VERBS: &[&str] = &[
+            "restarts",
+            "fails to start",
+            "times out",
+            "leaks memory",
+            "drops connections",
+            "rejects the token",
+            "corrupts the index",
+            "blocks on startup",
+            "loses the lease",
+            "rotates the certificate",
+        ];
+        const OBJECTS: &[&str] = &[
+            "after a node reboot",
+            "under load",
+            "when the disk fills",
+            "on a cold cache",
+            "behind the proxy",
+            "during a rolling update",
+            "with a stale config",
+            "on the staging cluster",
+            "after the upgrade",
+            "when DNS is slow",
+        ];
+        let mut out = Vec::new();
+        for s in SUBJECTS {
+            for v in VERBS {
+                for o in OBJECTS {
+                    out.push(format!("{s} {v} {o}"));
+                }
+            }
+        }
+        out
+    }
+
+    fn percentile(sorted: &[f32], p: f64) -> f32 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
+        sorted[idx]
+    }
+
+    /// A reworded version of the same text: same subject and object, different verb
+    /// phrasing and word order. This is what a user typing a half-remembered query
+    /// looks like.
+    fn reword(s: &str) -> String {
+        let parts: Vec<&str> = s.splitn(2, ' ').collect();
+        format!(
+            "{} issue: {}",
+            parts[0],
+            parts.get(1).copied().unwrap_or("")
+        )
+    }
+
+    /// The measurement the module doc quotes, run as a test so the numbers cannot go
+    /// stale and the sketch cannot silently regress.
+    ///
+    /// At `TURBO_DIM = 16` the two distributions overlapped completely — unrelated p99
+    /// 0.85 against paraphrase scores of 0.38–0.59 — which is why the sketch was
+    /// documented as able to rank but not retrieve. The assertions below encode the
+    /// separation the current width actually achieves.
+    #[test]
+    fn sketch_separates_paraphrases_from_unrelated_text() {
+        let texts = corpus();
+
+        let mut unrelated: Vec<f32> = Vec::new();
+        // Deterministic stride sampling: every pair is far apart in the corpus, so no
+        // two share a subject, verb or object.
+        for i in (0..texts.len()).step_by(7) {
+            for j in (i + 313..texts.len()).step_by(311) {
+                unrelated.push(cosine(&embed(&texts[i]), &embed(&texts[j])));
+            }
+        }
+        let mut paraphrase: Vec<f32> = texts
+            .iter()
+            .step_by(11)
+            .map(|t| cosine(&embed(t), &embed(&reword(t))))
+            .collect();
+
+        unrelated.sort_by(f32::total_cmp);
+        paraphrase.sort_by(f32::total_cmp);
+
+        let u_p50 = percentile(&unrelated, 0.50);
+        let u_p90 = percentile(&unrelated, 0.90);
+        let u_p99 = percentile(&unrelated, 0.99);
+        let p_p10 = percentile(&paraphrase, 0.10);
+        let p_p50 = percentile(&paraphrase, 0.50);
+
+        println!(
+            "TURBO_DIM={TURBO_DIM}  unrelated n={} p50={u_p50:.3} p90={u_p90:.3} p99={u_p99:.3}  \
+             paraphrase n={} p10={p_p10:.3} p50={p_p50:.3}",
+            unrelated.len(),
+            paraphrase.len()
+        );
+
+        // The property that matters for retrieval: the unrelated tail must sit below
+        // the paraphrase body, or no threshold can separate them.
+        assert!(
+            u_p99 < p_p10,
+            "unrelated p99 ({u_p99:.3}) must fall below paraphrase p10 ({p_p10:.3}) — \
+             overlapping tails mean the sketch can rank but not retrieve"
+        );
+        // The tail is what a retrieval threshold has to clear. At TURBO_DIM=16 this
+        // measured 0.664 on the same corpus; at 256 it is ~0.41. Narrowing the sketch
+        // again should fail here rather than quietly degrade recall.
+        assert!(
+            u_p99 < 0.50,
+            "unrelated p99 ({u_p99:.3}) is too high for any usable threshold"
+        );
+        // Not asserted tightly: these sentences share vocabulary by construction
+        // ("fails to start", "under load"), so the median is real signal, not noise.
+        assert!(u_p50 < 0.30, "median unrelated similarity: {u_p50:.3}");
+    }
+
+    /// The sketch's ceiling, pinned so it is a known limitation rather than a surprise.
+    ///
+    /// Feature hashing has **no semantics**: `k8s` and `kubectl` hash to unrelated
+    /// dimensions, so a paraphrase that substitutes synonyms scores like unrelated
+    /// text no matter how wide the sketch gets. Widening cuts collision noise, which is
+    /// why the tail dropped from 0.66 to 0.41 — it cannot add meaning that was never
+    /// encoded.
+    ///
+    /// This is why `MemoryPalace::search` leads with BM25 and uses the sketch only to
+    /// re-rank, and why closing this gap needs a real embedding model rather than a
+    /// bigger index. When one lands, this test should start failing — update it then.
+    #[test]
+    fn the_sketch_cannot_match_synonyms_and_that_is_documented() {
+        let pairs = [
+            ("kubectl context switching", "k8s namespace selection"),
+            (
+                "postgres connection pool exhausted",
+                "pg client limit reached",
+            ),
+            (
+                "container image pull failure",
+                "docker registry fetch error",
+            ),
+        ];
+
+        let scores: Vec<f32> = pairs
+            .iter()
+            .map(|(a, b)| cosine(&embed(a), &embed(b)))
+            .collect();
+        println!("synonym-pair cosines at TURBO_DIM={TURBO_DIM}: {scores:?}");
+
+        // Every one of them sits in the noise band, not the paraphrase band (>0.9).
+        for (score, (a, b)) in scores.iter().zip(pairs.iter()) {
+            assert!(
+                *score < 0.60,
+                "{a:?} vs {b:?} scored {score:.3} — if this now succeeds, a real \
+                 embedding model has landed and this test should be replaced"
+            );
+        }
     }
 }

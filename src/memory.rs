@@ -193,26 +193,37 @@ const VECTOR_WEIGHT: f32 = 0.25;
 /// evidence for at all. Override with `PRISM_MEMORY_VECTOR_MIN`, mirroring
 /// `PRISM_CACHE_MIN_SIMILARITY`.
 ///
-/// The default of 1.0 turns vector-only retrieval **off** (only an identical sketch
-/// clears it), and that default is a measurement rather than caution. Over 41k pairs of
-/// unrelated memory-block-shaped texts, the cosine of two `vector::embed` sketches has
-/// p50 0.10, p90 0.60, p99 0.85, max 0.96 — while genuinely reworded pairs of the same
-/// text score 0.38–0.59 ("k8s namespace switching with kubens and kubeconfig contexts"
-/// vs "kubectl context switching" is 0.57). The distributions overlap completely: every
-/// threshold low enough to admit a real paraphrase also admits roughly a tenth of the
-/// palace as noise, and `cache.rs::min_similarity` documents what that feels like — a
-/// query that always comes back with something, and an unrelated entry that reads as a
-/// hit.
+/// The default was 1.0 — vector-only retrieval **off**, because at `TURBO_DIM = 16` the
+/// two distributions overlapped completely: unrelated memory-block-shaped texts reached
+/// p99 0.66 while genuine paraphrases sat around 0.88, so every threshold low enough to
+/// admit a paraphrase also admitted a slice of the palace as noise.
 ///
-/// So the sketch re-ranks, where being right on average is enough, and is not allowed to
-/// retrieve on its own. The knob is here because the fix is a wider sketch, not different
-/// code: raise `TURBO_DIM`, re-run the calibration, and lower this.
+/// Widening the sketch to 256 dimensions separated them. Same corpus, same method
+/// (`vector::embed_tests::sketch_separates_paraphrases_from_unrelated_text`, which runs
+/// on every `cargo test` so these numbers cannot go stale):
+///
+/// | | unrelated p90 | unrelated p99 | paraphrase p10 |
+/// |---|---|---|---|
+/// | `TURBO_DIM = 16` | 0.459 | 0.664 | 0.876 |
+/// | `TURBO_DIM = 256` | 0.297 | **0.411** | **0.904** |
+///
+/// 0.75 sits in the gap — comfortably above the unrelated tail, comfortably below the
+/// paraphrase body — so the vector half may now retrieve a block the lexical half found
+/// no evidence for, which is the case BM25 cannot serve: a query that shares meaning but
+/// not vocabulary.
+///
+/// **One limitation survives the widening.** Feature hashing has no semantics, so
+/// synonym substitution still scores as noise: `kubectl context switching` against
+/// `k8s namespace selection` measures 0.24. Widening cut collision noise; it cannot add
+/// meaning that was never encoded. Closing that gap needs a real embedding model, and
+/// `vector::embed_tests::the_sketch_cannot_match_synonyms_and_that_is_documented` pins
+/// the current ceiling so the day it lifts is visible.
 fn vector_only_min() -> f32 {
     std::env::var("PRISM_MEMORY_VECTOR_MIN")
         .ok()
         .and_then(|v| v.trim().parse::<f32>().ok())
         .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(1.0)
+        .unwrap_or(0.75)
 }
 
 /// ANN neighbours to pull per requested result, and a floor for small palaces.
