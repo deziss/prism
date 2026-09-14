@@ -1,3 +1,4 @@
+mod ast;
 pub mod crag;
 pub mod graph_rag;
 

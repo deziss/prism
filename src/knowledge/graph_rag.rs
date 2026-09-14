@@ -270,10 +270,51 @@ impl GraphRAG {
                 embeddings: Vec::new(),
             });
 
-            // Extract declarations and imports.
+            // Declarations come from a real parse where a grammar exists, and from the
+            // line matcher otherwise. The parse is strictly better — it sees signatures
+            // that span lines, and it knows a `fn` inside a string literal is text —
+            // but it only covers the six languages with a grammar compiled in, so the
+            // matcher still carries C, Ruby, Java, PHP, shell and the rest.
+            let parsed: Option<Vec<(DeclKind, String)>> = super::ast::Lang::from_extension(ext)
+                .and_then(|l| super::ast::extract(&content, l));
+            let parsed_ok = parsed.is_some();
+
+            if let Some(decls) = parsed {
+                for (kind, name) in decls {
+                    let idx = nodes.len();
+                    nodes.push(GraphNode {
+                        id: match kind {
+                            DeclKind::Function => format!("fn:{}:{}", rel_path, name),
+                            DeclKind::Type => format!("type:{}:{}", rel_path, name),
+                        },
+                        label: name,
+                        path: rel_path.clone(),
+                        kind: match kind {
+                            DeclKind::Function => GraphNodeKind::Function,
+                            DeclKind::Type => GraphNodeKind::Class,
+                        },
+                        token_count: match kind {
+                            DeclKind::Function => 50,
+                            DeclKind::Type => 40,
+                        },
+                        community: None,
+                        embeddings: Vec::new(),
+                    });
+                    edges.push(GraphEdge {
+                        source: file_node_idx,
+                        target: idx,
+                        kind: EdgeKind::References,
+                        weight: 1.0,
+                    });
+                }
+            }
+
+            // Imports are still read line-wise even when the file was parsed: the
+            // grammars model imports very differently from one another, and the graph
+            // only needs the module string.
             //
             // `ScanState` carries block-comment and docstring state across lines, so
-            // commented-out code no longer becomes graph nodes — a false symbol is
+            // commented-out code does not become a node — a false symbol is
             // indistinguishable from a real one at query time.
             let mut scan = ScanState::default();
             for line in content.lines() {
@@ -282,7 +323,13 @@ impl GraphRAG {
                     continue;
                 }
 
-                let decl = parse_declaration(trimmed);
+                // Skip the matcher's declarations entirely when the parse already
+                // supplied them, or every symbol in a parsed file would be added twice.
+                let decl = if parsed_ok {
+                    None
+                } else {
+                    parse_declaration(trimmed)
+                };
 
                 if let Some((DeclKind::Function, ref fn_name)) = decl {
                     let fn_name = fn_name.as_str();

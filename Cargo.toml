@@ -73,6 +73,14 @@ regex = "=1.13.1"
 walkdir = "=2.5.0"
 petgraph = { version = "=0.8.3", features = ["serde-1"] }
 sha2 = "=0.11.0"
+# Real parsing for the codebase graph. Pinned exactly, like every other dependency
+# here: a grammar bump changes node kind names and would silently stop matching.
+tree-sitter = "=0.27.0"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.25.0"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-go = "=0.25.0"
 
 [profile.release]
 opt-level = 3
