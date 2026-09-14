@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`prism toon tron`** — TRON was reachable from no command while being listed as a
+  differentiator. Opt-in via `tron_enabled`, which `--set-key` now accepts (it did not,
+  so the documented way to enable it never worked). `graph_enabled` is settable too.
+- **Large diffs collapse to a synthesized stat** past `diff_max_lines` (new
+  `FilterLimits` key, default 300 output lines). Measured on `git diff HEAD~3`:
+  2.0% saved before, **99.1%** after, against rtk's 38.0% on the same input. Announced
+  with a `[+N more …]` marker, and the full diff still goes to the failure tee.
+
+### Changed
+- **Command telemetry is append-only.** `record_command_timed` rewrote the whole of
+  `history.json` per command — 7.7 ms on a 1.2 MB history, twenty times the filter pass
+  it measures. `prism cmd git status` went from 14.04 ms to **5.46 ms** (rtk: 9.56 ms).
+  Readers merge the journal transparently; the 10,000-entry cap still applies.
+- **The vector sketch is 256-dimensional** (was 16). Unrelated-text p99 similarity
+  0.664 → **0.411** against a paraphrase p10 of 0.904, which is what lets
+  `vector_only_min` drop from 1.0 (retrieval off) to 0.75. Feature hashing still has no
+  semantics — synonyms score 0.24 — and a test pins that ceiling.
+- **`cache.rs::pseudo_embedding` delegates to `vector::embed`** instead of being a
+  byte-identical copy with the width written out four times.
+- **Symbol extraction parses declarations** instead of prefix-matching lines: covers
+  `pub(crate) fn`, `async fn`, `pub const fn`, `extern "C" fn`, Python `async def`, Go
+  receivers, `export default function` and arrow bindings, and no longer indexes
+  commented-out code. 1,168 → 1,330 function nodes on prism's own `src/`.
+- **Imports resolve to file nodes**, so the graph finally has cross-file structure:
+  1 → 33 file→file edges. Communities are label propagation over the file graph rather
+  than one-component-per-file: 42 → 24, the largest holding all 16 `filter/*` modules.
+
+### Fixed
+- Stale `history.json.tmp.*` files left by writers killed between write and rename are
+  swept from `prism gain` (eighteen had accumulated here).
+- The filter dispatch/list parity test read only the last line of a wrapped match arm,
+  silently checking fewer tools than it reported.
+
+
 ## [0.4.0] - 2026-09-13
 
 ### Added
