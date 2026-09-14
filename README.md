@@ -22,8 +22,8 @@ With PRISM:    App / Agent → PRISM Proxy → Compress/Cache ──► api.open
 - **Transparent MITM Proxy (`:27181`, loopback-only)**: Transparent HTTP `CONNECT` tunnel generating per-domain certificates via local root CA. Binds `127.0.0.1` by default — widen with `prism serve --bind` only deliberately, since this process holds a CA private key and mints certificates for any host a client asks for. Automatically handles streaming SSE responses chunk-by-chunk with zero latency overhead.
 - **Prefix-Preserving & Invariant-Compliant Prompt Caching**: Strictly preserves system prompts and conversation prefixes while dynamically enforcing Anthropic cache ordering invariants (auto-promotes preceding breakpoints to `1h` when later blocks use `1h` to prevent HTTP 400 errors, strictly enforces Anthropic's 4-breakpoint limit, and honors caller-defined caching strategies). Guarantees **90% Anthropic prompt cache discounts** and **50% OpenAI discounts**.
 - **Anthropic Context Pruning**: Opts long agent runs into server-side `clear_tool_uses` context pruning, preventing stale tool results from accumulating across long agent interactions.
-- **TurboVec Quantized Semantic Cache (`prism cache`)**: 16-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
-- **GraphRAG & Graphify Integration (`prism graph`)**: Ingests and queries codebase dependency graphs (`graphify-out/graph.json` or custom graphs) for architectural explanations, shortest path tracing, and god-node detection. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
+- **TurboVec Quantized Semantic Cache (`prism cache`)**: 256-dimensional SIMD quantized vector embeddings enabling sub-millisecond local ANN semantic response retrieval. Uses an installed static embedding model when one is present, and a feature-hash sketch otherwise. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
+- **GraphRAG & Graphify Integration (`prism graph`)**: Indexes a codebase with tree-sitter (Rust, Python, JavaScript, TypeScript, TSX, Go; a line matcher covers the rest), resolves imports into file-to-file edges, and answers architectural explanations, shortest-path tracing and god-node detection. *Requires policy from a licensed [PRISM Hub](#fleet-telemetry--policy-prism-hub).*
 - **Failure Tee Mechanism (`prism cmd`)**: Strips terminal noise from build and test commands while automatically preserving raw, unstripped stdout/stderr in `~/.local/share/prism/tee/` whenever a process exits non-zero.
 - **XDG Base Directory Compliance**: Clean multi-user POSIX isolation adhering to FreeDesktop.org standards.
 
@@ -126,6 +126,7 @@ PRISM strictly complies with the **FreeDesktop.org XDG Base Directory Specificat
 | **Persistent Data** | `$XDG_DATA_HOME/prism/` | `~/.local/share/prism/` | Persistent databases and stateful assets: |
 | ↳ *CA Certificates* | `$XDG_DATA_HOME/prism/ca/` | `~/.local/share/prism/ca/` | Root CA private key (`ca.key`, mode 0600) and cert (`ca.crt`) |
 | ↳ *Semantic Cache* | `$XDG_DATA_HOME/prism/cache/` | `~/.local/share/prism/cache/` | TurboVec quantized SIMD vector embeddings cache |
+| ↳ *Embedding model* | `$XDG_DATA_HOME/prism/models/static/` | `~/.local/share/prism/models/static/` | Optional static embedding model. prism never downloads one — see [Semantic search](#semantic-search) |
 | ↳ *Knowledge Graph*| `$XDG_DATA_HOME/prism/graph/` | `~/.local/share/prism/graph/` | GraphRAG Petgraph serialized node relations |
 | ↳ *Memory Palace* | `$XDG_DATA_HOME/prism/memory/`| `~/.local/share/prism/memory/` | JSONL database for 3-tier associative memory (recall/core/archive) |
 | ↳ *Analytics* | `$XDG_DATA_HOME/prism/analytics/`| `~/.local/share/prism/analytics/` | Token logs and `proxy_events.jsonl` |
@@ -248,6 +249,36 @@ prism cmd cargo test                       # Strip noisy compiler ANSI progress,
 prism cmd git status                       # On failure, dumps raw stderr to ~/.local/share/prism/tee/
 ```
 
+#### Semantic search
+
+Memory search leads with BM25 and re-ranks with a vector. That vector comes from one of
+two projections:
+
+- **Feature-hash sketch** (default, zero setup). 256 dimensions, no model, no download.
+  It has no semantics — it relates texts that share words or character n-grams.
+- **Static embedding model** (optional). Put a model2vec-format model in
+  `~/.local/share/prism/models/static/` (`model.safetensors` + `tokenizer.json`), or
+  point `PRISM_EMBEDDING_MODEL` at one. prism is built `local-only`: it will **never**
+  fetch a model at runtime.
+
+Measured over 2,000 memory-block-shaped sentences, separation between paraphrase and
+unrelated text (higher is better):
+
+| | unrelated p99 | paraphrase p10 | margin |
+|---|---:|---:|---:|
+| sketch | 0.411 | 0.904 | 0.493 |
+| static model | 0.382 | 0.958 | **0.555** |
+
+Either way, developer abbreviations are expanded before embedding — `k8s` → `kubernetes`,
+`pg` → `postgres`, and a small curated list — because neither projection can relate a
+token it has never seen to the word it abbreviates. With the model, `kubectl context
+switching` against `k8s namespace selection` scores **0.675**; without the expansion it
+scored 0.210.
+
+Switching projections invalidates stored vectors, and both are the same width, so a
+length check cannot notice. Derived indexes key off the backend id instead and re-embed
+on a change.
+
 #### Making every agent use the filters (`prism shim`)
 
 A filter that never runs saves nothing, and the filters are the only lever whose savings
@@ -317,7 +348,7 @@ GUI-launched editors do not read your shell rc. Set `PATH` in the client instead
 
 #### Adding a tool without recompiling
 
-`prism cmd` has Rust filters for 108 commands. For a tool it does not know, drop a YAML
+`prism cmd` has Rust filters for 150 commands. For a tool it does not know, drop a YAML
 file in `~/.config/prism/filters/`:
 
 ```yaml

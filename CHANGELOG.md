@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-14
+
 ### Added
 - **`prism toon tron`** — TRON was reachable from no command while being listed as a
   differentiator. Opt-in via `tron_enabled`, which `--set-key` now accepts (it did not,
@@ -39,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TSX, Go), with the line matcher as the fallback for languages without a grammar.
   1,330 → 1,388 symbols on prism's own `src/`, including 61 of 62 multi-line signatures
   a line matcher cannot see.
+- **Developer jargon is expanded before embedding.** `k8s`, `pg`, `kubectl`, `tf` and a
+  small curated lexicon of unambiguous abbreviations are expanded to the words they
+  stand for, with the original kept. Both backends failed on these for the same reason
+  and neither more dimensions nor a bigger model fixes it: `k8s` is one token, shares no
+  characters with `kubernetes`, and is rare in general text. `kubectl context switching`
+  vs `k8s namespace selection` went **0.210 → 0.675** under the model, and the model now
+  beats the sketch on every measured synonym pair rather than two of three.
 - **Optional static embedding model.** `model2vec-rs` built `local-only`, so prism never
   fetches a model; install one in `<data>/models/static/` and `embed` uses it, otherwise
   the sketch runs unchanged. Separation margin 0.493 → 0.576. Derived indexes key off

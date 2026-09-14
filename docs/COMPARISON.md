@@ -1,6 +1,6 @@
 # PRISM vs rtk vs LeanCTX
 
-**Updated 2026-09-14.** PRISM 0.4.0 · rtk 0.45.0 (installed locally) · LeanCTX (public repo).
+**Updated 2026-09-14.** PRISM 0.5.0 · rtk 0.45.0 (installed locally) · LeanCTX (public repo).
 
 Every number in the **Measured** sections was produced on this machine on this date and
 can be reproduced with the commands given. Everything in the **Claimed** sections comes
@@ -87,7 +87,7 @@ back.
 Counts for rtk and LeanCTX are from their own public material (retrieved 2026-09-14) and
 are not independently verified.
 
-| Dimension | rtk 0.45 | LeanCTX | PRISM 0.4.0 |
+| Dimension | rtk 0.45 | LeanCTX | PRISM 0.5.0 |
 |---|---|---|---|
 | Stars | ~51k+ | ~2.4k | new |
 | Language | Rust | Rust | Rust |
@@ -220,5 +220,5 @@ Still open:
 ---
 
 *Method: single machine (Intel i7-1355U, 12 threads, Linux 7.0.0), medians of 7 runs for
-tokens and 25 interleaved runs for latency, warm page cache, prism 0.4.0 release build,
+tokens and 25 interleaved runs for latency, warm page cache, prism 0.5.0 release build,
 rtk 0.45.0. Star counts retrieved 2026-09-14 from public listings and are approximate.*

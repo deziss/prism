@@ -112,13 +112,98 @@ pub fn backend_id() -> &'static str {
 /// compile-time constant: truncation keeps the leading components, which for a static
 /// embedding carry the most variance, and short vectors are zero-padded.
 pub fn embed(text: &str) -> Vec<f32> {
+    let text = &expand_jargon(text);
     if let Some(m) = model() {
         // `encode` returns one vector per input.
-        if let Some(v) = m.encode(&[text.to_string()]).into_iter().next() {
+        if let Some(v) = m.encode(std::slice::from_ref(text)).into_iter().next() {
             return fit_to_dim(v);
         }
     }
     embed_sketch(text)
+}
+
+/// Developer abbreviations, expanded to the words they stand for.
+///
+/// Both backends fail on these for the same underlying reason, and it is not a modelling
+/// weakness that more dimensions or a bigger model would fix. `k8s` is one token; it
+/// shares no characters with `kubernetes` and, in a corpus distilled from general text,
+/// it barely appears. The sketch cannot relate them because hashing has no semantics,
+/// and the model cannot relate them because it never saw the term often enough to place
+/// it near `kubernetes`. Measured before this existed: `kubectl context switching`
+/// against `k8s namespace selection` scored 0.244 on the sketch and **0.210** on the
+/// model — the model was *worse*.
+///
+/// Expanding the abbreviation first puts both phrasings in the same vocabulary, which is
+/// the part that was actually missing. The alias is **added** rather than substituted,
+/// so a query that says `k8s` still matches a block that says `k8s`.
+///
+/// Deliberately small and domain-specific. This is a lexicon of terms whose expansion is
+/// unambiguous in developer tooling, not a general thesaurus: guessing at synonyms is how
+/// a retrieval system starts returning confident nonsense.
+const JARGON: &[(&str, &str)] = &[
+    ("k8s", "kubernetes"),
+    ("kubectl", "kubernetes cluster"),
+    ("kubens", "kubernetes namespace"),
+    ("kubectx", "kubernetes context"),
+    ("k9s", "kubernetes"),
+    ("pg", "postgres postgresql"),
+    ("psql", "postgres postgresql"),
+    ("pgbouncer", "postgres connection pool"),
+    ("db", "database"),
+    ("ns", "namespace"),
+    ("svc", "service"),
+    ("repo", "repository"),
+    ("env", "environment"),
+    ("cfg", "configuration"),
+    ("config", "configuration"),
+    ("auth", "authentication"),
+    ("authz", "authorization"),
+    ("img", "image"),
+    ("vm", "virtual machine"),
+    ("tf", "terraform"),
+    ("iac", "infrastructure as code"),
+    ("ci", "continuous integration"),
+    ("cd", "continuous deployment"),
+    ("k3s", "kubernetes"),
+    ("oom", "out of memory"),
+    ("ttl", "time to live"),
+    ("rps", "requests per second"),
+    ("lb", "load balancer"),
+    ("dns", "domain name system"),
+    ("tls", "transport layer security"),
+    ("ssl", "transport layer security"),
+    ("jwt", "json web token"),
+    ("rbac", "role based access control"),
+    ("crud", "create read update delete"),
+    ("orm", "object relational mapping"),
+    ("ci/cd", "continuous integration deployment"),
+];
+
+/// Append the expansion of any jargon term the text contains.
+///
+/// Case-insensitive on whole tokens only: `pg` expands, `pgp` and `upgrade` do not.
+/// Each expansion is added once however many times the term appears, so a text that
+/// repeats `k8s` is not dominated by the alias.
+pub fn expand_jargon(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let tokens: std::collections::HashSet<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '/')
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let mut additions: Vec<&str> = JARGON
+        .iter()
+        .filter(|(term, _)| tokens.contains(term))
+        .map(|(_, expansion)| *expansion)
+        .collect();
+    if additions.is_empty() {
+        return text.to_string();
+    }
+    // Sorted and deduped so the same input always produces the same string, which
+    // matters because the result is hashed into a cache fingerprint.
+    additions.sort_unstable();
+    additions.dedup();
+    format!("{text} {}", additions.join(" "))
 }
 
 /// Resize a model vector to `TURBO_DIM` and normalise it.
@@ -621,11 +706,19 @@ mod embed_tests {
         }
         println!("margin: sketch {sketch_margin:.3} model {model_margin:.3}");
 
-        // Asserted on the separation margin, not on any one synonym pair. The model
-        // beats the sketch on `postgres`/`pg` (0.068 -> 0.352) and
-        // `container image`/`docker registry` (0.066 -> 0.293) but loses on
-        // `kubectl`/`k8s` (0.244 -> 0.210), where `k8s` is a token the distillation
-        // barely saw. A per-pair assertion would encode that quirk as a requirement.
+        // Per-pair now, not just the margin. `kubectl`/`k8s` used to *regress* under
+        // the model (0.244 sketch -> 0.210 model) because `k8s` is a token the
+        // distillation barely saw; expanding developer jargon before embedding put both
+        // phrasings in the same vocabulary and it now scores 0.675. With that fixed
+        // there is no longer a quirk to excuse, so the test demands the win.
+        for (a, b) in syn {
+            let sketch = cosine(&embed_sketch(a), &embed_sketch(b));
+            let real = cosine(&embed(a), &embed(b));
+            assert!(
+                real > sketch,
+                "model must beat the sketch on {a:?} vs {b:?}: {real:.3} vs {sketch:.3}"
+            );
+        }
         assert!(
             model_margin >= sketch_margin,
             "installing a model must not narrow the separation: {model_margin:.3} vs {sketch_margin:.3}"
@@ -640,5 +733,50 @@ mod embed_tests {
             "unexpected backend id {id:?}"
         );
         assert_eq!(id == "static-model", model_active());
+    }
+    // ─── jargon expansion ────────────────────────────────────────────────────
+
+    #[test]
+    fn jargon_is_expanded_and_the_original_is_kept() {
+        let out = expand_jargon("k8s namespace selection");
+
+        assert!(out.contains("k8s"), "the original term must survive: {out}");
+        assert!(out.contains("kubernetes"), "{out}");
+    }
+
+    #[test]
+    fn expansion_matches_whole_tokens_only() {
+        // `pg` expands; `pgp` and `upgrade` contain it but are different words.
+        assert!(expand_jargon("pg pool").contains("postgres"));
+        assert!(!expand_jargon("pgp signature").contains("postgres"));
+        assert!(!expand_jargon("upgrade the deps").contains("postgres"));
+    }
+
+    #[test]
+    fn text_with_no_jargon_is_returned_unchanged() {
+        let input = "the quick brown fox";
+        assert_eq!(expand_jargon(input), input);
+    }
+
+    #[test]
+    fn expansion_is_case_insensitive() {
+        assert!(expand_jargon("K8S cluster").contains("kubernetes"));
+    }
+
+    /// The result is hashed into a cache fingerprint, so the same input must always
+    /// produce the same string.
+    #[test]
+    fn expansion_is_deterministic_and_deduplicated() {
+        let a = expand_jargon("k8s and k8s and kubectl");
+        let b = expand_jargon("k8s and k8s and kubectl");
+        assert_eq!(a, b);
+        assert_eq!(a.matches("kubernetes cluster").count(), 1, "{a}");
+    }
+
+    #[test]
+    fn expansion_does_not_panic_on_punctuation_or_empty_input() {
+        for t in ["", "   ", "!!!", "ci/cd pipeline", "k8s, pg; tf."] {
+            let _ = expand_jargon(t);
+        }
     }
 }

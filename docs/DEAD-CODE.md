@@ -1,6 +1,6 @@
 # Dead code report — prism
 
-Re-verified 2026-09-14 against `prism 0.4.0`. **Report only: nothing here has been
+Re-verified 2026-09-14 against `prism 0.5.0`. **Report only: nothing here has been
 removed.** Every row was confirmed by call-site search across `src/` including tests;
 where a symbol's only references are its own definition and its own test, that is stated.
 
