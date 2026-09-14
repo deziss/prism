@@ -46,7 +46,9 @@ def print_header(title: str):
     print(f"{BOLD}{CYAN}{'='*80}{RESET}\n")
 
 def run_prism_cli(subcmd: list[str]) -> tuple[int, str, str]:
-    cmd = ["/home/anshukushwaha/.local/bin/prism"] + subcmd
+    # `prism` from PATH, overridable — an absolute path into one developer's home
+    # directory made this test unrunnable anywhere else.
+    cmd = [os.environ.get("PRISM_BIN", "prism")] + subcmd
     p = subprocess.run(cmd, capture_output=True, text=True)
     return p.returncode, p.stdout, p.stderr
 

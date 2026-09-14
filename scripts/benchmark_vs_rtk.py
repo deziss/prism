@@ -41,7 +41,13 @@ def run_cmd(cmd_list, runs=1):
     return out, median_ms
 
 def benchmark_suite():
-    repo_dir = "/home/anshukushwaha/Desktop/learn/prism"
+    # Resolved from this script's location, not hard-coded: the previous absolute path
+    # pointed at one machine's home directory, so the harness silently benchmarked the
+    # wrong checkout — or nothing at all — for everyone else.
+    repo_dir = os.environ.get(
+        "PRISM_BENCH_REPO",
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
     results = []
 
     print("=" * 80)
@@ -311,7 +317,7 @@ def benchmark_suite():
     print("=" * 88)
 
     # Save to JSON artifact
-    out_path = "/home/anshukushwaha/Desktop/learn/prism/benchmark_results.json"
+    out_path = os.path.join(repo_dir, "benchmark_results.json")
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nSaved raw benchmark results to: {out_path}")
